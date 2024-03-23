@@ -1,0 +1,6 @@
+# Cargo
+/target
+
+# Custom
+.idea
+.vscode

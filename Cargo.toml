@@ -1,0 +1,20 @@
+[package]
+name = "pallet-verifier"
+version = "0.1.0"
+edition = "2021"
+description = "A tool for detecting common security vulnerabilities and insecure patterns in FRAME pallets using static program analysis techniques."
+license = "MIT OR Apache-2.0"
+authors = ["David Semakula <hello@davidsemakula.com>"]
+
+readme = "README.md"
+repository = "https://github.com/davidsemakula/pallet-verifier"
+homepage = "https://github.com/davidsemakula/pallet-verifier"
+keywords = ["FRAME", "polkadot", "substrate", "blockchain"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+itertools = "0.12.1"
+
+[package.metadata.rust-analyzer]
+# This crate uses #[feature(rustc_private)]
+rustc_private = true
