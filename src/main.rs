@@ -15,6 +15,7 @@
 //! [symbex]: https://en.wikipedia.org/wiki/Symbolic_execution
 
 #![feature(rustc_private)]
+#![feature(new_uninit)]
 
 extern crate rustc_data_structures;
 extern crate rustc_driver;
@@ -27,32 +28,42 @@ extern crate rustc_session;
 extern crate rustc_span;
 
 mod callbacks;
+mod file_loader;
 
-use std::{env, process};
+use std::{env, path::Path, process};
 
 use callbacks::EntryPointCallbacks;
+use file_loader::EntryPointFileLoader;
 
 fn main() {
     // `rustc` ignores the first argument, so we set that to "pallet-verifier".
     let command = "pallet-verifier";
 
     // Reads the crate root from CLI args.
-    let target_path = env::args()
+    let target_path_str = env::args()
         .nth(1)
         .expect("Expected target path as the first argument");
+    let target_path = Path::new(&target_path_str).to_path_buf();
 
     // Generates tractable entry points for FRAME pallet.
     let args = [
         command.to_owned(),
-        target_path,
+        target_path_str,
         // Enables dumping MIR for all functions.
         "-Zalways-encode-mir".to_owned(),
     ];
     let mut callbacks = EntryPointCallbacks::new();
     let compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
     let result = compiler.run();
-    if result.is_err() || callbacks.entry_point_content.is_none() {
+    if result.is_err() {
         process::exit(rustc_driver::EXIT_FAILURE);
     }
-    process::exit(rustc_driver::EXIT_FAILURE);
+    let Some(entry_point_content) = callbacks.entry_point_content else {
+        process::exit(rustc_driver::EXIT_FAILURE);
+    };
+
+    // Initializes `FileLoader`.
+    let _file_loader = EntryPointFileLoader::new(target_path, entry_point_content.to_owned());
+
+    process::exit(rustc_driver::EXIT_SUCCESS);
 }

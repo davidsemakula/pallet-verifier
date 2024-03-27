@@ -1,4 +1,4 @@
-//! Utilities for generating tractable entry points for FRAME dispatchable functions.
+//! `rustc` callbacks and utilities for generating tractable entry points for FRAME dispatchable functions.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{
@@ -20,7 +20,7 @@ use rustc_span::{
 
 use itertools::Itertools;
 
-/// `rustc` callbacks for generating tractable entry points for dispatchable functions.
+/// `rustc` callbacks for generating tractable entry points for FRAME dispatchable functions.
 pub struct EntryPointCallbacks {
     pub entry_point_content: Option<String>,
 }
@@ -41,7 +41,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
         queries: &'tcx rustc_interface::Queries<'tcx>,
     ) -> rustc_driver::Compilation {
         println!("Searching for dispatchable function declarations ...");
-        let mut phase = Phase::FindNames;
+        let mut phase = Phase::Names;
         let mut content = String::new();
 
         queries.global_ctxt().unwrap().enter(|tcx| {
@@ -52,7 +52,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
             }
 
             // Finds `DefId`s of dispatchable functions.
-            phase = Phase::FindIds;
+            phase = Phase::DefIds;
             println!("Searching for dispatchable function definitions ...");
             let def_ids = dispatchable_ids(&names, tcx);
             if def_ids.is_empty() {
@@ -86,7 +86,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
             }
 
             // Finds dispatchable function calls.
-            phase = Phase::FindCalls;
+            phase = Phase::Calls;
             println!("Searching for dispatchable function calls ...");
             let mut calls = FxHashMap::default();
             let hir = tcx.hir();
@@ -111,7 +111,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
 
             // Compose entry points module content and add warnings for missing missing dispatchable calls.
             println!("Generating tractable entry points for FRAME pallet ...");
-            phase = Phase::ComposeEntryPoints;
+            phase = Phase::EntryPoints;
             let mut entry_points = Vec::new();
             for def_id in def_ids.iter() {
                 let call = calls
@@ -155,12 +155,12 @@ use crate::Pallet;
             // Stops compilation if we fail to generate any tractable entry points.
             // Sets error message based on the analysis phase reached.
             let (msg, note, help) = match phase {
-                Phase::FindNames => (
+                Phase::Names => (
                     "Couldn't find any dispatchable functions",
                     Some("pallet-verifier can only analyze FRAME pallets"),
                     Some("Learn more at https://github.com/davidsemakula/pallet-verifier"),
                 ),
-                Phase::FindIds => (
+                Phase::DefIds => (
                     "Failed to find definitions for any dispatchable function",
                     Some("This is most likely a bug in pallet-verifier."),
                     Some(
@@ -168,7 +168,7 @@ use crate::Pallet;
                         https://github.com/davidsemakula/pallet-verifier/issues",
                     ),
                 ),
-                Phase::FindCalls | Phase::ComposeEntryPoints => (
+                Phase::Calls | Phase::EntryPoints => (
                     "Failed to generate tractable entry points",
                     None,
                     Some("Add some unit tests or benchmarks for all dispatchable functions."),
@@ -191,16 +191,16 @@ use crate::Pallet;
     }
 }
 
-// The analysis phase.
+/// The analysis phase.
 enum Phase {
-    // Finding dispatchable names.
-    FindNames,
-    // Finding dispatchable `DefId`s.
-    FindIds,
-    // Finding the first call for each dispatchable.
-    FindCalls,
-    // Composing entry points for dispatchables with calls.
-    ComposeEntryPoints,
+    /// Finding dispatchable names.
+    Names,
+    /// Finding dispatchable `DefId`s.
+    DefIds,
+    /// Finding a call for each dispatchable.
+    Calls,
+    /// Composing entry points for dispatchables with calls.
+    EntryPoints,
 }
 
 /// Composes an entry point.
