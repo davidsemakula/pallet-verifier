@@ -4,14 +4,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{
     def::{DefKind, Res},
     definitions::{DefPathData, DisambiguatedDefPathData},
-    Generics, ItemKind, TyKind,
+    Generics, ItemKind,
 };
 use rustc_middle::{
     mir::{
         visit::Visitor, AggregateKind, Body, HasLocalDecls, Local, LocalDecl, Location, Operand,
         Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
     },
-    ty::{AssocItemContainer, GenericArg, ImplSubject, Ty, TyCtxt},
+    ty::{AssocItemContainer, GenericArg, ImplSubject, Ty, TyCtxt, TyKind},
 };
 use rustc_span::{
     def_id::{DefId, LocalDefId},
@@ -232,21 +232,20 @@ fn compose_entry_point<'tcx>(
     let config_local_def_id = config_def_id.as_local()?;
     let config_name = def_name(config_local_def_id, tcx)?;
 
-    // Item imports.
-    let mut mentioned_items = FxHashSet::default();
-    let config_path = config_type.to_string();
-    mentioned_items.insert(config_path.to_string());
+    // Item imports and definitions.
+    let mut used_items = FxHashSet::default();
+    let mut item_defs = FxHashSet::default();
+    used_items.insert(config_def_id);
 
     // Compose arguments.
     let mut locals = FxHashSet::default();
-    let mut globals = FxHashSet::default();
     let source_map = tcx.sess.source_map();
     let local_decls = body.local_decls();
     let args_list = args
         .iter()
         .map(|arg| {
-            // Collect used locals and globals, and mentioned types for arguments.
-            process_operand(arg, &mut locals, &mut globals, &mut mentioned_items);
+            // Collect used local and item definitions, and item imports for arguments.
+            process_operand(arg, &mut locals, &mut used_items, &mut item_defs);
 
             // Add value based on user input.
             match arg {
@@ -266,12 +265,12 @@ fn compose_entry_point<'tcx>(
         })
         .join(", ");
 
-    // Collects used local definitions and mentioned item imports.
-    let mut assigns = FxHashSet::default();
+    // Collects used local and item definitions, and item imports.
+    let mut stmts = FxHashSet::default();
     let mut call_spans = vec![*fn_span];
     while !locals.is_empty() {
-        // Adds `let` assignments for locals.
-        assigns.extend(locals.iter().filter_map(|local| {
+        // Adds `let` assignments for locals to statements.
+        stmts.extend(locals.iter().filter_map(|local| {
             let local_decl = local_decls.get(*local).expect("Expected local declaration");
             let span = local_decl.source_info.span;
             let is_in_call = call_spans.iter().any(|sp| sp.contains(span));
@@ -282,19 +281,13 @@ fn compose_entry_point<'tcx>(
             }
         }));
 
-        // Collects used locals and globals, and mentioned items for current locals.
+        // Collects used local and item definitions, and item imports for current locals.
         let mut visitor = ValueVisitor::new(&locals);
         visitor.visit_body(body);
 
-        // Updates used globals and mentioned items.
-        globals.extend(visitor.globals);
-        mentioned_items.extend(visitor.types);
-        mentioned_items.extend(
-            visitor
-                .items
-                .into_iter()
-                .map(|item_id| tcx.def_path_str(item_id)),
-        );
+        // Updates used item definitions and imports.
+        item_defs.extend(visitor.item_defs);
+        used_items.extend(visitor.used_items);
 
         // Tracks child locals for next iteration.
         let mut next_locals = FxHashSet::default();
@@ -312,40 +305,37 @@ fn compose_entry_point<'tcx>(
                 call_spans.push(*fn_span);
 
                 if let Some((call_def_id, generic_args)) = func.const_fn_def() {
-                    // Adds `fn` item or its implementation subject (i.e. ADT or trait) to mentioned items.
+                    // Adds `fn` item or its implementation subject (i.e. ADT or trait) to used items.
                     if let Some(assoc_item) = tcx.opt_associated_item(call_def_id) {
                         let container_def_id = assoc_item.container_id(tcx);
                         match assoc_item.container {
                             AssocItemContainer::TraitContainer => {
-                                let trait_def_path = tcx.def_path_str(container_def_id);
-                                mentioned_items.insert(trait_def_path);
+                                used_items.insert(container_def_id);
                             }
                             AssocItemContainer::ImplContainer => {
                                 let impl_subject = tcx.impl_subject(config_def_id).skip_binder();
                                 match impl_subject {
                                     ImplSubject::Trait(trait_ref) => {
-                                        let trait_def_path = tcx.def_path_str(trait_ref.def_id);
-                                        mentioned_items.insert(trait_def_path);
+                                        used_items.insert(trait_ref.def_id);
                                     }
                                     ImplSubject::Inherent(ty) => {
-                                        add_imported_type(&ty, &mut mentioned_items);
+                                        process_type(&ty, &mut used_items);
                                     }
                                 }
                             }
                         }
                     } else {
-                        let fn_item_path = tcx.def_path_str(call_def_id);
-                        mentioned_items.insert(fn_item_path);
+                        used_items.insert(call_def_id);
                     }
 
-                    // Adds used locals and globals, and mentioned types for arguments.
+                    // Adds used local and item definitions, and item imports for arguments.
                     for arg in args {
-                        process_operand(arg, &mut next_locals, &mut globals, &mut mentioned_items);
+                        process_operand(arg, &mut next_locals, &mut used_items, &mut item_defs);
                     }
 
                     // Adds used generic types.
                     for arg_type in generic_args.iter().filter_map(|arg| arg.as_type()) {
-                        add_imported_type(&arg_type, &mut mentioned_items);
+                        process_type(&arg_type, &mut used_items);
                     }
                 }
             }
@@ -355,23 +345,23 @@ fn compose_entry_point<'tcx>(
         locals = next_locals;
     }
 
-    // Adds global definitions.
-    for global_id in globals {
+    // Adds item definitions to statements.
+    for item_id in item_defs {
         // Uses `TyCtxt::source_span` to get the full span, not just the header.
-        let decl_local_id = global_id.as_local().expect("Expected local declaration");
+        let decl_local_id = item_id.as_local().expect("Expected local declaration");
         let span = tcx.source_span(decl_local_id);
         let snippet = source_map
             .span_to_snippet(span)
             .expect("Expected snippet for span");
-        assigns.insert((snippet, span));
+        stmts.insert((snippet, span));
     }
 
     // Composes entry point.
-    let use_decls = mentioned_items
+    let use_decls = used_items
         .into_iter()
-        .map(|path| format!("use {path};"))
+        .map(|item_id| format!("use {};", tcx.def_path_str(item_id)))
         .join("\n    ");
-    let assign_decls = assigns
+    let assign_decls = stmts
         .into_iter()
         .sorted_by_key(|(_, span)| *span)
         .map(|(snippet, _)| snippet)
@@ -390,12 +380,12 @@ pub fn __pallet_verifier_entry_point__{name}() {{
 
 /// MIR visitor that collects calls to the specified dispatchables functions.
 pub struct DispatchableCallVisitor<'tcx, 'a> {
-    def_ids: &'a [DefId],
+    def_ids: &'a FxHashSet<DefId>,
     calls: FxHashMap<DefId, Terminator<'tcx>>,
 }
 
 impl<'tcx, 'a> DispatchableCallVisitor<'tcx, 'a> {
-    pub fn new(def_ids: &'a [DefId]) -> Self {
+    pub fn new(def_ids: &'a FxHashSet<DefId>) -> Self {
         Self {
             def_ids,
             calls: FxHashMap::default(),
@@ -418,13 +408,12 @@ impl<'tcx, 'a> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'a> {
     }
 }
 
-/// MIR visitor that collects used locals and globals, and mentioned items for the specified locals.
+/// MIR visitor that collects used local and item definitions, and item imports for the specified locals.
 pub struct ValueVisitor<'tcx, 'a> {
     locals: &'a FxHashSet<Local>,
     calls: Vec<Terminator<'tcx>>,
-    globals: FxHashSet<DefId>,
-    types: FxHashSet<String>,
-    items: FxHashSet<DefId>,
+    used_items: FxHashSet<DefId>,
+    item_defs: FxHashSet<DefId>,
     next_locals: FxHashSet<Local>,
 }
 
@@ -433,9 +422,8 @@ impl<'tcx, 'a> ValueVisitor<'tcx, 'a> {
         Self {
             locals,
             calls: Vec::new(),
-            globals: FxHashSet::default(),
-            types: FxHashSet::default(),
-            items: FxHashSet::default(),
+            used_items: FxHashSet::default(),
+            item_defs: FxHashSet::default(),
             next_locals: FxHashSet::default(),
         }
     }
@@ -455,17 +443,16 @@ impl<'tcx, 'a> Visitor<'tcx> for ValueVisitor<'tcx, 'a> {
                     process_operand(
                         operand,
                         &mut self.next_locals,
-                        &mut self.globals,
-                        &mut self.types,
+                        &mut self.used_items,
+                        &mut self.item_defs,
                     );
                 }
                 Rvalue::Repeat(operand, _) => {
-                    // Adds used locals and globals, and mentioned types in array operand.
                     process_operand(
                         operand,
                         &mut self.next_locals,
-                        &mut self.globals,
-                        &mut self.types,
+                        &mut self.used_items,
+                        &mut self.item_defs,
                     );
 
                     // TODO: Handle const expression for array length.
@@ -483,50 +470,49 @@ impl<'tcx, 'a> Visitor<'tcx> for ValueVisitor<'tcx, 'a> {
                     process_operand(
                         operand,
                         &mut self.next_locals,
-                        &mut self.globals,
-                        &mut self.types,
+                        &mut self.used_items,
+                        &mut self.item_defs,
                     );
-                    add_imported_type(ty, &mut self.types);
+                    process_type(ty, &mut self.used_items);
                 }
                 Rvalue::BinaryOp(_, operands) | Rvalue::CheckedBinaryOp(_, operands) => {
                     for operand in [&operands.0, &operands.1] {
                         process_operand(
                             operand,
                             &mut self.next_locals,
-                            &mut self.globals,
-                            &mut self.types,
+                            &mut self.used_items,
+                            &mut self.item_defs,
                         );
                     }
                 }
-                Rvalue::NullaryOp(_, ty) => add_imported_type(ty, &mut self.types),
+                Rvalue::NullaryOp(_, ty) => process_type(ty, &mut self.used_items),
                 Rvalue::Aggregate(kind, operands) => {
-                    // Adds used locals and globals, and mentioned types in operand.
                     for operand in operands {
                         process_operand(
                             operand,
                             &mut self.next_locals,
-                            &mut self.globals,
-                            &mut self.types,
+                            &mut self.used_items,
+                            &mut self.item_defs,
                         );
                     }
 
-                    // Adds aggregate and mentioned types.
+                    // Adds aggregate and used types.
                     match kind.as_ref() {
-                        AggregateKind::Array(ty) => add_imported_type(ty, &mut self.types),
+                        AggregateKind::Array(ty) => process_type(ty, &mut self.used_items),
                         AggregateKind::Tuple => (),
-                        // Adds ADT definition and generic argument types.
                         AggregateKind::Adt(def_id, _, generic_args, _, _) => {
-                            // Adds ADT definition.
-                            self.items.insert(*def_id);
-
-                            // Adds generic arg types.
+                            self.used_items.insert(*def_id);
                             for arg_ty in generic_args.iter().filter_map(GenericArg::as_type) {
-                                add_imported_type(&arg_ty, &mut self.types);
+                                process_type(&arg_ty, &mut self.used_items);
                             }
                         }
-                        // TODO: Handle closures and generators.
-                        AggregateKind::Closure(_, _) => todo!(),
-                        AggregateKind::Generator(_, _, _) => todo!(),
+                        AggregateKind::Closure(_, args) | AggregateKind::Generator(_, args, _) => {
+                            // Defining the closure and generator definitions is already handled
+                            // as a place assignment, so the `DefId` can be ignored.
+                            for arg_ty in args.iter().filter_map(GenericArg::as_type) {
+                                process_type(&arg_ty, &mut self.used_items);
+                            }
+                        }
                     }
                 }
             }
@@ -577,7 +563,7 @@ fn dispatchable_names(tcx: TyCtxt<'_>) -> FxHashSet<&str> {
 /// Finds `DefId`s of dispatchable functions.
 ///
 /// Dispatchable function definitions are associated `fn`s of `impl<T: Config> Pallet<T>`.
-fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> Vec<DefId> {
+fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<DefId> {
     let hir = tcx.hir();
     hir.body_owners()
         .filter_map(|local_def_id| {
@@ -603,7 +589,9 @@ fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> Vec<DefId> {
             let ItemKind::Impl(impl_item) = item.kind else {
                 return None;
             };
-            let TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = impl_item.self_ty.kind else {
+            let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) =
+                impl_item.self_ty.kind
+            else {
                 return None;
             };
             if !is_config_bounded(impl_item.generics, tcx) {
@@ -664,45 +652,105 @@ fn is_config_bounded(generics: &Generics, tcx: TyCtxt<'_>) -> bool {
     false
 }
 
-/// Collects used locals and globals, and mentioned types for an `Operand`.
+/// Collects used local and item definitions, and item imports for an `Operand`.
 fn process_operand(
     operand: &Operand,
     locals: &mut FxHashSet<Local>,
-    globals: &mut FxHashSet<DefId>,
-    types: &mut FxHashSet<String>,
+    used_items: &mut FxHashSet<DefId>,
+    item_defs: &mut FxHashSet<DefId>,
 ) {
     match operand {
         Operand::Copy(place) | Operand::Move(place) => {
-            // Add local for further evaluation.
+            // Adds local for further evaluation.
             locals.insert(place.local);
         }
         Operand::Constant(constant) => {
-            // Add global for further evaluation.
+            // Handles globals.
             let const_kind = constant.literal;
             if let rustc_middle::mir::ConstantKind::Unevaluated(uneval_const, ty) = const_kind {
                 // Add constant definition.
-                globals.insert(uneval_const.def);
+                item_defs.insert(uneval_const.def);
 
                 // Add constant type.
-                add_imported_type(&ty, types);
+                process_type(&ty, used_items);
 
                 // Add generic arg types.
                 for arg_ty in uneval_const.args.iter().filter_map(GenericArg::as_type) {
-                    add_imported_type(&arg_ty, types);
+                    process_type(&arg_ty, used_items);
                 }
             } else {
                 // Add constant type to imports.
-                add_imported_type(&const_kind.ty(), types);
+                process_type(&const_kind.ty(), used_items);
             }
         }
     }
 }
 
-/// Adds type to imported items if it's not primitive (e.g. `bool`, `int*`) or `str`.
-fn add_imported_type(ty: &Ty, imported_items: &mut FxHashSet<String>) {
-    let ty = ty.peel_refs();
-    if !ty.is_primitive() && !ty.is_str() {
-        imported_items.insert(ty.to_string());
+/// Collects used items for type.
+///
+/// Primitive types (e.g. `bool`, `int*`), `str` and unit (i.e. `()`) are ignored.
+fn process_type(ty: &Ty, used_items: &mut FxHashSet<DefId>) {
+    match ty.peel_refs().kind() {
+        TyKind::Bool
+        | TyKind::Char
+        | TyKind::Int(_)
+        | TyKind::Uint(_)
+        | TyKind::Float(_)
+        | TyKind::Str
+        | TyKind::Never
+        | TyKind::FnPtr(_)
+        | TyKind::Dynamic(_, _, _)
+        | TyKind::Param(_)
+        | TyKind::Bound(_, _)
+        | TyKind::Placeholder(_)
+        | TyKind::Infer(_)
+        | TyKind::Error(_) => (),
+        TyKind::Adt(def, args) => {
+            used_items.insert(def.did());
+            for arg_ty in args.iter().filter_map(GenericArg::as_type) {
+                process_type(&arg_ty, used_items);
+            }
+        }
+        TyKind::Foreign(def_id) => {
+            used_items.insert(*def_id);
+        }
+        TyKind::Array(ty, _) | TyKind::Slice(ty) | TyKind::Ref(_, ty, _) => {
+            process_type(ty, used_items);
+        }
+        TyKind::RawPtr(ty_mut) => {
+            process_type(&ty_mut.ty, used_items);
+        }
+        TyKind::FnDef(def_id, args) => {
+            used_items.insert(*def_id);
+            for arg_ty in args.iter().filter_map(GenericArg::as_type) {
+                process_type(&arg_ty, used_items);
+            }
+        }
+        TyKind::Closure(_, args)
+        | TyKind::Generator(_, args, _)
+        | TyKind::GeneratorWitnessMIR(_, args) => {
+            // Defining the closure and generator definitions is already handled as a place assignment,
+            // so the `DefId` can be ignored.
+            for arg_ty in args.iter().filter_map(GenericArg::as_type) {
+                process_type(&arg_ty, used_items);
+            }
+        }
+        TyKind::GeneratorWitness(types) => {
+            for ty in types.skip_binder() {
+                process_type(&ty, used_items);
+            }
+        }
+        TyKind::Tuple(types) => {
+            for ty in *types {
+                process_type(&ty, used_items);
+            }
+        }
+        TyKind::Alias(_, alias) => {
+            used_items.insert(alias.def_id);
+            for arg_ty in alias.args.iter().filter_map(GenericArg::as_type) {
+                process_type(&arg_ty, used_items);
+            }
+        }
     }
 }
 
