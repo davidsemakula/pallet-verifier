@@ -1,7 +1,10 @@
+//! `rustc` callbacks and utilities for analyzing FRAME pallet with MIRAI.
+
+/// `rustc` callbacks for analyzing FRAME pallet with MIRAI.
 pub struct VerifierCallbacks(mirai::callbacks::MiraiCallbacks);
 
-impl VerifierCallbacks {
-    pub fn new() -> Self {
+impl Default for VerifierCallbacks {
+    fn default() -> Self {
         let options = mirai::options::Options {
             diag_level: mirai::options::DiagLevel::Library,
             // These default to zero if not set, because they're `u64`

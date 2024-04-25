@@ -21,15 +21,13 @@ use rustc_span::{
 use itertools::Itertools;
 
 /// `rustc` callbacks for generating tractable entry points for FRAME dispatchable functions.
-pub struct EntryPointCallbacks {
-    pub entry_point_content: Option<String>,
-}
+#[derive(Default)]
+pub struct EntryPointCallbacks(Option<String>);
 
 impl EntryPointCallbacks {
-    pub fn new() -> Self {
-        Self {
-            entry_point_content: None,
-        }
+    // Returns the content of the generated entry points (if any).
+    pub fn content(&self) -> Option<&str> {
+        self.0.as_deref()
     }
 }
 
@@ -185,7 +183,7 @@ use crate::Pallet;
             rustc_driver::Compilation::Stop
         } else {
             // Sets entry point content and continue compilation.
-            self.entry_point_content = Some(content);
+            self.0 = Some(content);
             rustc_driver::Compilation::Continue
         }
     }

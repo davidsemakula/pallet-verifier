@@ -10,11 +10,26 @@ readme = "README.md"
 repository = "https://github.com/davidsemakula/pallet-verifier"
 homepage = "https://github.com/davidsemakula/pallet-verifier"
 keywords = ["FRAME", "polkadot", "substrate", "blockchain"]
-categories = ["command-line-utilities", "development-tools"]
+categories = ["command-line-utilities", "development-tools", "development-tools::cargo-plugins"]
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "cargo-verify-pallet"
+test = false
+path = "src/main.rs"
+
+[[bin]]
+name = "pallet-verifier"
+path = "src/driver.rs"
 
 [dependencies]
 itertools = "0.12.1"
 mirai = { git = "https://github.com/facebookexperimental/MIRAI.git" }
+rustc_tools_util = "0.3.0"
+
+[build-dependencies]
+rustc_tools_util = "0.3.0"
 
 [package.metadata.rust-analyzer]
 # This crate uses #[feature(rustc_private)]
