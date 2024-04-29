@@ -1,4 +1,4 @@
-use std::{env, process};
+use std::{env, path::Path, process};
 
 /// Shows help and version messages (and exits, if necessary).
 pub fn handle_meta_args(command: &str) {
@@ -24,4 +24,11 @@ Options:
     -V, --version  Print version
 "#
     );
+}
+
+/// Checks if the argument is a `rustc` path.
+pub fn is_rustc_path(arg: &str) -> bool {
+    Path::new(arg)
+        .file_stem()
+        .is_some_and(|name| name == "rustc")
 }

@@ -4,7 +4,6 @@ mod cli_utils;
 
 use std::{
     env,
-    path::PathBuf,
     process::{self, Command},
 };
 
@@ -19,10 +18,12 @@ fn main() {
         .nth(1)
         .expect("Expected a valid cargo subcommand as the first argument.");
     match sub_command.as_str() {
-        // Calls `cargo` with `pallet-verifier` set as `RUSTC_WRAPPER`.
+        // Calls `cargo` with `pallet-verifier` (specifically this cargo subcommand) set as `RUSTC_WRAPPER`.
         "verify-pallet" => call_cargo(),
         // Calls `pallet-verifier` for the "primary" package, and `rustc` for dependencies.
-        "rustc" => {
+        // NOTE: Handles `cargo rustc` since `pallet-verifier` (specifically this cargo subcommand) is set as `RUSTC_WRAPPER`.
+        // Ref: <https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-reads>
+        command if cli_utils::is_rustc_path(command) => {
             let is_primary_package = env::var("CARGO_PRIMARY_PACKAGE").is_ok();
             if is_primary_package {
                 // Analyzes "primary" package with `pallet-verifier`.
@@ -39,14 +40,14 @@ fn main() {
     }
 }
 
-/// Calls `cargo` with `pallet-verifier` set as `RUSTC_WRAPPER`.
+/// Calls `cargo` with `pallet-verifier` (specifically this cargo subcommand) set as `RUSTC_WRAPPER`.
 fn call_cargo() {
     // Builds cargo command.
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cmd.arg("check");
 
-    // Sets `RUSTC_WRAPPER` to pallet-verifier.
-    let path = pallet_verifier_path().expect("Expected valid executable path");
+    // Sets `RUSTC_WRAPPER` to `pallet-verifier` (specifically this cargo subcommand).
+    let path = env::current_exe().expect("Expected valid executable path");
     cmd.env("RUSTC_WRAPPER", path);
 
     // Enables compilation of MIRAI-only code, and dumping MIR for all functions (for dependencies).
@@ -71,8 +72,13 @@ fn call_rustc() {
 
 /// Calls `pallet-verifier`.
 fn call_pallet_verifier() {
-    // Builds `pallet-verifier` command.
-    let path = pallet_verifier_path().expect("Expected valid executable path");
+    // Builds `pallet-verifier` command (specifically for the standalone executable).
+    let mut path = env::current_exe()
+        .expect("Expected valid executable path")
+        .with_file_name("pallet-verifier");
+    if cfg!(windows) {
+        path.set_extension("exe");
+    }
     let mut cmd = Command::new(path);
     cmd.args(env::args().skip(2));
 
@@ -80,16 +86,7 @@ fn call_pallet_verifier() {
     exec_cmd(&mut cmd);
 }
 
-// Returns the path for the `pallet-verifier` executable.
-fn pallet_verifier_path() -> Result<PathBuf, std::io::Error> {
-    let mut path = env::current_exe()?.with_file_name("pallet-verifier");
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
-    Ok(path)
-}
-
-// Executes command (exits on failure).
+/// Executes command (exits on failure).
 fn exec_cmd(cmd: &mut Command) {
     let exit_status = cmd
         .spawn()

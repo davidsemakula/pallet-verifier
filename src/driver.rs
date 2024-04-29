@@ -20,9 +20,11 @@ fn main() {
     let mut cli_args: Vec<_> = env::args().collect();
     // Setting `RUSTC_WRAPPER` causes Cargo to pass 'rustc' as the first argument.
     // We're invoking the compiler programmatically, so we remove it (if present).
+    // Ref: <https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-reads>
     // Ref: <https://github.com/rust-lang/rust-clippy/blob/caad063933e5012b152d883a6c03f1d0ad5ec6a8/src/driver.rs#L244-L251>
-    let rustc_wrapper_mode =
-        cli_args.get(1).map(Path::new).and_then(Path::file_stem) == Some("rustc".as_ref());
+    let rustc_wrapper_mode = cli_args
+        .get(1)
+        .is_some_and(|arg| cli_utils::is_rustc_path(arg));
     if rustc_wrapper_mode {
         cli_args.remove(1);
     }
@@ -43,10 +45,11 @@ fn main() {
     };
 
     // Initializes "virtual" entry point `FileLoader`.
-    // Reads the analysis target as the "normalized" first argument from CLI args.
+    // Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
     let target_path_str = cli_args
-        .get(1)
-        .expect("Expected target path as the first argument");
+        .iter()
+        .find(|arg| Path::new(arg).extension().is_some_and(|ext| ext == "rs"))
+        .expect("Expected target path as the first `*.rs` argument");
     let target_path = Path::new(&target_path_str).to_path_buf();
     let entry_point_file_loader =
         EntryPointFileLoader::new(target_path, entry_point_content.to_owned());
