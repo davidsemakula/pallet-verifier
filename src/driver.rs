@@ -31,8 +31,12 @@ fn main() {
 
     // Generates tractable entry points for FRAME pallet.
     let mut entry_point_args = cli_args.clone();
-    // Enables dumping MIR for all functions.
-    entry_point_args.push("-Zalways-encode-mir".to_owned());
+    entry_point_args.extend([
+        // Enables compilation of unit tests.
+        "--cfg=test".to_owned(),
+        // Enables dumping MIR for all functions.
+        "-Zalways-encode-mir".to_owned(),
+    ]);
     let mut entry_point_callbacks = EntryPointCallbacks::default();
     let entry_point_compiler =
         rustc_driver::RunCompiler::new(&entry_point_args, &mut entry_point_callbacks);
@@ -57,6 +61,8 @@ fn main() {
     // Analyzes FRAME pallet with MIRAI.
     let mut verifier_args = cli_args.clone();
     verifier_args.extend([
+        // Enables compilation of unit tests.
+        "--cfg=test".to_owned(),
         // Enables compilation of MIRAI only code.
         "--cfg=mirai".to_owned(),
         // Enables dumping MIR for all functions.
