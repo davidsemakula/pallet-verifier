@@ -377,8 +377,11 @@ fn compose_entry_point<'tcx>(
         .into_iter()
         .filter_map(|item_id| {
             let item_kind = tcx.def_kind(item_id);
-            (!matches!(item_kind, DefKind::Closure | DefKind::Generator))
-                .then_some(format!("use {};", tcx.def_path_str(item_id)))
+            (!matches!(item_kind, DefKind::Closure | DefKind::Generator)).then_some(format!(
+                "use {}{};",
+                if item_id.is_local() { "crate::" } else { "" },
+                tcx.def_path_str(item_id)
+            ))
         })
         .join("\n    ");
     let assign_decls = stmts
