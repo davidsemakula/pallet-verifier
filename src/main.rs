@@ -53,6 +53,11 @@ fn call_cargo() {
     // Enables compilation of MIRAI-only code, and dumping MIR for all functions (for dependencies).
     cmd.env("RUSTFLAGS", "--cfg=mirai -Zalways_encode_mir");
 
+    // Explicitly set toolchain to match `pallet-verifier`.
+    if let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") {
+        cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
+
     // Forwards relevant CLI args (skips cargo and subcommand args).
     cmd.args(env::args().skip(2));
 
