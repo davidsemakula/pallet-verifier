@@ -22,10 +22,10 @@ fn main() {
     // We're invoking the compiler programmatically, so we remove it (if present).
     // Ref: <https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-reads>
     // Ref: <https://github.com/rust-lang/rust-clippy/blob/caad063933e5012b152d883a6c03f1d0ad5ec6a8/src/driver.rs#L244-L251>
-    let rustc_wrapper_mode = cli_args
+    let is_rustc_wrapper_mode = cli_args
         .get(1)
         .is_some_and(|arg| cli_utils::is_rustc_path(arg));
-    if rustc_wrapper_mode {
+    if is_rustc_wrapper_mode {
         cli_args.remove(1);
     }
 

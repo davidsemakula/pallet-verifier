@@ -30,7 +30,7 @@ fn main() {
                 call_pallet_verifier();
             } else {
                 // Compiles dependencies with `rustc`.
-                call_rustc();
+                cli_utils::call_rustc(env::args().skip(2));
             }
         }
         _ => {
@@ -62,17 +62,7 @@ fn call_cargo() {
     cmd.args(env::args().skip(2));
 
     // Executes command (exits on failure).
-    exec_cmd(&mut cmd);
-}
-
-/// Calls `rustc`.
-fn call_rustc() {
-    // Builds `rustc` command.
-    let mut cmd = Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into()));
-    cmd.args(env::args().skip(2));
-
-    // Executes command (exits on failure).
-    exec_cmd(&mut cmd);
+    cli_utils::exec_cmd(&mut cmd);
 }
 
 /// Calls `pallet-verifier`.
@@ -88,17 +78,5 @@ fn call_pallet_verifier() {
     cmd.args(env::args().skip(2));
 
     // Executes command (exits on failure).
-    exec_cmd(&mut cmd);
-}
-
-/// Executes command (exits on failure).
-fn exec_cmd(cmd: &mut Command) {
-    let exit_status = cmd
-        .spawn()
-        .expect("Failed to run cmd")
-        .wait()
-        .expect("Failed to wait for cmd");
-    if !exit_status.success() {
-        process::exit(exit_status.code().unwrap_or(-1));
-    }
+    cli_utils::exec_cmd(&mut cmd);
 }
