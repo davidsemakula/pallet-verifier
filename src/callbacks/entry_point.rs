@@ -22,12 +22,12 @@ use itertools::Itertools;
 
 /// `rustc` callbacks for generating tractable entry points for FRAME dispatchable functions.
 #[derive(Default)]
-pub struct EntryPointCallbacks(Option<String>);
+pub struct EntryPointCallbacks(FxHashMap<String, String>);
 
 impl EntryPointCallbacks {
-    // Returns the content of the generated entry points (if any).
-    pub fn content(&self) -> Option<&str> {
-        self.0.as_deref()
+    /// Returns the generated tractable entry points (if any) as a `name` -> `content` map.
+    pub fn entry_points(&self) -> &FxHashMap<String, String> {
+        &self.0
     }
 }
 
@@ -40,7 +40,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
     ) -> rustc_driver::Compilation {
         println!("Searching for dispatchable function declarations ...");
         let mut phase = Phase::Names;
-        let mut content = String::new();
+        let mut entry_points = FxHashMap::default();
 
         queries.global_ctxt().unwrap().enter(|tcx| {
             // Find names of dispatchable functions.
@@ -110,13 +110,12 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
             // Compose entry points module content and add warnings for missing missing dispatchable calls.
             println!("Generating tractable entry points for FRAME pallet ...");
             phase = Phase::EntryPoints;
-            let mut entry_points = Vec::new();
             for def_id in def_ids.iter() {
                 let call = calls
                     .get(def_id)
                     .and_then(|(body, terminator)| compose_entry_point(terminator, body, tcx));
-                if let Some(call) = call {
-                    entry_points.push(call);
+                if let Some((name, content)) = call {
+                    entry_points.insert(name, content);
                 } else {
                     let local_def_id = def_id
                         .as_local()
@@ -136,20 +135,9 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     warning.emit();
                 }
             }
-            if !entry_points.is_empty() {
-                content = entry_points.iter().join("\n\n");
-                content = format!(
-                    r"
-#![allow(unused)]
-#![allow(nonstandard_style)]
-use crate::Pallet;
-
-{content}"
-                );
-            }
         });
 
-        if content.is_empty() {
+        if entry_points.is_empty() {
             // Stops compilation if we fail to generate any tractable entry points.
             // Sets error message based on the analysis phase reached.
             let (msg, note, help) = match phase {
@@ -183,7 +171,7 @@ use crate::Pallet;
             rustc_driver::Compilation::Stop
         } else {
             // Sets entry point content and continue compilation.
-            self.0 = Some(content);
+            self.0 = entry_points;
             rustc_driver::Compilation::Continue
         }
     }
@@ -201,14 +189,14 @@ enum Phase {
     EntryPoints,
 }
 
-/// Composes an entry point.
+/// Composes an entry point (returns a `name` and `content` pair).
 ///
 /// NOTE: This function assumes the terminator wraps a call to a dispatchable function, but doesn't verify it.
 fn compose_entry_point<'tcx>(
     terminator: &Terminator<'tcx>,
     body: &Body<'tcx>,
     tcx: TyCtxt<'tcx>,
-) -> Option<String> {
+) -> Option<(String, String)> {
     let TerminatorKind::Call {
         func,
         args,
@@ -222,7 +210,7 @@ fn compose_entry_point<'tcx>(
 
     // Dispatchable name.
     let local_def_id = def_id.as_local()?;
-    let name = def_name(local_def_id, tcx)?;
+    let dispatchable_name = def_name(local_def_id, tcx)?;
 
     // `T: Config` type and name.
     let config_type = generic_args.first()?.as_type()?;
@@ -389,16 +377,20 @@ fn compose_entry_point<'tcx>(
         .sorted_by_key(|(_, span)| *span)
         .map(|(snippet, _)| snippet)
         .join("\n    ");
-    Some(format!(
+    let name = format!("__pallet_verifier_entry_point__{dispatchable_name}");
+    let content = format!(
         r"
-pub fn __pallet_verifier_entry_point__{name}() {{
+#[allow(unused)]
+#[allow(nonstandard_style)]
+pub fn {name}() {{
     {use_decls}
 
     {assign_decls}
 
-    Pallet::<{config_name}>::{name}({args_list});
+    crate::Pallet::<{config_name}>::{dispatchable_name}({args_list});
 }}"
-    ))
+    );
+    Some((name, content))
 }
 
 /// MIR visitor that collects calls to the specified dispatchables functions.

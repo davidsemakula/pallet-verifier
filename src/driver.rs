@@ -8,6 +8,7 @@ mod cli_utils;
 
 use std::{env, path::Path, process};
 
+use itertools::Itertools;
 use pallet_verifier::{EntryPointCallbacks, EntryPointFileLoader, VerifierCallbacks};
 
 const COMMAND: &str = "pallet-verifier";
@@ -44,9 +45,11 @@ fn main() {
     if entry_point_result.is_err() {
         process::exit(rustc_driver::EXIT_FAILURE);
     }
-    let Some(entry_point_content) = entry_point_callbacks.content() else {
+    let entry_points = entry_point_callbacks.entry_points();
+    if entry_points.is_empty() {
         process::exit(rustc_driver::EXIT_FAILURE);
     };
+    let entry_point_content = entry_points.values().join("\n\n");
 
     // Initializes "virtual" entry point `FileLoader`.
     // Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
