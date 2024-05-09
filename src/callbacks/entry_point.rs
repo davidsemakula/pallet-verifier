@@ -3,7 +3,6 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{
     def::{DefKind, Res},
-    definitions::{DefPathData, DisambiguatedDefPathData},
     Generics, ItemKind,
 };
 use rustc_middle::{
@@ -13,12 +12,11 @@ use rustc_middle::{
     },
     ty::{AssocItemContainer, GenericArg, ImplSubject, Ty, TyCtxt, TyKind},
 };
-use rustc_span::{
-    def_id::{DefId, LocalDefId},
-    BytePos, Span, Symbol,
-};
+use rustc_span::{def_id::DefId, BytePos, Span, Symbol};
 
 use itertools::Itertools;
+
+use super::utils;
 
 /// `rustc` callbacks for generating tractable entry points for FRAME dispatchable functions.
 #[derive(Default)]
@@ -64,7 +62,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     .filter_map(|def_id| {
                         def_id
                             .as_local()
-                            .and_then(|local_def_id| def_name(local_def_id, tcx))
+                            .and_then(|local_def_id| utils::def_name(local_def_id, tcx))
                     })
                     .collect();
                 for name in names {
@@ -120,8 +118,8 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     let local_def_id = def_id
                         .as_local()
                         .expect("Expected local def id for dispatchable");
-                    let name =
-                        def_name(local_def_id, tcx).expect("Expected a name for dispatchable");
+                    let name = utils::def_name(local_def_id, tcx)
+                        .expect("Expected a name for dispatchable");
                     let mut warning = compiler
                         .session()
                         .struct_warn(format!("Couldn't find a call for dispatchable: `{name}`"));
@@ -210,13 +208,13 @@ fn compose_entry_point<'tcx>(
 
     // Dispatchable name.
     let local_def_id = def_id.as_local()?;
-    let dispatchable_name = def_name(local_def_id, tcx)?;
+    let dispatchable_name = utils::def_name(local_def_id, tcx)?;
 
     // `T: Config` type and name.
     let config_type = generic_args.first()?.as_type()?;
     let config_def_id = config_type.ty_adt_def()?.did();
     let config_local_def_id = config_def_id.as_local()?;
-    let config_name = def_name(config_local_def_id, tcx)?;
+    let config_name = utils::def_name(config_local_def_id, tcx)?;
 
     // Item imports and definitions.
     let mut used_items = FxHashSet::default();
@@ -558,7 +556,7 @@ fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<DefId
             if !matches!(body_owner_kind, rustc_hir::BodyOwnerKind::Fn) {
                 return None;
             }
-            let fn_name = def_name(local_def_id, tcx)?;
+            let fn_name = utils::def_name(local_def_id, tcx)?;
             if !names.contains(&fn_name.as_str()) {
                 return None;
             }
@@ -589,28 +587,11 @@ fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<DefId
             };
             let is_pallet_struct_impl = struct_def_id
                 .as_local()
-                .and_then(|struct_local_def_id| def_name(struct_local_def_id, tcx))
+                .and_then(|struct_local_def_id| utils::def_name(struct_local_def_id, tcx))
                 .is_some_and(|struct_name| struct_name.as_str() == "Pallet");
             is_pallet_struct_impl.then_some(local_def_id.to_def_id())
         })
         .collect()
-}
-
-/// Returns the name of the `LocalDefId` as a `Symbol` (if any).
-fn def_name(local_def_id: LocalDefId, tcx: TyCtxt<'_>) -> Option<Symbol> {
-    let def_path = tcx.hir().def_path(local_def_id);
-    let def_path_data = def_path.data.last()?;
-    match def_path_data {
-        DisambiguatedDefPathData {
-            data:
-                DefPathData::MacroNs(name)
-                | DefPathData::LifetimeNs(name)
-                | DefPathData::TypeNs(name)
-                | DefPathData::ValueNs(name),
-            ..
-        } => Some(*name),
-        _ => None,
-    }
 }
 
 /// Verifies that the generics only include a `<T: Config>` bound.
@@ -626,7 +607,7 @@ fn is_config_bounded(generics: &Generics, tcx: TyCtxt<'_>) -> bool {
                     if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
                         if let Some(trait_name) = trait_def_id
                             .as_local()
-                            .and_then(|trait_local_def_id| def_name(trait_local_def_id, tcx))
+                            .and_then(|trait_local_def_id| utils::def_name(trait_local_def_id, tcx))
                         {
                             return trait_name.as_str() == "Config";
                         }

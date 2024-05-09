@@ -24,9 +24,10 @@ name = "pallet-verifier"
 path = "src/driver.rs"
 
 [dependencies]
-itertools = "0.12.1"
+itertools = "0.13.0"
 mirai = { git = "https://github.com/facebookexperimental/MIRAI.git" }
 rustc_tools_util = "0.3.0"
+tempfile = "3.10.1"
 
 [build-dependencies]
 rustc_tools_util = "0.3.0"

@@ -6,7 +6,7 @@ use rustc_span::source_map::RealFileLoader;
 use std::path::Path;
 use std::path::PathBuf;
 
-const ENTRY_POINT_MOD_NAME: &str = "__pallet_verifier_entry_point";
+const ENTRY_POINT_MOD_NAME: &str = "__pallet_verifier_entry_points";
 
 /// A `FileLoader` that "virtually" adds an entry point module to the crate.
 pub struct EntryPointFileLoader {

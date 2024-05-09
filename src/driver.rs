@@ -3,8 +3,11 @@
 #![feature(rustc_private)]
 
 extern crate rustc_driver;
+extern crate rustc_hash;
 
 mod cli_utils;
+
+use rustc_hash::FxHashSet;
 
 use std::{env, path::Path, process};
 
@@ -49,9 +52,9 @@ fn main() {
     if entry_points.is_empty() {
         process::exit(rustc_driver::EXIT_FAILURE);
     };
-    let entry_point_content = entry_points.values().join("\n\n");
 
-    // Initializes "virtual" entry point `FileLoader`.
+    // Initializes "virtual" entry point `FileLoader` for entry point content.
+    let entry_point_content = entry_points.values().join("\n\n");
     // Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
     let target_path_str = cli_args
         .iter()
@@ -71,7 +74,8 @@ fn main() {
         // Enables dumping MIR for all functions.
         "-Zalways-encode-mir".to_owned(),
     ]);
-    let mut verifier_callbacks = VerifierCallbacks::default();
+    let entry_point_names: FxHashSet<_> = entry_points.keys().cloned().collect();
+    let mut verifier_callbacks = VerifierCallbacks::new(entry_point_names);
     let mut verifier_compiler =
         rustc_driver::RunCompiler::new(&verifier_args, &mut verifier_callbacks);
     verifier_compiler.set_file_loader(Some(Box::new(entry_point_file_loader)));
