@@ -365,7 +365,7 @@ fn compose_entry_point<'tcx>(
                 .into_iter()
                 .map(|config_param| (config_param.span, config_name.as_str()))
                 .chain(
-                    // We use 1000 artibrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
+                    // We use 1000 arbitrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
                     // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#k-limits>
                     // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/k_limits.rs>
                     int_const_generic_params
