@@ -4,6 +4,7 @@ mod cli_utils;
 
 use std::{
     env,
+    path::Path,
     process::{self, Command},
 };
 
@@ -20,16 +21,34 @@ fn main() {
     match sub_command.as_str() {
         // Calls `cargo` with `pallet-verifier` (specifically this cargo subcommand) set as `RUSTC_WRAPPER`.
         "verify-pallet" => call_cargo(),
-        // Calls `pallet-verifier` for the "primary" package, and `rustc` for dependencies.
+        // Calls `pallet-verifier` for the "primary" package, and `rustc` for dependencies and build scripts.
         // NOTE: Handles `cargo rustc` since `pallet-verifier` (specifically this cargo subcommand) is set as `RUSTC_WRAPPER`.
         // Ref: <https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-reads>
+        // Ref: <https://doc.rust-lang.org/cargo/reference/build-scripts.html>
         command if cli_utils::is_rustc_path(command) => {
             let is_primary_package = env::var("CARGO_PRIMARY_PACKAGE").is_ok();
-            if is_primary_package {
+            // Checks whether the current target is a build script.
+            let is_build_script = || {
+                // First `*.rs` CLI argument should be a `build.rs` file.
+                env::args().any(|arg| {
+                    Path::new(&arg)
+                        .file_name()
+                        .is_some_and(|ext| ext == "build.rs")
+                }) &&
+                // `--crate-name` arg should be `build_script_build`.
+                env::args().enumerate().any(|(idx, arg)| {
+                    arg == "build_script_build"
+                        && idx > 0
+                        && env::args()
+                            .nth(idx - 1)
+                            .is_some_and(|arg| arg.ends_with("crate-name"))
+                })
+            };
+            if is_primary_package && !is_build_script() {
                 // Analyzes "primary" package with `pallet-verifier`.
                 call_pallet_verifier();
             } else {
-                // Compiles dependencies with `rustc`.
+                // Compiles dependencies and build scripts with `rustc`.
                 cli_utils::call_rustc(env::args().skip(2));
             }
         }
