@@ -110,6 +110,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     entry_points.insert(name, content);
                     used_items.extend(local_used_items.into_iter().filter_map(|item_id| {
                         let item_kind = tcx.def_kind(item_id);
+                        // Adds imports for stable (or feature enabled unstable) items.
                         (matches!(
                             item_kind,
                             DefKind::Mod
@@ -120,6 +121,9 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                                 | DefKind::Trait
                                 | DefKind::Macro(_)
                                 | DefKind::ForeignTy
+                        ) && matches!(
+                            tcx.eval_stability(item_id, None, rustc_span::DUMMY_SP, None),
+                            rustc_middle::middle::stability::EvalResult::Allow
                         ))
                         .then_some(format!(
                             "use {}{};",
@@ -234,7 +238,7 @@ fn compose_entry_point<'tcx>(
 ) -> Option<(String, String, FxHashSet<DefId>)> {
     let TerminatorKind::Call {
         func,
-        args: fn_args,
+        args: call_args,
         fn_span,
         ..
     } = &terminator.kind
@@ -271,57 +275,44 @@ fn compose_entry_point<'tcx>(
     let mut item_defs = FxHashSet::default();
     used_items.insert(config_def_id);
 
-    // Compose entry point params, and corresponding dispatchable call arg vars.
+    // Compose entry point params, and corresponding dispatchable call args.
     let mut params = Vec::new();
-    let mut arg_vars = FxHashMap::default();
-    let source_map = tcx.sess.source_map();
+    let mut args = Vec::new();
+    let mut locals = FxHashSet::default();
     let hir_id = hir.local_def_id_to_hir_id(fn_local_def_id);
     let hir_body_id = hir.body_owned_by(fn_local_def_id);
     let hir_body = hir.body(hir_body_id);
     let fn_params = hir_body.params;
     let fn_decl = hir.fn_decl_by_hir_id(hir_id)?;
     let fn_params_ty = fn_decl.inputs;
+    let source_map = tcx.sess.source_map();
+    let local_decls = owner_body.local_decls();
     for (idx, fn_param) in fn_params.iter().enumerate() {
-        let param_ty = fn_params_ty.get(idx).expect("Expected param type");
-        if matches!(
-            param_ty.peel_refs().kind,
-            rustc_hir::TyKind::BareFn(_)
-                | rustc_hir::TyKind::TraitObject(_, _, _)
-                | rustc_hir::TyKind::OpaqueDef(_, _, _)
-        ) {
-            // No entry point param, nor dispatchable call arg var for function pointers & closures,
-            // trait objects and opaque types.
-            continue;
-        }
-
         // Collects used items, generics and anonymous constants for param type.
-        let mut generic_args = Vec::new();
+        let param_ty = fn_params_ty.get(idx).expect("Expected param type");
+        let mut types = vec![param_ty];
         let mut anon_consts = Vec::new();
-        process_hir_ty(
-            param_ty,
-            &mut used_items,
-            &mut generic_args,
-            &mut anon_consts,
-        );
+        process_hir_ty(param_ty, &mut used_items, &mut types, &mut anon_consts);
         let mut config_generic_params = Vec::new();
-        let mut has_non_config_generic_params = false;
         let mut int_const_generic_params = Vec::new();
+        let mut has_non_config_generic_params = false;
+        let mut has_raw_indirection_dynamic_or_opaque_types = false;
         let mut has_non_int_const_generic_params = false;
-        for gen_arg in generic_args {
-            match gen_arg {
-                rustc_hir::GenericArg::Type(arg_ty) => {
-                    if let Some((generic_param_def_id, _)) = arg_ty.as_generic_param() {
-                        if generic_param_def_id == config_param_def_id {
-                            config_generic_params.push(arg_ty);
-                        } else {
-                            has_non_config_generic_params = true;
-                        }
-                    }
+        for ty in types.iter() {
+            if let Some((generic_param_def_id, _)) = ty.as_generic_param() {
+                if generic_param_def_id == config_param_def_id {
+                    config_generic_params.push(ty);
+                } else {
+                    has_non_config_generic_params = true;
                 }
-                rustc_hir::GenericArg::Const(const_arg) => {
-                    anon_consts.push(const_arg.value);
-                }
-                rustc_hir::GenericArg::Lifetime(_) | rustc_hir::GenericArg::Infer(_) => (),
+            } else {
+                has_raw_indirection_dynamic_or_opaque_types |= matches!(
+                    ty.kind,
+                    rustc_hir::TyKind::Ptr(_)
+                        | rustc_hir::TyKind::BareFn(_)
+                        | rustc_hir::TyKind::OpaqueDef(_, _, _)
+                        | rustc_hir::TyKind::TraitObject(_, _, _)
+                )
             }
         }
         for anon_const in anon_consts {
@@ -339,12 +330,6 @@ fn compose_entry_point<'tcx>(
             }
         }
 
-        if has_non_config_generic_params || has_non_int_const_generic_params {
-            // No entry point param, nor dispatchable call arg var for params with
-            // non-`T: Config` generic args, or non-integer const generics.
-            continue;
-        }
-
         // Creates a unique param name.
         let pat = fn_param.pat;
         let param_name = source_map
@@ -352,54 +337,62 @@ fn compose_entry_point<'tcx>(
             .expect("Expected snippet for span");
         let unique_name = format!("{param_name}__{fn_name}");
 
-        // Composes entry point param, and corresponding dispatchable call argument vars,
-        // by replacing `T: Config` param types with concrete `Config` type,
-        // and integer const generic params with an arbitrary large value.
-        let mut user_ty = source_map
-            .span_to_snippet(fn_param.ty_span)
-            .expect("Expected snippet for span");
-        if !config_generic_params.is_empty() || !int_const_generic_params.is_empty() {
-            let offset = fn_param.ty_span.lo().to_usize();
-            let mut offset_shift = 0;
-            let replacements = config_generic_params
-                .into_iter()
-                .map(|config_param| (config_param.span, config_name.as_str()))
-                .chain(
-                    // We use 1000 arbitrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
-                    // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#k-limits>
-                    // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/k_limits.rs>
-                    int_const_generic_params
-                        .into_iter()
-                        .map(|(config_expr, _)| (config_expr.span, "1000")),
-                )
-                .unique_by(|(span, _)| *span)
-                .sorted_by_key(|(span, _)| *span);
-            for (span, replacement) in replacements {
-                let start = span.lo().to_usize() - offset + offset_shift;
-                let end = span.hi().to_usize() - offset + offset_shift;
-                user_ty.replace_range(start..end, replacement);
-                offset_shift += config_name.as_str().len() - (end - start);
+        // Composes entry point param and/or dispatchable call arg.
+        if !has_non_config_generic_params
+            && !has_raw_indirection_dynamic_or_opaque_types
+            && !has_non_int_const_generic_params
+        {
+            // Composes entry point param, and corresponding dispatchable call arg vars,
+            // by replacing `T: Config` param types with concrete `Config` type,
+            // and integer const generic params with an arbitrary large value.
+            let mut user_ty = source_map
+                .span_to_snippet(fn_param.ty_span)
+                .expect("Expected snippet for span");
+            if !config_generic_params.is_empty() || !int_const_generic_params.is_empty() {
+                let offset = fn_param.ty_span.lo().to_usize();
+                let mut offset_shift = 0;
+                let replacements = config_generic_params
+                    .into_iter()
+                    .map(|config_param| (config_param.span, config_name.as_str()))
+                    .chain(
+                        // We use 1000 arbitrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
+                        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#k-limits>
+                        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/k_limits.rs>
+                        int_const_generic_params
+                            .into_iter()
+                            .map(|(config_expr, _)| (config_expr.span, "1000")),
+                    )
+                    .unique_by(|(span, _)| *span)
+                    .sorted_by_key(|(span, _)| *span);
+                for (span, replacement) in replacements {
+                    let start = span.lo().to_usize() - offset + offset_shift;
+                    let end = span.hi().to_usize() - offset + offset_shift;
+                    user_ty.replace_range(start..end, replacement);
+                    offset_shift += config_name.as_str().len() - (end - start);
+                }
             }
-        }
-        params.push(format!("{unique_name}: {user_ty}"));
-        arg_vars.insert(idx, unique_name);
-    }
-
-    // Composes dispatchable call arg values.
-    let mut locals = FxHashSet::default();
-    let local_decls = owner_body.local_decls();
-    let args = fn_args
-        .iter()
-        .enumerate()
-        .map(|(idx, arg)| {
-            // Adds value as entry point param (if defined), or fallback to user input.
-            arg_vars.get(&idx).cloned().unwrap_or_else(|| {
-                // Adds value based on user input.
-                match arg {
-                    Operand::Copy(place) | Operand::Move(place) => {
-                        let local_decl = &local_decls
-                            .get(place.local)
-                            .expect("Expected local declaration");
+            params.push(format!("{unique_name}: {user_ty}"));
+            args.push(unique_name);
+        } else {
+            // Composes entry point param and/or dispatchable call args based on
+            // dispatchable call arg type or value.
+            let call_arg = call_args
+                .get(idx)
+                .unwrap_or_else(|| panic!("Expected dipatchable call argument: {param_name}"));
+            match call_arg {
+                Operand::Copy(place) | Operand::Move(place) => {
+                    // Adds entry point param and/or dispatchable call arg.
+                    let local_decl = &local_decls
+                        .get(place.local)
+                        .expect("Expected local declaration");
+                    let arg_ty = local_decl.ty;
+                    if let Some(arg_ty_str) = tractable_param_type(&arg_ty) {
+                        // Adds entry point param and dispatchable call arg var,
+                        // based on dispatchable call arg type.
+                        params.push(format!("{unique_name}: {arg_ty_str}"));
+                        args.push(unique_name);
+                    } else {
+                        // Adds dispatchable call arg value based on user input.
                         let mut span = local_decl.source_info.span;
                         if span.from_expansion() {
                             // Adds macro `DefId` to used items.
@@ -408,27 +401,40 @@ fn compose_entry_point<'tcx>(
                             }
                             // Uses the call site span for macro expansions.
                             span = span.source_callsite();
+                            // Collects used items for type.
+                            process_type(&local_decl.ty, &mut used_items);
                         } else {
                             // Collects used local and item definitions, and item imports for arguments.
-                            process_operand(arg, &mut locals, &mut used_items, &mut item_defs);
+                            process_operand(call_arg, &mut locals, &mut used_items, &mut item_defs);
                         }
-                        // Returns user input.
-                        source_map
+                        let value = source_map
                             .span_to_snippet(span)
-                            .expect("Expected snippet for span")
-                    }
-                    Operand::Constant(constant) => {
-                        // Collects used local and item definitions, and item imports for arguments.
-                        process_operand(arg, &mut locals, &mut used_items, &mut item_defs);
-                        // Returns user input.
-                        source_map
-                            .span_to_snippet(constant.span)
-                            .expect("Expected snippet for span")
+                            .expect("Expected snippet for span");
+                        args.push(value);
                     }
                 }
-            })
-        })
-        .join(", ");
+                Operand::Constant(constant) => {
+                    // Collects used local and item definitions, and item imports for arguments.
+                    process_operand(call_arg, &mut locals, &mut used_items, &mut item_defs);
+
+                    // Adds entry point param and/or dispatchable call arg.
+                    let arg_ty = constant.ty();
+                    if let Some(arg_ty_str) = tractable_param_type(&arg_ty) {
+                        // Adds entry point param and dispatchable call arg var,
+                        // based on dispatchable call arg type.
+                        params.push(format!("{unique_name}: {arg_ty_str}"));
+                        args.push(unique_name);
+                    } else {
+                        // Adds dispatchable call arg value based on user input.
+                        let value = source_map
+                            .span_to_snippet(constant.span)
+                            .expect("Expected snippet for span");
+                        args.push(value);
+                    }
+                }
+            }
+        }
+    }
 
     // Collects used local and item definitions, and item imports.
     let mut stmts = FxHashSet::default();
@@ -542,6 +548,7 @@ fn compose_entry_point<'tcx>(
     // Composes entry point.
     let name = format!("__pallet_verifier_entry_point__{fn_name}");
     let params_list = params.join(", ");
+    let args_list = args.join(", ");
     let assign_decls = stmts
         .into_iter()
         .sorted_by_key(|(_, span)| *span)
@@ -552,7 +559,7 @@ fn compose_entry_point<'tcx>(
 pub fn {name}({params_list}) {{
     {assign_decls}
 
-    crate::Pallet::<{config_name}>::{fn_name}({args});
+    crate::Pallet::<{config_name}>::{fn_name}({args_list});
 }}"
     );
     Some((name, content, used_items))
@@ -999,30 +1006,36 @@ fn process_type(ty: &Ty, used_items: &mut FxHashSet<DefId>) {
     }
 }
 
-/// Collects used items, and generic args for HIR type.
+/// Collects used items and types for HIR type.
 ///
 /// Primitive types (e.g. `bool`, `int*`), `str` and unit (i.e. `()`) are ignored.
 fn process_hir_ty<'tcx>(
     ty: &rustc_hir::Ty<'tcx>,
     used_items: &mut FxHashSet<DefId>,
-    generic_args: &mut Vec<&rustc_hir::GenericArg<'tcx>>,
+    types: &mut Vec<&rustc_hir::Ty<'tcx>>,
     anon_consts: &mut Vec<rustc_hir::AnonConst>,
 ) {
-    match ty.peel_refs().kind {
-        rustc_hir::TyKind::Slice(ty) => process_hir_ty(ty, used_items, generic_args, anon_consts),
+    match ty.kind {
+        rustc_hir::TyKind::Slice(ty) => {
+            types.push(ty);
+            process_hir_ty(ty, used_items, types, anon_consts)
+        }
         rustc_hir::TyKind::Array(ty, len) => {
-            process_hir_ty(ty, used_items, generic_args, anon_consts);
+            types.push(ty);
+            process_hir_ty(ty, used_items, types, anon_consts);
             if let rustc_hir::ArrayLen::Body(anon_const) = len {
                 anon_consts.push(anon_const);
             }
         }
         rustc_hir::TyKind::Ptr(mut_ty) | rustc_hir::TyKind::Ref(_, mut_ty) => {
-            process_hir_ty(mut_ty.ty, used_items, generic_args, anon_consts)
+            types.push(mut_ty.ty);
+            process_hir_ty(mut_ty.ty, used_items, types, anon_consts)
         }
         rustc_hir::TyKind::BareFn(_) | rustc_hir::TyKind::Never => (),
         rustc_hir::TyKind::Tup(tys) => {
             for ty in tys {
-                process_hir_ty(ty, used_items, generic_args, anon_consts)
+                types.push(ty);
+                process_hir_ty(ty, used_items, types, anon_consts)
             }
         }
         rustc_hir::TyKind::Path(qpath) => match qpath {
@@ -1045,19 +1058,56 @@ fn process_hir_ty<'tcx>(
                     | Res::Err => (),
                 };
                 for segment in path.segments {
-                    generic_args.extend(segment.args().args);
+                    for arg in segment.args().args {
+                        match arg {
+                            rustc_hir::GenericArg::Type(ty) => {
+                                types.push(*ty);
+                                process_hir_ty(ty, used_items, types, anon_consts);
+                            }
+                            rustc_hir::GenericArg::Const(anon_const) => {
+                                anon_consts.push(anon_const.value);
+                            }
+                            rustc_hir::GenericArg::Lifetime(_)
+                            | rustc_hir::GenericArg::Infer(_) => (),
+                        }
+                    }
                 }
                 if let Some(ty) = ty {
-                    process_hir_ty(ty, used_items, generic_args, anon_consts);
+                    types.push(ty);
+                    process_hir_ty(ty, used_items, types, anon_consts);
                 }
             }
-            rustc_hir::QPath::TypeRelative(ty, _) => {
-                process_hir_ty(ty, used_items, generic_args, anon_consts)
+            rustc_hir::QPath::TypeRelative(ty, segment) => {
+                types.push(ty);
+                process_hir_ty(ty, used_items, types, anon_consts);
+                for arg in segment.args().args {
+                    match arg {
+                        rustc_hir::GenericArg::Type(ty) => {
+                            types.push(*ty);
+                            process_hir_ty(ty, used_items, types, anon_consts);
+                        }
+                        rustc_hir::GenericArg::Const(anon_const) => {
+                            anon_consts.push(anon_const.value);
+                        }
+                        rustc_hir::GenericArg::Lifetime(_) | rustc_hir::GenericArg::Infer(_) => (),
+                    }
+                }
             }
             rustc_hir::QPath::LangItem(_, _, _) => (),
         },
-        rustc_hir::TyKind::OpaqueDef(_, local_generic_args, _) => {
-            generic_args.extend(local_generic_args);
+        rustc_hir::TyKind::OpaqueDef(_, generic_args, _) => {
+            for arg in generic_args {
+                match arg {
+                    rustc_hir::GenericArg::Type(ty) => {
+                        types.push(*ty);
+                        process_hir_ty(ty, used_items, types, anon_consts);
+                    }
+                    rustc_hir::GenericArg::Const(anon_const) => {
+                        anon_consts.push(anon_const.value);
+                    }
+                    rustc_hir::GenericArg::Lifetime(_) | rustc_hir::GenericArg::Infer(_) => (),
+                }
+            }
         }
         rustc_hir::TyKind::TraitObject(trait_refs, _, _) => {
             for trait_def_id in trait_refs
@@ -1072,6 +1122,43 @@ fn process_hir_ty<'tcx>(
         }
         rustc_hir::TyKind::Infer | rustc_hir::TyKind::Err(_) => (),
     }
+}
+
+/// Composes tractable entry point param type from MIR type (if possible).
+///
+/// NOTE: A tractable type must *NOT* include any generics and/or raw indirection.
+fn tractable_param_type(ty: &Ty) -> Option<String> {
+    // Checks for "raw" indirection and/or dynamic types.
+    let has_raw_indirection_or_dynamic_types = ty.walk().any(|gen_arg| {
+        gen_arg.as_type().is_some_and(|gen_ty| {
+            matches!(
+                gen_ty.peel_refs().kind(),
+                TyKind::RawPtr(_)
+                    | TyKind::FnDef(_, _)
+                    | TyKind::FnPtr(_)
+                    | TyKind::Closure(_, _)
+                    | TyKind::Dynamic(_, _, _)
+                    | TyKind::Generator(_, _, _)
+                    | TyKind::GeneratorWitness(_)
+                    | TyKind::GeneratorWitnessMIR(_, _)
+            )
+        })
+    });
+    if has_raw_indirection_or_dynamic_types {
+        return None;
+    }
+
+    // Makes local type paths absolute.
+    let mut ty_str = ty.to_string();
+    for gen_ty in ty.walk().filter_map(GenericArg::as_type) {
+        if let TyKind::Adt(def, _) = gen_ty.peel_refs().kind() {
+            if def.did().is_local() {
+                let gen_ty_str = gen_ty.to_string();
+                ty_str = ty_str.replace(&gen_ty_str, &format!("crate::{gen_ty_str}"));
+            }
+        }
+    }
+    Some(ty_str)
 }
 
 /// Returns the well-formed `let` statement for the `local` (if any);
