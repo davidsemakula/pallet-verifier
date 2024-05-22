@@ -528,13 +528,19 @@ fn compose_entry_point<'tcx>(
 
     // Adds item definitions to statements.
     for item_id in item_defs {
-        // Uses `TyCtxt::source_span` to get the full span, not just the header.
-        let decl_local_id = item_id.as_local().expect("Expected local declaration");
-        let span = tcx.source_span(decl_local_id);
-        let snippet = source_map
-            .span_to_snippet(span)
-            .expect("Expected snippet for span");
-        stmts.insert((snippet, span));
+        let item_local_id = item_id.as_local().expect("Expected local declaration");
+        let item_kind = tcx.def_kind(item_local_id);
+        if matches!(
+            item_kind,
+            DefKind::Const | DefKind::Closure | DefKind::Generator
+        ) {
+            // Uses `TyCtxt::source_span` to get the full span, not just the header.
+            let span = tcx.source_span(item_local_id);
+            let snippet = source_map
+                .span_to_snippet(span)
+                .expect("Expected snippet for span");
+            stmts.insert((snippet, span));
+        }
     }
 
     // Composes entry point.
@@ -1427,7 +1433,7 @@ fn tractable_param_type(
             let def_id = def.did();
             used_items.insert(def_id);
             if let Some(local_def_id) = def_id.as_local() {
-                let gen_ty_str = gen_ty.to_string();
+                let gen_ty_str = tcx.def_path_str(def_id);
                 let gen_ty_name =
                     utils::def_name(local_def_id, tcx).expect("Expected local definition name");
                 ty_str = ty_str.replace(&gen_ty_str, gen_ty_name.as_str());
