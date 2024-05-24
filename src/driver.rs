@@ -69,8 +69,8 @@ fn main() {
         // Enables dumping MIR for all functions.
         "-Zalways-encode-mir".to_owned(),
     ]);
-    let entry_point_names = entry_point_callbacks.entry_point_names();
-    let mut verifier_callbacks = VerifierCallbacks::new(entry_point_names);
+    let entry_points_info = entry_point_callbacks.entry_point_dispatchable_def_map();
+    let mut verifier_callbacks = VerifierCallbacks::new(&entry_points_info);
     let mut verifier_compiler =
         rustc_driver::RunCompiler::new(&verifier_args, &mut verifier_callbacks);
     verifier_compiler.set_file_loader(Some(Box::new(entry_point_file_loader)));

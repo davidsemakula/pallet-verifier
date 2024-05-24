@@ -32,3 +32,6 @@ mod file_loader;
 
 pub use callbacks::{EntryPointCallbacks, VerifierCallbacks};
 pub use file_loader::EntryPointFileLoader;
+
+const ENTRY_POINTS_MOD_NAME: &str = "__pallet_verifier_entry_points";
+const ENTRY_POINT_FN_PREFIX: &str = "__pallet_verifier_entry_point";

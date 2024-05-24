@@ -17,11 +17,14 @@ use rustc_span::{
 use itertools::Itertools;
 
 use super::utils;
+use crate::ENTRY_POINT_FN_PREFIX;
 
 /// `rustc` callbacks for generating tractable entry points for FRAME dispatchable functions.
 #[derive(Default)]
 pub struct EntryPointCallbacks {
-    entry_points: FxHashMap<String, String>,
+    // Map of generated entry point `fn` names to dispatchable function `DefId`s.
+    entry_points: FxHashMap<String, (DefId, String)>,
+    // Use declarations and item definitions for generated entry points.
     use_decls: FxHashSet<String>,
     item_defs: FxHashSet<String>,
 }
@@ -113,7 +116,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     .get(def_id)
                     .and_then(|(body, terminator)| compose_entry_point(terminator, body, tcx));
                 if let Some((name, content, local_used_items)) = call {
-                    entry_points.insert(name, content);
+                    entry_points.insert(name, (*def_id, content));
                     used_items.extend(local_used_items);
                 } else {
                     let local_def_id = def_id
@@ -186,7 +189,11 @@ impl EntryPointCallbacks {
         (!self.entry_points.is_empty()).then(|| {
             let use_decls = self.use_decls.iter().join("\n");
             let item_defs = self.item_defs.iter().join("\n");
-            let entry_points = self.entry_points.values().join("\n\n");
+            let entry_points = self
+                .entry_points
+                .values()
+                .map(|(_, content)| content)
+                .join("\n\n");
             format!(
                 r"
 #![allow(unused)]
@@ -203,8 +210,16 @@ impl EntryPointCallbacks {
     }
 
     /// Returns `fn` names of all generated tractable entry points.
-    pub fn entry_point_names(&self) -> FxHashSet<String> {
-        self.entry_points.keys().cloned().collect()
+    pub fn entry_point_names(&self) -> FxHashSet<&str> {
+        self.entry_points.keys().map(String::as_str).collect()
+    }
+
+    /// Returns a map of generated entry point `fn` names to dispatchable function `DefId`s.
+    pub fn entry_point_dispatchable_def_map(&self) -> FxHashMap<&str, DefId> {
+        self.entry_points
+            .iter()
+            .map(|(name, (def_id, _))| (name.as_str(), *def_id))
+            .collect()
     }
 }
 
@@ -544,7 +559,7 @@ fn compose_entry_point<'tcx>(
     }
 
     // Composes entry point.
-    let name = format!("__pallet_verifier_entry_point__{fn_name}");
+    let name = format!("{ENTRY_POINT_FN_PREFIX}__{fn_name}");
     let params_list = params.join(", ");
     let args_list = args.join(", ");
     let assign_decls = stmts
@@ -942,13 +957,13 @@ fn process_used_items(
 }
 
 /// MIR visitor that collects calls to the specified dispatchable functions.
-pub struct DispatchableCallVisitor<'tcx, 'a> {
-    def_ids: &'a FxHashSet<DefId>,
+pub struct DispatchableCallVisitor<'tcx, 'analysis> {
+    def_ids: &'analysis FxHashSet<DefId>,
     calls: FxHashMap<DefId, Terminator<'tcx>>,
 }
 
-impl<'tcx, 'a> DispatchableCallVisitor<'tcx, 'a> {
-    pub fn new(def_ids: &'a FxHashSet<DefId>) -> Self {
+impl<'tcx, 'analysis> DispatchableCallVisitor<'tcx, 'analysis> {
+    pub fn new(def_ids: &'analysis FxHashSet<DefId>) -> Self {
         Self {
             def_ids,
             calls: FxHashMap::default(),
@@ -956,7 +971,7 @@ impl<'tcx, 'a> DispatchableCallVisitor<'tcx, 'a> {
     }
 }
 
-impl<'tcx, 'a> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'a> {
+impl<'tcx, 'analysis> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'analysis> {
     fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
         if let TerminatorKind::Call { func, .. } = &terminator.kind {
             let call_info = func.const_fn_def().filter(|(def_id, _)| {
@@ -972,16 +987,16 @@ impl<'tcx, 'a> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'a> {
 }
 
 /// MIR visitor that collects used local and item definitions, item imports and fn calls for the specified locals.
-pub struct ValueVisitor<'tcx, 'a> {
-    locals: &'a FxHashSet<Local>,
+pub struct ValueVisitor<'tcx, 'analysis> {
+    locals: &'analysis FxHashSet<Local>,
     used_items: FxHashSet<DefId>,
     item_defs: FxHashSet<DefId>,
     calls: Vec<Terminator<'tcx>>,
     next_locals: FxHashSet<Local>,
 }
 
-impl<'tcx, 'a> ValueVisitor<'tcx, 'a> {
-    pub fn new(locals: &'a FxHashSet<Local>) -> Self {
+impl<'tcx, 'analysis> ValueVisitor<'tcx, 'analysis> {
+    pub fn new(locals: &'analysis FxHashSet<Local>) -> Self {
         Self {
             locals,
             used_items: FxHashSet::default(),
@@ -992,7 +1007,7 @@ impl<'tcx, 'a> ValueVisitor<'tcx, 'a> {
     }
 }
 
-impl<'tcx, 'a> Visitor<'tcx> for ValueVisitor<'tcx, 'a> {
+impl<'tcx, 'analysis> Visitor<'tcx> for ValueVisitor<'tcx, 'analysis> {
     fn visit_statement(&mut self, statement: &Statement<'tcx>, location: Location) {
         if let StatementKind::Assign(assign) = &statement.kind {
             let place = assign.0;
