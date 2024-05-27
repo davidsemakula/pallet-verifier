@@ -22,8 +22,8 @@ use crate::ENTRY_POINT_FN_PREFIX;
 /// `rustc` callbacks for generating tractable entry points for FRAME dispatchable functions.
 #[derive(Default)]
 pub struct EntryPointCallbacks {
-    // Map of generated entry point `fn` names to dispatchable function `DefId`s.
-    entry_points: FxHashMap<String, (DefId, String)>,
+    // Map of generated entry point `fn` names and their definitions.
+    entry_points: FxHashMap<String, String>,
     // Use declarations and item definitions for generated entry points.
     use_decls: FxHashSet<String>,
     item_defs: FxHashSet<String>,
@@ -116,7 +116,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     .get(def_id)
                     .and_then(|(body, terminator)| compose_entry_point(terminator, body, tcx));
                 if let Some((name, content, local_used_items)) = call {
-                    entry_points.insert(name, (*def_id, content));
+                    entry_points.insert(name, content);
                     used_items.extend(local_used_items);
                 } else {
                     let local_def_id = def_id
@@ -189,11 +189,7 @@ impl EntryPointCallbacks {
         (!self.entry_points.is_empty()).then(|| {
             let use_decls = self.use_decls.iter().join("\n");
             let item_defs = self.item_defs.iter().join("\n");
-            let entry_points = self
-                .entry_points
-                .values()
-                .map(|(_, content)| content)
-                .join("\n\n");
+            let entry_points = self.entry_points.values().join("\n\n");
             format!(
                 r"
 #![allow(unused)]
@@ -212,14 +208,6 @@ impl EntryPointCallbacks {
     /// Returns `fn` names of all generated tractable entry points.
     pub fn entry_point_names(&self) -> FxHashSet<&str> {
         self.entry_points.keys().map(String::as_str).collect()
-    }
-
-    /// Returns a map of generated entry point `fn` names to dispatchable function `DefId`s.
-    pub fn entry_point_dispatchable_def_map(&self) -> FxHashMap<&str, DefId> {
-        self.entry_points
-            .iter()
-            .map(|(name, (def_id, _))| (name.as_str(), *def_id))
-            .collect()
     }
 }
 
@@ -559,7 +547,7 @@ fn compose_entry_point<'tcx>(
     }
 
     // Composes entry point.
-    let name = format!("{ENTRY_POINT_FN_PREFIX}__{fn_name}");
+    let name = format!("{ENTRY_POINT_FN_PREFIX}{fn_name}");
     let params_list = params.join(", ");
     let args_list = args.join(", ");
     let assign_decls = stmts
@@ -956,7 +944,7 @@ fn process_used_items(
     }
 }
 
-/// MIR visitor that collects calls to the specified dispatchable functions.
+/// MIR visitor that collects "specialized" calls to the specified dispatchable functions.
 pub struct DispatchableCallVisitor<'tcx, 'analysis> {
     def_ids: &'analysis FxHashSet<DefId>,
     calls: FxHashMap<DefId, Terminator<'tcx>>,
@@ -974,8 +962,22 @@ impl<'tcx, 'analysis> DispatchableCallVisitor<'tcx, 'analysis> {
 impl<'tcx, 'analysis> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'analysis> {
     fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
         if let TerminatorKind::Call { func, .. } = &terminator.kind {
-            let call_info = func.const_fn_def().filter(|(def_id, _)| {
-                self.def_ids.contains(def_id) && !self.calls.contains_key(def_id)
+            let call_info = func.const_fn_def().filter(|(def_id, gen_args)| {
+                let contains_type_params = || {
+                    gen_args
+                        .iter()
+                        .filter_map(GenericArg::as_type)
+                        .any(|gen_ty| {
+                            let is_param_ty = gen_ty
+                                .walk()
+                                .filter_map(GenericArg::as_type)
+                                .any(|ty| matches!(ty.kind(), TyKind::Param(_)));
+                            is_param_ty
+                        })
+                };
+                self.def_ids.contains(def_id)
+                    && !self.calls.contains_key(def_id)
+                    && !contains_type_params()
             });
             if let Some((def_id, _)) = call_info {
                 self.calls.insert(def_id, terminator.clone());
