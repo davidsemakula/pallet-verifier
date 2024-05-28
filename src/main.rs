@@ -95,6 +95,10 @@ fn call_pallet_verifier() {
     }
     let mut cmd = Command::new(path);
     cmd.args(env::args().skip(2));
+    // Explicitly set dynamic/shared library path to match `pallet-verifier`.
+    if let Some(dl_path) = option_env!("LD_LIBRARY_PATH") {
+        cmd.env("LD_LIBRARY_PATH", dl_path);
+    }
 
     // Executes command (exits on failure).
     cli_utils::exec_cmd(&mut cmd);
