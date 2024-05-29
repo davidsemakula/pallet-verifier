@@ -32,7 +32,6 @@ pub struct EntryPointCallbacks {
 impl rustc_driver::Callbacks for EntryPointCallbacks {
     fn after_analysis<'tcx>(
         &mut self,
-        _handler: &rustc_session::EarlyErrorHandler,
         compiler: &rustc_interface::interface::Compiler,
         queries: &'tcx rustc_interface::Queries<'tcx>,
     ) -> rustc_driver::Compilation {

@@ -64,7 +64,6 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
 
     fn after_analysis<'tcx>(
         &mut self,
-        _handler: &rustc_session::EarlyErrorHandler,
         compiler: &Compiler,
         queries: &'tcx rustc_interface::Queries<'tcx>,
     ) -> Compilation {
