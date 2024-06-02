@@ -178,9 +178,9 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "clang-sys"
-version = "1.7.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67523a3b4be3ce1989d607a828d036249522dd9c1c8de7f4dd2dae43a37369d1"
+checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
 dependencies = [
  "glob",
  "libc",
@@ -553,14 +553,14 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "mirai"
 version = "1.1.8"
-source = "git+https://github.com/davidsemakula/MIRAI.git?rev=08efe51f953ab149f599adf7e187f5972bdd574b#08efe51f953ab149f599adf7e187f5972bdd574b"
+source = "git+https://github.com/davidsemakula/MIRAI.git?rev=f2e8dc6943ae8c3718498b0be24fdaa0e3507e84#f2e8dc6943ae8c3718498b0be24fdaa0e3507e84"
 dependencies = [
  "bincode",
  "cargo_metadata",
  "clap",
  "env_logger",
  "fs2",
- "itertools 0.12.1",
+ "itertools 0.13.0",
  "lazy_static",
  "log",
  "log-derive",
@@ -583,7 +583,7 @@ dependencies = [
 [[package]]
 name = "mirai-annotations"
 version = "1.12.1"
-source = "git+https://github.com/davidsemakula/MIRAI.git?rev=08efe51f953ab149f599adf7e187f5972bdd574b#08efe51f953ab149f599adf7e187f5972bdd574b"
+source = "git+https://github.com/davidsemakula/MIRAI.git?rev=f2e8dc6943ae8c3718498b0be24fdaa0e3507e84#f2e8dc6943ae8c3718498b0be24fdaa0e3507e84"
 
 [[package]]
 name = "nom"
@@ -654,9 +654,9 @@ checksum = "5b40af805b3121feab8a3c29f04d8ad262fa8e0561883e7653e024ae4479e6de"
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.84"
+version = "1.0.85"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec96c6a92621310b51366f1e28d05ef11489516e93be030060e5fc12024a49d6"
+checksum = "22244ce15aa966053a896d1accb3a6e68469b97c7f33f284b99f0d576879fc23"
 dependencies = [
  "unicode-ident",
 ]
@@ -977,9 +977,9 @@ dependencies = [
 
 [[package]]
 name = "triomphe"
-version = "0.1.11"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "859eb650cfee7434994602c3a68b25d77ad9e68c8a6cd491616ef86661382eb3"
+checksum = "1b2cb4fbb9995eeb36ac86fadf24031ccd58f99d6b4b2d7b911db70bddb80d90"
 
 [[package]]
 name = "unicode-ident"
@@ -1108,7 +1108,7 @@ dependencies = [
 [[package]]
 name = "z3-sys"
 version = "0.8.1"
-source = "git+https://github.com/prove-rs/z3.rs.git#19710337ae280c06bc4da912c6745291e3078109"
+source = "git+https://github.com/prove-rs/z3.rs.git#14d5befbee1aef6ea2e01dba0f424f41e65c8510"
 dependencies = [
  "bindgen",
  "cmake",

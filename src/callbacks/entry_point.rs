@@ -69,7 +69,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                 for name in names {
                     let symbol = Symbol::intern(name);
                     if !id_names.contains(&symbol) {
-                        let mut warning = compiler.session().struct_warn(format!(
+                        let mut warning = compiler.sess.dcx().struct_warn(format!(
                             "Couldn't find definition for dispatchable: `{name}`"
                         ));
                         warning.note("This is most likely a bug in pallet-verifier.");
@@ -124,7 +124,8 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     let name = utils::def_name(local_def_id, tcx)
                         .expect("Expected a name for dispatchable");
                     let mut warning = compiler
-                        .session()
+                        .sess
+                        .dcx()
                         .struct_warn(format!("Couldn't find a call for dispatchable: `{name}`"));
                     warning.note(format!(
                         "pallet-verifier couldn't find a unit test \
@@ -163,7 +164,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     Some("Add some unit tests or benchmarks for all dispatchable functions."),
                 ),
             };
-            let mut error = compiler.session().struct_err(msg);
+            let mut error = compiler.sess.dcx().struct_err(msg);
             if let Some(note) = note {
                 error.note(note);
             }
@@ -273,7 +274,7 @@ fn compose_entry_point<'tcx>(
     let mut params = Vec::new();
     let mut args = Vec::new();
     let mut locals = FxHashSet::default();
-    let hir_id = hir.local_def_id_to_hir_id(fn_local_def_id);
+    let hir_id = tcx.local_def_id_to_hir_id(fn_local_def_id);
     let hir_body_id = hir.body_owned_by(fn_local_def_id);
     let hir_body = hir.body(hir_body_id);
     let fn_params = hir_body.params;
@@ -373,7 +374,7 @@ fn compose_entry_point<'tcx>(
             let call_arg = call_args
                 .get(idx)
                 .unwrap_or_else(|| panic!("Expected dipatchable call argument: {param_name}"));
-            match call_arg {
+            match &call_arg.node {
                 Operand::Copy(place) | Operand::Move(place) => {
                     // Adds entry point param and/or dispatchable call arg.
                     let local_decl = &local_decls
@@ -387,7 +388,7 @@ fn compose_entry_point<'tcx>(
                         args.push(unique_name);
                     } else {
                         // Adds dispatchable call arg value based on user input.
-                        let mut span = local_decl.source_info.span;
+                        let mut span = call_arg.span;
                         if span.from_expansion() {
                             // Adds macro `DefId` to used items.
                             if let Some(macro_def_id) = span.ctxt().outer_expn_data().macro_def_id {
@@ -396,10 +397,15 @@ fn compose_entry_point<'tcx>(
                             // Uses the call site span for macro expansions.
                             span = span.source_callsite();
                             // Collects used items for type.
-                            process_type(&local_decl.ty, &mut used_items);
+                            process_type(&arg_ty, &mut used_items);
                         } else {
                             // Collects used local and item definitions, and item imports for arguments.
-                            process_operand(call_arg, &mut locals, &mut used_items, &mut item_defs);
+                            process_operand(
+                                &call_arg.node,
+                                &mut locals,
+                                &mut used_items,
+                                &mut item_defs,
+                            );
                         }
                         let value = source_map
                             .span_to_snippet(span)
@@ -409,7 +415,7 @@ fn compose_entry_point<'tcx>(
                 }
                 Operand::Constant(constant) => {
                     // Collects used local and item definitions, and item imports for arguments.
-                    process_operand(call_arg, &mut locals, &mut used_items, &mut item_defs);
+                    process_operand(&call_arg.node, &mut locals, &mut used_items, &mut item_defs);
 
                     // Adds entry point param and/or dispatchable call arg.
                     let arg_ty = constant.ty();
@@ -421,7 +427,7 @@ fn compose_entry_point<'tcx>(
                     } else {
                         // Adds dispatchable call arg value based on user input.
                         let value = source_map
-                            .span_to_snippet(constant.span)
+                            .span_to_snippet(call_arg.span)
                             .expect("Expected snippet for span");
                         args.push(value);
                     }
@@ -478,18 +484,18 @@ fn compose_entry_point<'tcx>(
         locals = next_locals;
     }
 
-    // Collects used item definitions and imports for closures.
+    // Collects used item definitions and imports for closures and coroutines.
     //
     // NOTE: We don't collect locals because captured locals are already handled as locals
     // for the parent function above, while non-captured locals (i.e. locals defined inside the closure)
     // are already defined in the closure's `let` statement above.
     let mut closures: FxHashSet<_> = used_items
         .iter()
-        .filter(|item_id| tcx.is_closure(**item_id))
+        .filter(|item_id| tcx.is_closure_or_coroutine(**item_id))
         .cloned()
         .collect();
     while !closures.is_empty() {
-        // Tracks child closures for next iteration.
+        // Tracks child closures/coroutines for next iteration.
         let mut next_closures = FxHashSet::default();
 
         for closure_id in closures.drain() {
@@ -503,7 +509,7 @@ fn compose_entry_point<'tcx>(
                 visitor
                     .used_items
                     .iter()
-                    .filter(|item_id| tcx.is_closure(**item_id)),
+                    .filter(|item_id| tcx.is_closure_or_coroutine(**item_id)),
             );
 
             // Updates used item definitions and imports.
@@ -532,10 +538,7 @@ fn compose_entry_point<'tcx>(
     for item_id in item_defs {
         let item_local_id = item_id.as_local().expect("Expected local declaration");
         let item_kind = tcx.def_kind(item_local_id);
-        if matches!(
-            item_kind,
-            DefKind::Const | DefKind::Closure | DefKind::Generator
-        ) {
+        if matches!(item_kind, DefKind::Const | DefKind::Closure) {
             // Uses `TyCtxt::source_span` to get the full span, not just the header.
             let span = tcx.source_span(item_local_id);
             let snippet = source_map
@@ -614,7 +617,7 @@ fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<DefId
             }
             let impl_def_id = assoc_item.container_id(tcx);
             let impl_local_def_id = impl_def_id.as_local()?;
-            let node = hir.get_by_def_id(impl_local_def_id);
+            let node = tcx.hir_node_by_def_id(impl_local_def_id);
             let rustc_hir::Node::Item(item) = node else {
                 return None;
             };
@@ -767,7 +770,7 @@ fn process_used_items(
                     item_defs.insert(source);
 
                     // Collects child used items.
-                    let node = hir.get_by_def_id(item_local_def_id);
+                    let node = tcx.hir_node_by_def_id(item_local_def_id);
                     if let rustc_hir::Node::Item(item) = node {
                         match item.kind {
                             rustc_hir::ItemKind::Fn(fn_sig, generics, _) => {
@@ -1124,7 +1127,7 @@ fn process_call(
 
     // Adds used local and item definitions, and item imports for arguments.
     for arg in args {
-        process_operand(arg, locals, used_items, item_defs);
+        process_operand(&arg.node, locals, used_items, item_defs);
     }
 
     // Adds used generic types.
@@ -1183,8 +1186,7 @@ fn process_rvalue(
                         process_type(&arg_ty, used_items);
                     }
                 }
-                AggregateKind::Closure(def_id, args)
-                | AggregateKind::Generator(def_id, args, _) => {
+                AggregateKind::Closure(def_id, args) | AggregateKind::Coroutine(def_id, args) => {
                     used_items.insert(*def_id);
                     for arg_ty in args.iter().filter_map(GenericArg::as_type) {
                         process_type(&arg_ty, used_items);
@@ -1209,8 +1211,8 @@ fn process_operand(
         }
         Operand::Constant(constant) => {
             // Handles globals.
-            let const_kind = constant.literal;
-            if let rustc_middle::mir::ConstantKind::Unevaluated(uneval_const, ty) = const_kind {
+            let const_kind = constant.const_;
+            if let rustc_middle::mir::Const::Unevaluated(uneval_const, ty) = const_kind {
                 // Add constant definition.
                 item_defs.insert(uneval_const.def);
 
@@ -1270,16 +1272,11 @@ fn process_type(ty: &Ty, used_items: &mut FxHashSet<DefId>) {
             }
         }
         TyKind::Closure(def_id, args)
-        | TyKind::Generator(def_id, args, _)
-        | TyKind::GeneratorWitnessMIR(def_id, args) => {
+        | TyKind::Coroutine(def_id, args)
+        | TyKind::CoroutineWitness(def_id, args) => {
             used_items.insert(*def_id);
             for arg_ty in args.iter().filter_map(GenericArg::as_type) {
                 process_type(&arg_ty, used_items);
-            }
-        }
-        TyKind::GeneratorWitness(types) => {
-            for ty in types.skip_binder() {
-                process_type(&ty, used_items);
             }
         }
         TyKind::Tuple(types) => {
@@ -1321,7 +1318,6 @@ fn process_hir_ty<'tcx>(
             types.push(mut_ty.ty);
             process_hir_ty(mut_ty.ty, used_items, types, anon_consts)
         }
-        rustc_hir::TyKind::BareFn(_) | rustc_hir::TyKind::Never => (),
         rustc_hir::TyKind::Tup(tys) => {
             for ty in tys {
                 types.push(ty);
@@ -1383,7 +1379,7 @@ fn process_hir_ty<'tcx>(
                     }
                 }
             }
-            rustc_hir::QPath::LangItem(_, _, _) => (),
+            rustc_hir::QPath::LangItem(_, _) => (),
         },
         rustc_hir::TyKind::OpaqueDef(_, generic_args, _) => {
             for arg in generic_args {
@@ -1410,7 +1406,11 @@ fn process_hir_ty<'tcx>(
         rustc_hir::TyKind::Typeof(anon_const) => {
             anon_consts.push(anon_const);
         }
-        rustc_hir::TyKind::Infer | rustc_hir::TyKind::Err(_) => (),
+        rustc_hir::TyKind::BareFn(_)
+        | rustc_hir::TyKind::Never
+        | rustc_hir::TyKind::Infer
+        | rustc_hir::TyKind::InferDelegation(_, _)
+        | rustc_hir::TyKind::Err(_) => (),
     }
 }
 
@@ -1432,9 +1432,8 @@ fn tractable_param_type(
                     | TyKind::FnPtr(_)
                     | TyKind::Closure(_, _)
                     | TyKind::Dynamic(_, _, _)
-                    | TyKind::Generator(_, _, _)
-                    | TyKind::GeneratorWitness(_)
-                    | TyKind::GeneratorWitnessMIR(_, _)
+                    | TyKind::Coroutine(_, _)
+                    | TyKind::CoroutineWitness(_, _)
             )
         })
     });

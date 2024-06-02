@@ -25,7 +25,7 @@ path = "src/driver.rs"
 
 [dependencies]
 itertools = "0.13.0"
-mirai = { git = "https://github.com/davidsemakula/MIRAI.git", rev = "08efe51f953ab149f599adf7e187f5972bdd574b" }
+mirai = { git = "https://github.com/davidsemakula/MIRAI.git", rev = "f2e8dc6943ae8c3718498b0be24fdaa0e3507e84" }
 rustc_tools_util = "0.3.0"
 tempfile = "3.10.1"
 

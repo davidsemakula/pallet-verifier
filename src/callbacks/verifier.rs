@@ -38,7 +38,11 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
         // Initializes MIRAI config.
         // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L75-L92>
         // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L143-L149>
-        let file_name = config.input.source_name().prefer_remapped().to_string();
+        let file_name = config
+            .input
+            .source_name()
+            .prefer_remapped_unconditionaly()
+            .to_string();
         let temp_dir = TempDir::new().expect("Failed to create a temp directory.");
         let summary_store_path = String::from(
             temp_dir
@@ -76,7 +80,8 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             // Analysis callback was called before `config` callback,
             // so MIRAI configs are not yet initialized.
             let mut err = compiler
-                .session()
+                .sess
+                .dcx()
                 .struct_err("MIRAI config is not yet initialzed");
             err.help("Call the `config` callback before calling `*_analysis` callbacks.");
             err.emit();
@@ -96,7 +101,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                 file_name: mirai_config.file_name.as_str(),
                 known_names_cache: KnownNamesCache::create_cache_from_language_items(),
                 options: &mirai_config.options,
-                session: compiler.session(),
+                session: &compiler.sess,
                 generic_args_cache: HashMap::new(),
                 summary_cache: PersistentSummaryCache::new(
                     tcx,
