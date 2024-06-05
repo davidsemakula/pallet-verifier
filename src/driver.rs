@@ -9,7 +9,7 @@ mod cli_utils;
 
 use std::{env, path::Path, process};
 
-use pallet_verifier::{EntryPointCallbacks, EntryPointFileLoader, VerifierCallbacks};
+use pallet_verifier::{EntryPointsCallbacks, VerifierCallbacks, VirtualFileLoader};
 
 const COMMAND: &str = "pallet-verifier";
 
@@ -38,7 +38,7 @@ fn main() {
         // Enables dumping MIR for all functions.
         "-Zalways-encode-mir".to_owned(),
     ]);
-    let mut entry_point_callbacks = EntryPointCallbacks::default();
+    let mut entry_point_callbacks = EntryPointsCallbacks::default();
     let entry_point_compiler =
         rustc_driver::RunCompiler::new(&entry_point_args, &mut entry_point_callbacks);
     let entry_point_result = entry_point_compiler.run();
@@ -48,16 +48,20 @@ fn main() {
     let Some(entry_points_content) = entry_point_callbacks.entry_points_content() else {
         process::exit(rustc_driver::EXIT_FAILURE);
     };
+    let contracts = entry_point_callbacks.contracts();
 
-    // Initializes "virtual" entry point `FileLoader` for entry point content.
+    // Initializes "virtual" `FileLoader` for entry point and "contracts" content.
     // Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
     let target_path_str = cli_args
         .iter()
         .find(|arg| Path::new(arg).extension().is_some_and(|ext| ext == "rs"))
         .expect("Expected target path as the first `*.rs` argument");
     let target_path = Path::new(&target_path_str).to_path_buf();
-    let entry_point_file_loader =
-        EntryPointFileLoader::new(target_path, entry_points_content.to_owned());
+    let virtual_file_loader = VirtualFileLoader::new(
+        target_path,
+        entry_points_content.to_owned(),
+        contracts.map(ToString::to_string),
+    );
 
     // Analyzes FRAME pallet with MIRAI.
     let mut verifier_args = cli_args.clone();
@@ -73,7 +77,7 @@ fn main() {
     let mut verifier_callbacks = VerifierCallbacks::new(&entry_point_names);
     let mut verifier_compiler =
         rustc_driver::RunCompiler::new(&verifier_args, &mut verifier_callbacks);
-    verifier_compiler.set_file_loader(Some(Box::new(entry_point_file_loader)));
+    verifier_compiler.set_file_loader(Some(Box::new(virtual_file_loader)));
     let verifier_result = verifier_compiler.run();
 
     let exit_code = match verifier_result {

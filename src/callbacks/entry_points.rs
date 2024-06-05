@@ -1,4 +1,7 @@
-//! `rustc` callbacks and utilities for generating tractable entry points for FRAME dispatchable functions.
+//! `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions,
+//! and "contracts" for event deposit functions.
+//!
+//! See [`EntryPointsCallbacks`] doc.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::def::{DefKind, Res};
@@ -10,7 +13,7 @@ use rustc_middle::{
     ty::{AssocItemContainer, GenericArg, ImplSubject, Ty, TyCtxt, TyKind, Visibility},
 };
 use rustc_span::{
-    def_id::{DefId, CRATE_DEF_ID},
+    def_id::{DefId, LocalDefId, CRATE_DEF_ID, LOCAL_CRATE},
     BytePos, Pos, Span, Symbol,
 };
 
@@ -19,17 +22,31 @@ use itertools::Itertools;
 use super::utils;
 use crate::ENTRY_POINT_FN_PREFIX;
 
-/// `rustc` callbacks for generating tractable entry points for FRAME dispatchable functions.
+/// `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions,
+/// and "contracts" for event deposit functions.
+///
+/// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.call.html>
+///
+/// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.event.html>
+///
+/// Ref: <https://docs.substrate.io/build/events-and-errors/#depositing-an-event>
+///
+/// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#entry-points>
+///
+/// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
 #[derive(Default)]
-pub struct EntryPointCallbacks {
-    // Map of generated entry point `fn` names and their definitions.
+pub struct EntryPointsCallbacks {
+    /// Map of generated entry point `fn` names and their definitions.
     entry_points: FxHashMap<String, String>,
-    // Use declarations and item definitions for generated entry points.
+    /// Use declarations and item definitions for generated entry points.
     use_decls: FxHashSet<String>,
     item_defs: FxHashSet<String>,
+    /// Event deposit function "contracts".
+    /// See [`Self::contracts`] doc.
+    contracts: Option<String>,
 }
 
-impl rustc_driver::Callbacks for EntryPointCallbacks {
+impl rustc_driver::Callbacks for EntryPointsCallbacks {
     fn after_analysis<'tcx>(
         &mut self,
         compiler: &rustc_interface::interface::Compiler,
@@ -40,6 +57,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
         let mut entry_points = FxHashMap::default();
         let mut use_decls = FxHashSet::default();
         let mut item_defs = FxHashSet::default();
+        let mut contracts = None;
 
         queries.global_ctxt().unwrap().enter(|tcx| {
             // Find names of dispatchable functions.
@@ -51,20 +69,16 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
             // Finds `DefId`s of dispatchable functions.
             phase = Phase::DefIds;
             println!("Searching for dispatchable function definitions ...");
-            let def_ids = dispatchable_ids(&names, tcx);
-            if def_ids.is_empty() {
+            let local_def_ids = dispatchable_ids(&names, tcx);
+            if local_def_ids.is_empty() {
                 return;
             }
 
             // Adds warnings for `Call` variants whose dispatchable function wasn't found.
-            if names.len() != def_ids.len() {
-                let id_names: Vec<_> = def_ids
+            if names.len() != local_def_ids.len() {
+                let id_names: Vec<_> = local_def_ids
                     .iter()
-                    .filter_map(|def_id| {
-                        def_id
-                            .as_local()
-                            .and_then(|local_def_id| utils::def_name(local_def_id, tcx))
-                    })
+                    .filter_map(|local_def_id| utils::def_name(*local_def_id, tcx))
                     .collect();
                 for name in names {
                     let symbol = Symbol::intern(name);
@@ -94,11 +108,11 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     rustc_hir::BodyOwnerKind::Fn | rustc_hir::BodyOwnerKind::Closure
                 ) {
                     let body = tcx.optimized_mir(local_def_id);
-                    let mut visitor = DispatchableCallVisitor::new(&def_ids);
+                    let mut visitor = DispatchableCallVisitor::new(&local_def_ids);
                     visitor.visit_body(body);
 
-                    for (def_id, terminator) in visitor.calls {
-                        calls.insert(def_id, (body, terminator));
+                    for (callee_local_def_id, terminator) in visitor.calls {
+                        calls.insert(callee_local_def_id, (body, terminator));
                     }
                 }
             }
@@ -106,22 +120,19 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                 return;
             }
 
-            // Compose entry points module content and add warnings for missing missing dispatchable calls.
+            // Composes entry points module content and add warnings for missing missing dispatchable calls.
             println!("Generating tractable entry points for FRAME pallet ...");
             let mut used_items = FxHashSet::default();
             phase = Phase::EntryPoints;
-            for def_id in def_ids.iter() {
+            for local_def_id in local_def_ids.iter() {
                 let call = calls
-                    .get(def_id)
+                    .get(local_def_id)
                     .and_then(|(body, terminator)| compose_entry_point(terminator, body, tcx));
                 if let Some((name, content, local_used_items)) = call {
                     entry_points.insert(name, content);
                     used_items.extend(local_used_items);
                 } else {
-                    let local_def_id = def_id
-                        .as_local()
-                        .expect("Expected local def id for dispatchable");
-                    let name = utils::def_name(local_def_id, tcx)
+                    let name = utils::def_name(*local_def_id, tcx)
                         .expect("Expected a name for dispatchable");
                     let mut warning = compiler
                         .sess
@@ -137,8 +148,57 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                     warning.emit();
                 }
             }
+            if entry_points.is_empty() {
+                return;
+            }
+
             // Collects use declarations or copies/re-defines used items.
             process_used_items(used_items, &mut use_decls, &mut item_defs, tcx);
+
+            // Composes "contracts" for event deposit functions.
+            // NOTE: Essentially turns event deposit functions into `noop`s.
+            // Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.event.html>
+            // Ref: <https://docs.substrate.io/build/events-and-errors/#depositing-an-event>
+            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
+            // Ref: <https://en.wikipedia.org/wiki/NOP_(code)>
+            phase = Phase::Contracts;
+            println!("Generating contracts for event deposit functions ...");
+            let event_deposit_fns = event_deposit_fn_ids(tcx);
+            if event_deposit_fns.is_empty() {
+                return;
+            }
+            let frame_system_contract = r"
+#![allow(unused)]
+#![allow(nonstandard_style)]
+pub mod frame_system {
+    pub mod pallet {
+        pub mod implement_frame_system_pallet_Pallet_generic_par_T {
+            pub fn deposit_event() {}
+
+            pub fn deposit_event_indexed() {}
+        }
+    }
+}";
+            let crate_name = tcx.crate_name(LOCAL_CRATE);
+            let local_contracts = event_deposit_fns.into_iter().filter_map(|local_def_id| {
+                let fn_name = utils::def_name(local_def_id, tcx)?;
+                let contract = format!(
+                    r"
+pub mod {crate_name} {{
+    pub mod pallet {{
+        pub mod implement_{crate_name}_pallet_Pallet_generic_par_T {{
+            pub fn {fn_name}() {{}}
+        }}
+    }}
+}}"
+                );
+                Some(contract)
+            });
+            contracts = Some(
+                std::iter::once(frame_system_contract.to_owned())
+                    .chain(local_contracts)
+                    .join("\n\n"),
+            );
         });
 
         if entry_points.is_empty() {
@@ -158,7 +218,7 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
                         https://github.com/davidsemakula/pallet-verifier/issues",
                     ),
                 ),
-                Phase::Calls | Phase::EntryPoints => (
+                _ => (
                     "Failed to generate tractable entry points",
                     None,
                     Some("Add some unit tests or benchmarks for all dispatchable functions."),
@@ -178,12 +238,13 @@ impl rustc_driver::Callbacks for EntryPointCallbacks {
             self.entry_points = entry_points;
             self.use_decls = use_decls;
             self.item_defs = item_defs;
+            self.contracts = contracts;
             rustc_driver::Compilation::Continue
         }
     }
 }
 
-impl EntryPointCallbacks {
+impl EntryPointsCallbacks {
     /// Returns module content for all generated tractable entry points (if any).
     pub fn entry_points_content(&self) -> Option<String> {
         (!self.entry_points.is_empty()).then(|| {
@@ -209,6 +270,17 @@ impl EntryPointCallbacks {
     pub fn entry_point_names(&self) -> FxHashSet<&str> {
         self.entry_points.keys().map(String::as_str).collect()
     }
+
+    /// Returns event deposit function "contracts".
+    ///
+    /// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.event.html>
+    ///
+    /// Ref: <https://docs.substrate.io/build/events-and-errors/#depositing-an-event>
+    ///
+    /// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
+    pub fn contracts(&self) -> Option<&str> {
+        self.contracts.as_deref()
+    }
 }
 
 /// The analysis phase.
@@ -221,6 +293,57 @@ enum Phase {
     Calls,
     /// Composing entry points for dispatchables with calls.
     EntryPoints,
+    /// Composing "contracts" for event deposit functions.
+    Contracts,
+}
+
+/// Finds names of dispatchable functions.
+///
+/// Dispatchable functions are represented as variants of an enum `Call<T: Config>`
+/// with attributes `#[codec(index: u8 = ..)]`.
+/// Notably, there's a "phantom" variant `__Ignore` which should be, well, ignored :)
+fn dispatchable_names(tcx: TyCtxt<'_>) -> FxHashSet<&str> {
+    let mut results = FxHashSet::default();
+    let hir = tcx.hir();
+    for item_id in hir.items() {
+        let item = hir.item(item_id);
+        if item.ident.as_str() == "Call" {
+            if let rustc_hir::ItemKind::Enum(enum_def, enum_generics) = item.kind {
+                if !is_config_bounded(enum_generics, tcx) {
+                    continue;
+                }
+                for variant in enum_def.variants {
+                    let name = variant.ident.as_str();
+                    if !name.starts_with("__") {
+                        results.insert(name);
+                    }
+                }
+            }
+        }
+    }
+    results
+}
+
+/// Finds definitions of dispatchable functions.
+///
+/// Dispatchable function definitions are associated `fn`s of `impl<T: Config> Pallet<T>`,
+/// whose name is a variant of the `Call<T: Config>` enum.
+fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<LocalDefId> {
+    let hir = tcx.hir();
+    hir.body_owners()
+        .filter_map(|local_def_id| {
+            let body_owner_kind = hir.body_owner_kind(local_def_id);
+            if !matches!(body_owner_kind, rustc_hir::BodyOwnerKind::Fn) {
+                return None;
+            }
+            let fn_name = utils::def_name(local_def_id, tcx)?;
+            if !names.contains(&fn_name.as_str()) {
+                return None;
+            }
+            let def_id = local_def_id.to_def_id();
+            is_pallet_assoc_item(def_id, tcx).then_some(local_def_id)
+        })
+        .collect()
 }
 
 /// Composes an entry point (returns a `name`, `content` and "used item" `DefId`s).
@@ -568,101 +691,158 @@ pub fn {name}({params_list}) {{
     Some((name, content, used_items))
 }
 
-/// Finds names of dispatchable functions.
+/// Finds definitions of event deposit functions.
 ///
-/// Dispatchable functions are represented as variants of an enum `Call<T: Config>`
-/// with attributes `#[codec(index: u8 = ..)]`.
-/// Notably, there's a "phantom" variant `__Ignore` which should be, well, ignored :)
-fn dispatchable_names(tcx: TyCtxt<'_>) -> FxHashSet<&str> {
-    let mut results = FxHashSet::default();
+/// Event deposit functions definitions are associated `fn`s of `impl<T: Config> Pallet<T>`,
+///  with a single parameter `event: Event<T>`, no outputs, and a call to
+/// `<frame_system::Pallet<T>>::deposit_event` as the tail expression.
+///
+/// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.event.html>
+/// Ref: <https://docs.substrate.io/build/events-and-errors/#depositing-an-event>
+fn event_deposit_fn_ids(tcx: TyCtxt<'_>) -> FxHashSet<LocalDefId> {
     let hir = tcx.hir();
-    for item_id in hir.items() {
-        let item = hir.item(item_id);
-        if item.ident.as_str() == "Call" {
-            if let rustc_hir::ItemKind::Enum(enum_def, enum_generics) = item.kind {
-                if !is_config_bounded(enum_generics, tcx) {
-                    continue;
-                }
-                for variant in enum_def.variants {
-                    let name = variant.ident.as_str();
-                    if !name.starts_with("__") {
-                        results.insert(name);
+    hir.body_owners()
+        .filter_map(|local_def_id| {
+            // Checks that definition is a `fn`.
+            let body_owner_kind = hir.body_owner_kind(local_def_id);
+            if !matches!(body_owner_kind, rustc_hir::BodyOwnerKind::Fn) {
+                return None;
+            }
+
+            // Checks that `fn` is an associated item of `impl<T: Config> Pallet<T>`.
+            let def_id = local_def_id.to_def_id();
+            if !is_pallet_assoc_item(def_id, tcx) {
+                return None;
+            }
+
+            // Checks that `fn` signature matches `fn ..(event: Event<T>) {}`.
+            let hir_id = tcx.local_def_id_to_hir_id(local_def_id);
+            let hir_body_id = hir.body_owned_by(local_def_id);
+            let hir_body = hir.body(hir_body_id);
+            let params = hir_body.params;
+            if params.len() != 1 {
+                return None;
+            }
+            let param = params.first()?;
+            let param_name = param.pat.simple_ident()?;
+            if param_name.as_str() != "event" {
+                return None;
+            }
+            let fn_decl = hir.fn_decl_by_hir_id(hir_id)?;
+            let return_ty = fn_decl.output;
+            if !matches!(return_ty, rustc_hir::FnRetTy::DefaultReturn(_)) {
+                return None;
+            }
+            let param_ty = fn_decl.inputs.first()?;
+            let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = param_ty.kind else {
+                return None;
+            };
+            if path.segments.len() != 1 || !matches!(path.res, Res::Def(DefKind::Enum, _)) {
+                return None;
+            }
+            let segment = path.segments.first()?;
+            if segment.ident.as_str() != "Event" {
+                return None;
+            }
+            let gen_args = segment.args?.args;
+            if gen_args.len() != 1 {
+                return None;
+            }
+            let rustc_hir::GenericArg::Type(gen_ty) = gen_args.first()? else {
+                return None;
+            };
+            let (_, gen_ty_name) = gen_ty.as_generic_param()?;
+            if gen_ty_name.as_str() != "T" {
+                return None;
+            }
+
+            // Checks that the tail expression is a call to `<frame_system::Pallet<T>>::deposit_event`.
+            let rustc_hir::ExprKind::Block(
+                rustc_hir::Block {
+                    expr: Some(tail_expr),
+                    ..
+                },
+                _,
+            ) = hir_body.value.kind
+            else {
+                return None;
+            };
+            let rustc_hir::ExprKind::Call(call_expr, call_args) = tail_expr.kind else {
+                return None;
+            };
+            if call_args.len() != 1 {
+                return None;
+            }
+            let rustc_hir::ExprKind::Path(rustc_hir::QPath::TypeRelative(call_ty, call_fn)) =
+                call_expr.kind
+            else {
+                return None;
+            };
+            if call_fn.ident.as_str() != "deposit_event" {
+                return None;
+            }
+            let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(None, call_ty_path)) =
+                call_ty.kind
+            else {
+                return None;
+            };
+            let Res::Def(DefKind::Struct, struct_def_id) = call_ty_path.res else {
+                return None;
+            };
+            let def_path = tcx.def_path_str(struct_def_id);
+            (def_path == "frame_system::Pallet").then_some(local_def_id)
+        })
+        .collect()
+}
+
+/// Verifies that the definition is an associated item of `impl<T: Config> Pallet<T>`.
+fn is_pallet_assoc_item(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
+    let impl_assoc_item = tcx
+        .opt_associated_item(def_id)
+        .filter(|assoc_item| assoc_item.container == AssocItemContainer::ImplContainer);
+    let impl_local_def_id =
+        impl_assoc_item.and_then(|impl_assoc_item| impl_assoc_item.container_id(tcx).as_local());
+    if let Some(impl_local_def_id) = impl_local_def_id {
+        let node = tcx.hir_node_by_def_id(impl_local_def_id);
+        if let rustc_hir::Node::Item(item) = node {
+            if let rustc_hir::ItemKind::Impl(impl_item) = item.kind {
+                if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) =
+                    impl_item.self_ty.kind
+                {
+                    if is_config_bounded(impl_item.generics, tcx) {
+                        if let Res::Def(DefKind::Struct, struct_def_id) = path.res {
+                            let struct_name =
+                                struct_def_id.as_local().and_then(|struct_local_def_id| {
+                                    utils::def_name(struct_local_def_id, tcx)
+                                });
+                            return struct_name
+                                .is_some_and(|struct_name| struct_name.as_str() == "Pallet");
+                        }
                     }
                 }
             }
         }
     }
-    results
-}
 
-/// Finds `DefId`s of dispatchable functions.
-///
-/// Dispatchable function definitions are associated `fn`s of `impl<T: Config> Pallet<T>`.
-fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<DefId> {
-    let hir = tcx.hir();
-    hir.body_owners()
-        .filter_map(|local_def_id| {
-            let body_owner_kind = hir.body_owner_kind(local_def_id);
-            if !matches!(body_owner_kind, rustc_hir::BodyOwnerKind::Fn) {
-                return None;
-            }
-            let fn_name = utils::def_name(local_def_id, tcx)?;
-            if !names.contains(&fn_name.as_str()) {
-                return None;
-            }
-            let def_id = local_def_id.to_def_id();
-            let assoc_item = tcx.opt_associated_item(def_id)?;
-            if assoc_item.container != AssocItemContainer::ImplContainer {
-                return None;
-            }
-            let impl_def_id = assoc_item.container_id(tcx);
-            let impl_local_def_id = impl_def_id.as_local()?;
-            let node = tcx.hir_node_by_def_id(impl_local_def_id);
-            let rustc_hir::Node::Item(item) = node else {
-                return None;
-            };
-            let rustc_hir::ItemKind::Impl(impl_item) = item.kind else {
-                return None;
-            };
-            let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) =
-                impl_item.self_ty.kind
-            else {
-                return None;
-            };
-            if !is_config_bounded(impl_item.generics, tcx) {
-                return None;
-            }
-            let Res::Def(DefKind::Struct, struct_def_id) = path.res else {
-                return None;
-            };
-            let is_pallet_struct_impl = struct_def_id
-                .as_local()
-                .and_then(|struct_local_def_id| utils::def_name(struct_local_def_id, tcx))
-                .is_some_and(|struct_name| struct_name.as_str() == "Pallet");
-            is_pallet_struct_impl.then_some(local_def_id.to_def_id())
-        })
-        .collect()
+    false
 }
 
 /// Verifies that the generics only include a `<T: Config>` bound.
 fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
     if generics.params.len() == 1 {
         let param_name = Symbol::intern("T");
-        if let Some((bounds_info,)) = generics
+        let param_t_only_bounds_info = generics
             .get_named(param_name)
             .and_then(|param| generics.bounds_for_param(param.def_id).collect_tuple())
-        {
-            if bounds_info.bounds.len() == 1 {
-                if let Some(trait_ref) = bounds_info.bounds[0].trait_ref() {
-                    if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
-                        if let Some(trait_name) = trait_def_id
-                            .as_local()
-                            .and_then(|trait_local_def_id| utils::def_name(trait_local_def_id, tcx))
-                        {
-                            return trait_name.as_str() == "Config";
-                        }
-                    }
-                }
+            .filter(|(bounds_info,)| bounds_info.bounds.len() == 1);
+        let trait_ref =
+            param_t_only_bounds_info.and_then(|(bounds_info,)| bounds_info.bounds[0].trait_ref());
+        if let Some(trait_ref) = trait_ref {
+            if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
+                let trait_name = trait_def_id
+                    .as_local()
+                    .and_then(|trait_local_def_id| utils::def_name(trait_local_def_id, tcx));
+                return trait_name.is_some_and(|trait_name| trait_name.as_str() == "Config");
             }
         }
     }
@@ -947,13 +1127,13 @@ fn process_used_items(
 }
 
 /// MIR visitor that collects "specialized" calls to the specified dispatchable functions.
-pub struct DispatchableCallVisitor<'tcx, 'analysis> {
-    def_ids: &'analysis FxHashSet<DefId>,
-    calls: FxHashMap<DefId, Terminator<'tcx>>,
+struct DispatchableCallVisitor<'tcx, 'analysis> {
+    def_ids: &'analysis FxHashSet<LocalDefId>,
+    calls: FxHashMap<LocalDefId, Terminator<'tcx>>,
 }
 
 impl<'tcx, 'analysis> DispatchableCallVisitor<'tcx, 'analysis> {
-    pub fn new(def_ids: &'analysis FxHashSet<DefId>) -> Self {
+    pub fn new(def_ids: &'analysis FxHashSet<LocalDefId>) -> Self {
         Self {
             def_ids,
             calls: FxHashMap::default(),
@@ -964,7 +1144,12 @@ impl<'tcx, 'analysis> DispatchableCallVisitor<'tcx, 'analysis> {
 impl<'tcx, 'analysis> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'analysis> {
     fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
         if let TerminatorKind::Call { func, .. } = &terminator.kind {
-            let call_info = func.const_fn_def().filter(|(def_id, gen_args)| {
+            let call_info = func.const_fn_def().and_then(|(def_id, gen_args)| {
+                def_id
+                    .as_local()
+                    .map(|local_def_id| (local_def_id, gen_args))
+            });
+            if let Some((local_def_id, gen_args)) = call_info {
                 let contains_type_params = || {
                     gen_args
                         .iter()
@@ -977,12 +1162,12 @@ impl<'tcx, 'analysis> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'analysis>
                             is_param_ty
                         })
                 };
-                self.def_ids.contains(def_id)
-                    && !self.calls.contains_key(def_id)
+                if self.def_ids.contains(&local_def_id)
+                    && !self.calls.contains_key(&local_def_id)
                     && !contains_type_params()
-            });
-            if let Some((def_id, _)) = call_info {
-                self.calls.insert(def_id, terminator.clone());
+                {
+                    self.calls.insert(local_def_id, terminator.clone());
+                }
             }
         }
 
@@ -991,7 +1176,7 @@ impl<'tcx, 'analysis> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'analysis>
 }
 
 /// MIR visitor that collects used local and item definitions, item imports and fn calls for the specified locals.
-pub struct ValueVisitor<'tcx, 'analysis> {
+struct ValueVisitor<'tcx, 'analysis> {
     locals: &'analysis FxHashSet<Local>,
     used_items: FxHashSet<DefId>,
     item_defs: FxHashSet<DefId>,
@@ -1043,7 +1228,7 @@ impl<'tcx, 'analysis> Visitor<'tcx> for ValueVisitor<'tcx, 'analysis> {
 }
 
 /// MIR visitor that collects used item definitions and imports, and fn calls for a closure.
-pub struct ClosureVisitor<'tcx> {
+struct ClosureVisitor<'tcx> {
     used_items: FxHashSet<DefId>,
     item_defs: FxHashSet<DefId>,
     calls: Vec<Terminator<'tcx>>,
