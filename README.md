@@ -15,8 +15,32 @@ pallet-verifier is a tool for detecting [common security vulnerabilities][vulner
 [abs-int]: https://en.wikipedia.org/wiki/Abstract_interpretation
 [symbex]: https://en.wikipedia.org/wiki/Symbolic_execution
 
-
 **NOTE:** 🚧 This project is still work in progress, check back over the next few weeks for regular updates.
+
+## Installation
+
+### Prerequisites
+
+- [Rust, rustup and cargo](https://doc.rust-lang.org/book/ch01-01-installation.html)
+- [Clang](https://clang.llvm.org/get_started.html)
+- [Cmake](https://cmake.org/download/)
+
+### Installing `pallet-verifier`
+
+```shell
+git clone https://github.com/davidsemakula/pallet-verifier.git
+cd pallet-verifier
+cargo install --locked --path ./
+```
+
+## Usage
+
+Run the following command from the crate root of a FRAME pallet
+(i.e. the directory that contains the `Cargo.toml` file for the FRAME pallet).
+
+```shell
+cargo verify-pallet
+```
 
 ## License
 
