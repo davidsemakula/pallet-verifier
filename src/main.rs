@@ -63,14 +63,16 @@ fn main() {
 fn call_cargo() {
     // Builds cargo command.
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    cmd.arg("check");
+    cmd.arg("test");
+    cmd.arg("--lib");
+    cmd.arg("--no-run");
 
     // Sets `RUSTC_WRAPPER` to `pallet-verifier` (specifically this cargo subcommand).
     let path = env::current_exe().expect("Expected valid executable path");
     cmd.env("RUSTC_WRAPPER", path);
 
-    // Enables compilation of MIRAI-only code, and dumping MIR for all functions (for dependencies).
-    cmd.env("RUSTFLAGS", "--cfg=mirai -Zalways_encode_mir");
+    // Enables dumping MIR for all functions.
+    cmd.env("RUSTFLAGS", "-Zalways_encode_mir");
 
     // Explicitly set toolchain to match `pallet-verifier`.
     if let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") {

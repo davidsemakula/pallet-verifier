@@ -29,18 +29,21 @@ fn main() {
     if is_rustc_wrapper_mode {
         cli_args.remove(1);
     }
+    if env::var("CARGO_PKG_NAME").is_err() || env::var("CARGO_PRIMARY_PACKAGE").is_err() {
+        // Presumably, this is some kind of direct call to the `pallet-verifier` binary,
+        // instead of via `cargo verify-pallet`, so we need to set some extra flags.
+        cli_args.extend([
+            // Enables compilation of unit tests and test harness generation.
+            "--test".to_owned(),
+            // Enables dumping MIR for all functions.
+            "-Zalways-encode-mir".to_owned(),
+        ]);
+    }
 
     // Generates tractable entry points for FRAME pallet.
-    let mut entry_point_args = cli_args.clone();
-    entry_point_args.extend([
-        // Enables compilation of unit tests and test harness generation.
-        "--test".to_owned(),
-        // Enables dumping MIR for all functions.
-        "-Zalways-encode-mir".to_owned(),
-    ]);
     let mut entry_point_callbacks = EntryPointsCallbacks::default();
     let entry_point_compiler =
-        rustc_driver::RunCompiler::new(&entry_point_args, &mut entry_point_callbacks);
+        rustc_driver::RunCompiler::new(&cli_args, &mut entry_point_callbacks);
     let entry_point_result = entry_point_compiler.run();
     if entry_point_result.is_err() {
         process::exit(rustc_driver::EXIT_FAILURE);
@@ -64,19 +67,11 @@ fn main() {
     );
 
     // Analyzes FRAME pallet with MIRAI.
-    let mut verifier_args = cli_args.clone();
-    verifier_args.extend([
-        // Enables compilation of unit tests and test harness generation.
-        "--test".to_owned(),
-        // Enables compilation of MIRAI only code.
-        "--cfg=mirai".to_owned(),
-        // Enables dumping MIR for all functions.
-        "-Zalways-encode-mir".to_owned(),
-    ]);
+    // Enables compilation of MIRAI only code.
+    cli_args.push("--cfg=mirai".to_owned());
     let entry_point_names = entry_point_callbacks.entry_point_names();
     let mut verifier_callbacks = VerifierCallbacks::new(&entry_point_names);
-    let mut verifier_compiler =
-        rustc_driver::RunCompiler::new(&verifier_args, &mut verifier_callbacks);
+    let mut verifier_compiler = rustc_driver::RunCompiler::new(&cli_args, &mut verifier_callbacks);
     verifier_compiler.set_file_loader(Some(Box::new(virtual_file_loader)));
     let verifier_result = verifier_compiler.run();
 

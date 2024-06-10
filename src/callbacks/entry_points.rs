@@ -112,7 +112,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                     visitor.visit_body(body);
 
                     for (callee_local_def_id, terminator) in visitor.calls {
-                        calls.insert(callee_local_def_id, (body, terminator));
+                        calls.insert(callee_local_def_id, (terminator, body));
                     }
                 }
             }
@@ -120,14 +120,14 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                 return;
             }
 
-            // Composes entry points module content and add warnings for missing missing dispatchable calls.
+            // Composes entry points module content and add warnings for missing dispatchable calls.
             println!("Generating tractable entry points for FRAME pallet ...");
             let mut used_items = FxHashSet::default();
             phase = Phase::EntryPoints;
             for local_def_id in local_def_ids.iter() {
                 let call = calls
                     .get(local_def_id)
-                    .and_then(|(body, terminator)| compose_entry_point(terminator, body, tcx));
+                    .and_then(|(terminator, body)| compose_entry_point(terminator, body, tcx));
                 if let Some((name, content, local_used_items)) = call {
                     entry_points.insert(name, content);
                     used_items.extend(local_used_items);
@@ -369,7 +369,7 @@ fn compose_entry_point<'tcx>(
     let fn_local_def_id = fn_def_id.as_local()?;
     let fn_name = utils::def_name(fn_local_def_id, tcx)?;
 
-    // `T: Config` type, name and generic param `DefId`.
+    // `T: Config` type, name, generic param `DefId` and trait info.
     let config_type = fn_generic_args.first()?.as_type()?;
     let config_def_id = config_type.ty_adt_def()?.did();
     let config_local_def_id = config_def_id.as_local()?;
@@ -383,10 +383,32 @@ fn compose_entry_point<'tcx>(
     let hir = tcx.hir();
     let impl_generics = hir.get_generics(impl_local_def_id)?;
     let config_param_name = Symbol::intern("T");
-    let config_param_def_id = impl_generics
-        .get_named(config_param_name)?
-        .def_id
-        .to_def_id();
+    let config_param_local_def_id = impl_generics.get_named(config_param_name)?.def_id;
+    let config_param_def_id = config_param_local_def_id.to_def_id();
+    let config_trait_local_def_id = impl_generics
+        .bounds_for_param(config_param_local_def_id)
+        .find_map(|bound_info| {
+            bound_info.bounds.iter().find_map(|bound| {
+                let trait_ref = bound.trait_ref()?;
+                if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
+                    let trait_local_def_id = trait_def_id.as_local()?;
+                    let trait_name = utils::def_name(trait_local_def_id, tcx)?;
+                    return (trait_name.as_str() == "Config").then_some(trait_local_def_id);
+                }
+                None
+            })
+        })?;
+    let config_trait_node = tcx.hir_node_by_def_id(config_trait_local_def_id);
+    let rustc_hir::Node::Item(config_trait_item) = config_trait_node else {
+        return None;
+    };
+    let rustc_hir::ItemKind::Trait(.., config_trait_item_refs) = config_trait_item.kind else {
+        return None;
+    };
+    let config_trait_item_names: FxHashSet<_> = config_trait_item_refs
+        .iter()
+        .map(|item| item.ident.as_str())
+        .collect();
 
     // Item imports and definitions.
     let mut used_items = FxHashSet::default();
@@ -405,6 +427,8 @@ fn compose_entry_point<'tcx>(
     let fn_params_ty = fn_decl.inputs;
     let source_map = tcx.sess.source_map();
     let local_decls = owner_body.local_decls();
+    let config_name_fq = format!("<{config_name} as crate::pallet::Config>");
+    let config_name_fq_sys = format!("<{config_name} as frame_system::Config>");
     for (idx, fn_param) in fn_params.iter().enumerate() {
         // Collects used items, generics and anonymous constants for param type.
         let param_ty = fn_params_ty.get(idx).expect("Expected param type");
@@ -413,6 +437,7 @@ fn compose_entry_point<'tcx>(
         process_hir_ty(param_ty, &mut used_items, &mut types, &mut anon_consts);
         let mut config_generic_params = Vec::new();
         let mut int_const_generic_params = Vec::new();
+        let mut config_related_types = FxHashMap::default();
         let mut has_non_config_generic_params = false;
         let mut has_raw_indirection_dynamic_or_opaque_types = false;
         let mut has_non_int_const_generic_params = false;
@@ -422,6 +447,18 @@ fn compose_entry_point<'tcx>(
                     config_generic_params.push(ty);
                 } else {
                     has_non_config_generic_params = true;
+                }
+            } else if let rustc_hir::TyKind::Path(rustc_hir::QPath::TypeRelative(gen_ty, segment)) =
+                ty.kind
+            {
+                let is_config_param =
+                    gen_ty
+                        .as_generic_param()
+                        .is_some_and(|(generic_param_def_id, _)| {
+                            generic_param_def_id == config_param_def_id
+                        });
+                if is_config_param {
+                    config_related_types.insert(gen_ty.span, segment);
                 }
             } else {
                 has_raw_indirection_dynamic_or_opaque_types |= matches!(
@@ -471,7 +508,22 @@ fn compose_entry_point<'tcx>(
                 let mut offset_shift = 0;
                 let replacements = config_generic_params
                     .into_iter()
-                    .map(|config_param| (config_param.span, config_name.as_str()))
+                    .map(|config_param_ty| {
+                        (
+                            config_param_ty.span,
+                            match config_related_types.get(&config_param_ty.span) {
+                                Some(segment) => {
+                                    let related_ty_name = segment.ident.as_str();
+                                    if config_trait_item_names.contains(related_ty_name) {
+                                        &config_name_fq
+                                    } else {
+                                        &config_name_fq_sys
+                                    }
+                                }
+                                None => config_name.as_str(),
+                            },
+                        )
+                    })
                     .chain(
                         // We use 1000 arbitrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
                         // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#k-limits>
@@ -486,7 +538,7 @@ fn compose_entry_point<'tcx>(
                     let start = span.lo().to_usize() - offset + offset_shift;
                     let end = span.hi().to_usize() - offset + offset_shift;
                     user_ty.replace_range(start..end, replacement);
-                    offset_shift += config_name.as_str().len() - (end - start);
+                    offset_shift += replacement.len() - (end - start);
                 }
             }
             params.push(format!("{unique_name}: {user_ty}"));
@@ -745,7 +797,7 @@ fn event_deposit_fn_ids(tcx: TyCtxt<'_>) -> FxHashSet<LocalDefId> {
                 return None;
             }
             let gen_args = segment.args?.args;
-            if gen_args.len() != 1 {
+            if gen_args.is_empty() {
                 return None;
             }
             let rustc_hir::GenericArg::Type(gen_ty) = gen_args.first()? else {
@@ -795,7 +847,7 @@ fn event_deposit_fn_ids(tcx: TyCtxt<'_>) -> FxHashSet<LocalDefId> {
         .collect()
 }
 
-/// Verifies that the definition is an associated item of `impl<T: Config> Pallet<T>`.
+/// Verifies that the definition is an associated item of a non-trait `impl<T: Config> Pallet<T>`.
 fn is_pallet_assoc_item(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
     let impl_assoc_item = tcx
         .opt_associated_item(def_id)
@@ -809,7 +861,7 @@ fn is_pallet_assoc_item(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
                 if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) =
                     impl_item.self_ty.kind
                 {
-                    if is_config_bounded(impl_item.generics, tcx) {
+                    if impl_item.of_trait.is_none() && is_config_bounded(impl_item.generics, tcx) {
                         if let Res::Def(DefKind::Struct, struct_def_id) = path.res {
                             let struct_name =
                                 struct_def_id.as_local().and_then(|struct_local_def_id| {
@@ -827,27 +879,24 @@ fn is_pallet_assoc_item(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
     false
 }
 
-/// Verifies that the generics only include a `<T: Config>` bound.
+/// Verifies that the generics include a `<T: Config>` bound.
 fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
-    if generics.params.len() == 1 {
-        let param_name = Symbol::intern("T");
-        let param_t_only_bounds_info = generics
-            .get_named(param_name)
-            .and_then(|param| generics.bounds_for_param(param.def_id).collect_tuple())
-            .filter(|(bounds_info,)| bounds_info.bounds.len() == 1);
-        let trait_ref =
-            param_t_only_bounds_info.and_then(|(bounds_info,)| bounds_info.bounds[0].trait_ref());
-        if let Some(trait_ref) = trait_ref {
-            if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
-                let trait_name = trait_def_id
-                    .as_local()
-                    .and_then(|trait_local_def_id| utils::def_name(trait_local_def_id, tcx));
-                return trait_name.is_some_and(|trait_name| trait_name.as_str() == "Config");
-            }
-        }
-    }
-
-    false
+    let param_name = Symbol::intern("T");
+    generics.get_named(param_name).is_some_and(|param| {
+        generics.bounds_for_param(param.def_id).any(|bound_info| {
+            bound_info.bounds.iter().any(|bound| {
+                bound.trait_ref().is_some_and(|trait_ref| {
+                    if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
+                        return trait_def_id.as_local().is_some_and(|trait_local_def_id| {
+                            utils::def_name(trait_local_def_id, tcx)
+                                .is_some_and(|trait_name| trait_name.as_str() == "Config")
+                        });
+                    }
+                    false
+                })
+            })
+        })
+    })
 }
 
 /// Collects use declarations or copies/re-defines used items depending on item kind, source,
