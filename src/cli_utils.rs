@@ -28,18 +28,25 @@ pub fn handle_meta_args(command: &str) {
     }
 }
 
-/// Calls `rustc`.
+/// Calls `rustc` (exits on failure).
 pub fn call_rustc<I, S>(args: I)
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    // Builds `rustc` command.
+    let mut cmd = rustc(args);
+    exec_cmd(&mut cmd);
+}
+
+/// Builds `rustc` command.
+pub fn rustc<I, S>(args: I) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut cmd = Command::new(env::var("RUSTC").unwrap_or_else(|_| "rustc".into()));
     cmd.args(args);
-
-    // Executes command (exits on failure).
-    exec_cmd(&mut cmd);
+    cmd
 }
 
 /// Executes command (exits on failure).

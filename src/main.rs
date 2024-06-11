@@ -92,14 +92,37 @@ fn call_pallet_verifier() {
     let mut path = env::current_exe()
         .expect("Expected valid executable path")
         .with_file_name("pallet-verifier");
-    if cfg!(windows) {
+    if cfg!(target_os = "windows") {
         path.set_extension("exe");
     }
     let mut cmd = Command::new(path);
     cmd.args(env::args().skip(2));
-    // Explicitly set dynamic/shared library path to match `pallet-verifier`.
-    if let Some(dl_path) = option_env!("LD_LIBRARY_PATH") {
-        cmd.env("LD_LIBRARY_PATH", dl_path);
+
+    // Explicitly sets dynamic/shared library path to match `pallet-verifier`.
+    let mut add_dy_lib_path = |dylib_path: &str| {
+        cmd.env("LD_LIBRARY_PATH", dylib_path);
+        if cfg!(target_os = "macos") {
+            // Ref: <https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/DynamicLibraries/100-Articles/DynamicLibraryUsageGuidelines.html>
+            cmd.env("DYLD_LIBRARY_PATH", dylib_path);
+        }
+    };
+    if let Some(dl_path) =
+        option_env!("LD_LIBRARY_PATH").or_else(|| option_env!("DYLD_LIBRARY_PATH"))
+    {
+        add_dy_lib_path(dl_path);
+    } else {
+        // Composes path from sysroot.
+        let mut sys_root_cmd = cli_utils::rustc(["--print", "sysroot"]);
+        if let Some(out) = sys_root_cmd
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+        {
+            let mut sys_root_path =
+                Path::new(String::from_utf8_lossy(&out.stdout).trim()).to_path_buf();
+            sys_root_path.push("lib");
+            add_dy_lib_path(&sys_root_path.to_string_lossy());
+        }
     }
 
     // Executes command (exits on failure).
