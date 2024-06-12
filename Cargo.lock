@@ -599,7 +599,9 @@ dependencies = [
 name = "pallet-verifier"
 version = "0.1.0"
 dependencies = [
+ "env_logger",
  "itertools 0.13.0",
+ "log",
  "mirai",
  "rustc_tools_util",
  "tempfile",

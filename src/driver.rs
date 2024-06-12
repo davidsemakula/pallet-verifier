@@ -4,6 +4,7 @@
 
 extern crate rustc_driver;
 extern crate rustc_hash;
+extern crate rustc_session;
 
 mod cli_utils;
 
@@ -14,6 +15,24 @@ use pallet_verifier::{EntryPointsCallbacks, VerifierCallbacks, VirtualFileLoader
 const COMMAND: &str = "pallet-verifier";
 
 fn main() {
+    // Initialize loggers.
+    if let Ok(log) = env::var("PALLET_VERIFIER_LOG") {
+        // Initialize `rustc` logger.
+        env::set_var("RUSTC_LOG", &log);
+        env::set_var("RUSTC_LOG_COLOR", "always");
+        let early_error_handler =
+            rustc_session::EarlyDiagCtxt::new(rustc_session::config::ErrorOutputType::default());
+        rustc_driver::init_rustc_env_logger(&early_error_handler);
+
+        // Initialize `MIRAI` logger.
+        env::set_var("MIRAI_LOG", &log);
+        env::set_var("MIRAI_LOG_STYLE", "always");
+        let e = env_logger::Env::new()
+            .filter("MIRAI_LOG")
+            .write_style("MIRAI_LOG_STYLE");
+        env_logger::init_from_env(e);
+    }
+
     // Shows help and version messages (and exits, if necessary).
     cli_utils::handle_meta_args(COMMAND);
 
