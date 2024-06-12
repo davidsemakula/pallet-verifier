@@ -252,6 +252,18 @@ fn emit_diagnostics(
     };
 
     for mut diagnostic in diagnostics {
+        let is_missing_mir_warning = diagnostic
+            .messages
+            .first()
+            .and_then(|(msg, _)| msg.as_str())
+            .is_some_and(|msg| msg.contains("MIR body") && msg.contains("without"));
+        if is_missing_mir_warning {
+            // Ignores diagnostics about foreign functions with missing MIR bodies.
+            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
+            diagnostic.cancel();
+            continue;
+        }
+
         let is_primary_span_in_entry_point = is_diagnostic_span_in_entry_point(&diagnostic.span);
         let is_primary_span_local = is_diagnostic_span_local(&diagnostic.span);
         let has_related_non_entry_point_local_sub_diagnostics = || {
