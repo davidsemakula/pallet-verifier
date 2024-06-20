@@ -30,10 +30,10 @@ extern crate rustc_span;
 mod callbacks;
 mod file_loader;
 
-pub use callbacks::{EntryPointsCallbacks, VerifierCallbacks};
+pub use callbacks::{DefaultCallbacks, EntryPointsCallbacks, VerifierCallbacks};
 pub use file_loader::VirtualFileLoader;
 
-const ENTRY_POINTS_MOD_NAME: &str = "__pallet_verifier_entry_points";
-const ENTRY_POINT_FN_PREFIX: &str = "__pallet_verifier_entry_point__";
+pub const ENTRY_POINTS_MOD_NAME: &str = "__pallet_verifier_entry_points";
+pub const ENTRY_POINT_FN_PREFIX: &str = "__pallet_verifier_entry_point__";
 
-const CONTRACTS_MOD_NAME: &str = "foreign_contracts";
+pub const CONTRACTS_MOD_NAME: &str = "foreign_contracts";

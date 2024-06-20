@@ -145,8 +145,9 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             });
 
             // Creates "summaries" for "contracts" (if any) with MIRAI.
+            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#summaries>
             if let Some(contracts_mod_def_id) = contracts_mod_def_id {
-                println!("Creating summaries for event deposit functions ...");
+                println!("Creating summaries for FRAME and Substrate functions ...");
                 // Collect "contract" `fn` ids.
                 let mut visitor = ContractsVisitor::new(tcx);
                 hir.visit_item_likes_in_module(contracts_mod_def_id, &mut visitor);
@@ -181,6 +182,9 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                     emit_diagnostics(local_def_id, diagnostics, &local_mod_spans, tcx);
                 }
             }
+
+            // Outputs call graph.
+            crate_visitor.call_graph.output();
         });
         Compilation::Continue
     }

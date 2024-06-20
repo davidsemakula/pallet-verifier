@@ -1,58 +1,70 @@
-//! A `FileLoader` that "virtually" adds "entry points" and "contracts" modules to the crate.
+//! A `FileLoader` that "virtually" adds modules to a crate.
 //!
 //! See [`crate::EntryPointsCallbacks`] doc.
 
 use rustc_data_structures::sync::Lrc;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_span::source_map::RealFileLoader;
 
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::{CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME};
+use itertools::Itertools;
 
-/// A `FileLoader` that "virtually" adds "entry points" and "contracts" modules to the crate.
-///
-/// See [`crate::EntryPointsCallbacks`] doc.
+/// A `FileLoader` that "virtually" adds modules to a crate.
 pub struct VirtualFileLoader {
     file_loader: RealFileLoader,
     root_path: PathBuf,
-    entry_points_path: PathBuf,
-    entry_points_content: String,
-    contracts: Option<(PathBuf, String)>,
+    virtual_root_content: Option<String>,
+    virtual_mod_decls: Option<String>,
+    // `path` -> `content` map for "virtual" modules.
+    virtual_mod_contents: FxHashMap<PathBuf, String>,
 }
 
 impl VirtualFileLoader {
+    /// Creates a "virtual" file loader.
     pub fn new(
         root_path: PathBuf,
-        entry_points_content: String,
-        contracts: Option<String>,
+        virtual_root_content: Option<String>,
+        // `name` -> `content` map for "virtual" modules.
+        virtual_mods: Option<FxHashMap<&str, String>>,
     ) -> Self {
-        let mut entry_points_path = root_path.clone();
-        entry_points_path.set_file_name(format!("{ENTRY_POINTS_MOD_NAME}.rs"));
-
-        let contracts = contracts.map(|contracts| {
-            let mut contracts_path = root_path.clone();
-            contracts_path.set_file_name(format!("{CONTRACTS_MOD_NAME}.rs"));
-            (contracts_path, contracts)
-        });
+        let mut virtual_mod_decls = FxHashSet::default();
+        let mut virtual_mod_contents = FxHashMap::default();
+        if let Some(virtual_mods) = virtual_mods {
+            for (name, content) in virtual_mods {
+                let mut mod_path = root_path.clone();
+                mod_path.set_file_name(format!("{name}.rs"));
+                virtual_mod_contents.insert(mod_path, content);
+                virtual_mod_decls.insert(format!("mod {name};"));
+            }
+        }
 
         Self {
             file_loader: RealFileLoader,
             root_path,
-            entry_points_path,
-            entry_points_content,
-            contracts,
+            virtual_root_content,
+            virtual_mod_decls: (!virtual_mod_decls.is_empty())
+                .then_some(virtual_mod_decls.into_iter().join("\n")),
+            virtual_mod_contents,
         }
+    }
+
+    /// Returns "virtual" content for the specified path.
+    fn virtual_content(&self, path: &Path) -> Option<&String> {
+        self.virtual_mod_contents.get(path).or_else(|| {
+            if path == self.root_path && self.virtual_root_content.is_some() {
+                self.virtual_root_content.as_ref()
+            } else {
+                None
+            }
+        })
     }
 }
 
 impl rustc_span::source_map::FileLoader for VirtualFileLoader {
     fn file_exists(&self, path: &Path) -> bool {
-        if path == self.entry_points_path
-            || self
-                .contracts
-                .as_ref()
-                .is_some_and(|(contracts_path, _)| contracts_path == path)
+        if self.virtual_mod_contents.contains_key(path)
+            || (path == self.root_path && self.virtual_root_content.is_some())
         {
             true
         } else {
@@ -61,45 +73,21 @@ impl rustc_span::source_map::FileLoader for VirtualFileLoader {
     }
 
     fn read_file(&self, path: &Path) -> std::io::Result<String> {
-        let content = if path == self.entry_points_path {
-            self.entry_points_content.clone()
-        } else if self
-            .contracts
-            .as_ref()
-            .is_some_and(|(contracts_path, _)| contracts_path == path)
-        {
-            self.contracts
-                .as_ref()
-                .map(|(_, content)| content.clone())
-                .unwrap_or_default()
+        let mut content = if let Some(content) = self.virtual_content(path) {
+            content.clone()
         } else {
-            let mut file_content = self.file_loader.read_file(path)?;
-            if path == self.root_path {
-                file_content.push_str(&format!("mod {ENTRY_POINTS_MOD_NAME};"));
-                if self.contracts.is_some() {
-                    file_content.push_str(&format!("\npub mod {CONTRACTS_MOD_NAME};"));
-                }
-            }
-            file_content
+            self.file_loader.read_file(path)?
         };
+        if path == self.root_path {
+            if let Some(decls) = self.virtual_mod_decls.as_deref() {
+                content.push_str(decls);
+            }
+        }
         std::io::Result::Ok(content)
     }
 
     fn read_binary_file(&self, path: &Path) -> std::io::Result<Lrc<[u8]>> {
-        if path == self.entry_points_path
-            || self
-                .contracts
-                .as_ref()
-                .is_some_and(|(contracts_path, _)| contracts_path == path)
-        {
-            let content = if path == self.entry_points_path {
-                self.entry_points_content.as_str()
-            } else {
-                self.contracts
-                    .as_ref()
-                    .map(|(_, content)| content.as_str())
-                    .unwrap_or_default()
-            };
+        if let Some(content) = self.virtual_content(path) {
             let mut bytes = Lrc::new_uninit_slice(content.len());
             let data: &mut [std::mem::MaybeUninit<u8>] = Lrc::get_mut(&mut bytes).unwrap();
             for (idx, byte) in content.as_bytes().iter().enumerate() {

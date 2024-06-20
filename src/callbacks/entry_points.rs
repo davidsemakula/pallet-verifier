@@ -1,5 +1,4 @@
-//! `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions,
-//! and "contracts" for event deposit functions.
+//! `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions.
 //!
 //! See [`EntryPointsCallbacks`] doc.
 
@@ -13,7 +12,7 @@ use rustc_middle::{
     ty::{AssocItemContainer, GenericArg, ImplSubject, Ty, TyCtxt, TyKind, Visibility},
 };
 use rustc_span::{
-    def_id::{DefId, LocalDefId, CRATE_DEF_ID, LOCAL_CRATE},
+    def_id::{DefId, LocalDefId, CRATE_DEF_ID},
     BytePos, Pos, Span, Symbol,
 };
 
@@ -22,18 +21,11 @@ use itertools::Itertools;
 use super::utils;
 use crate::ENTRY_POINT_FN_PREFIX;
 
-/// `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions,
-/// and "contracts" for event deposit functions.
+/// `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions.
 ///
 /// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.call.html>
 ///
-/// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.event.html>
-///
-/// Ref: <https://docs.substrate.io/build/events-and-errors/#depositing-an-event>
-///
 /// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#entry-points>
-///
-/// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
 #[derive(Default)]
 pub struct EntryPointsCallbacks {
     /// Map of generated entry point `fn` names and their definitions.
@@ -41,9 +33,6 @@ pub struct EntryPointsCallbacks {
     /// Use declarations and item definitions for generated entry points.
     use_decls: FxHashSet<String>,
     item_defs: FxHashSet<String>,
-    /// Event deposit function "contracts".
-    /// See [`Self::contracts`] doc.
-    contracts: Option<String>,
 }
 
 impl rustc_driver::Callbacks for EntryPointsCallbacks {
@@ -57,7 +46,6 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
         let mut entry_points = FxHashMap::default();
         let mut use_decls = FxHashSet::default();
         let mut item_defs = FxHashSet::default();
-        let mut contracts = None;
 
         queries.global_ctxt().unwrap().enter(|tcx| {
             // Find names of dispatchable functions.
@@ -154,51 +142,6 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
 
             // Collects use declarations or copies/re-defines used items.
             process_used_items(used_items, &mut use_decls, &mut item_defs, tcx);
-
-            // Composes "contracts" for event deposit functions.
-            // NOTE: Essentially turns event deposit functions into `noop`s.
-            // Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.event.html>
-            // Ref: <https://docs.substrate.io/build/events-and-errors/#depositing-an-event>
-            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
-            // Ref: <https://en.wikipedia.org/wiki/NOP_(code)>
-            phase = Phase::Contracts;
-            println!("Generating contracts for event deposit functions ...");
-            let event_deposit_fns = event_deposit_fn_ids(tcx);
-            if event_deposit_fns.is_empty() {
-                return;
-            }
-            let frame_system_contract = r"
-#![allow(unused)]
-#![allow(nonstandard_style)]
-pub mod frame_system {
-    pub mod pallet {
-        pub mod implement_frame_system_pallet_Pallet_generic_par_T {
-            pub fn deposit_event() {}
-
-            pub fn deposit_event_indexed() {}
-        }
-    }
-}";
-            let crate_name = tcx.crate_name(LOCAL_CRATE);
-            let local_contracts = event_deposit_fns.into_iter().filter_map(|local_def_id| {
-                let fn_name = utils::def_name(local_def_id, tcx)?;
-                let contract = format!(
-                    r"
-pub mod {crate_name} {{
-    pub mod pallet {{
-        pub mod implement_{crate_name}_pallet_Pallet_generic_par_T {{
-            pub fn {fn_name}() {{}}
-        }}
-    }}
-}}"
-                );
-                Some(contract)
-            });
-            contracts = Some(
-                std::iter::once(frame_system_contract.to_owned())
-                    .chain(local_contracts)
-                    .join("\n\n"),
-            );
         });
 
         if entry_points.is_empty() {
@@ -238,7 +181,6 @@ pub mod {crate_name} {{
             self.entry_points = entry_points;
             self.use_decls = use_decls;
             self.item_defs = item_defs;
-            self.contracts = contracts;
             rustc_driver::Compilation::Continue
         }
     }
@@ -270,17 +212,6 @@ impl EntryPointsCallbacks {
     pub fn entry_point_names(&self) -> FxHashSet<&str> {
         self.entry_points.keys().map(String::as_str).collect()
     }
-
-    /// Returns event deposit function "contracts".
-    ///
-    /// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.event.html>
-    ///
-    /// Ref: <https://docs.substrate.io/build/events-and-errors/#depositing-an-event>
-    ///
-    /// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
-    pub fn contracts(&self) -> Option<&str> {
-        self.contracts.as_deref()
-    }
 }
 
 /// The analysis phase.
@@ -293,8 +224,6 @@ enum Phase {
     Calls,
     /// Composing entry points for dispatchables with calls.
     EntryPoints,
-    /// Composing "contracts" for event deposit functions.
-    Contracts,
 }
 
 /// Finds names of dispatchable functions.
@@ -548,7 +477,7 @@ fn compose_entry_point<'tcx>(
             // dispatchable call arg type or value.
             let call_arg = call_args
                 .get(idx)
-                .unwrap_or_else(|| panic!("Expected dipatchable call argument: {param_name}"));
+                .expect("Expected dipatchable call argument: {param_name}");
             match &call_arg.node {
                 Operand::Copy(place) | Operand::Move(place) => {
                     // Adds entry point param and/or dispatchable call arg.
@@ -741,110 +670,6 @@ pub fn {name}({params_list}) {{
 }}"
     );
     Some((name, content, used_items))
-}
-
-/// Finds definitions of event deposit functions.
-///
-/// Event deposit functions definitions are associated `fn`s of `impl<T: Config> Pallet<T>`,
-///  with a single parameter `event: Event<T>`, no outputs, and a call to
-/// `<frame_system::Pallet<T>>::deposit_event` as the tail expression.
-///
-/// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.event.html>
-/// Ref: <https://docs.substrate.io/build/events-and-errors/#depositing-an-event>
-fn event_deposit_fn_ids(tcx: TyCtxt<'_>) -> FxHashSet<LocalDefId> {
-    let hir = tcx.hir();
-    hir.body_owners()
-        .filter_map(|local_def_id| {
-            // Checks that definition is a `fn`.
-            let body_owner_kind = hir.body_owner_kind(local_def_id);
-            if !matches!(body_owner_kind, rustc_hir::BodyOwnerKind::Fn) {
-                return None;
-            }
-
-            // Checks that `fn` is an associated item of `impl<T: Config> Pallet<T>`.
-            let def_id = local_def_id.to_def_id();
-            if !is_pallet_assoc_item(def_id, tcx) {
-                return None;
-            }
-
-            // Checks that `fn` signature matches `fn ..(event: Event<T>) {}`.
-            let hir_id = tcx.local_def_id_to_hir_id(local_def_id);
-            let hir_body_id = hir.body_owned_by(local_def_id);
-            let hir_body = hir.body(hir_body_id);
-            let params = hir_body.params;
-            if params.len() != 1 {
-                return None;
-            }
-            let param = params.first()?;
-            let param_name = param.pat.simple_ident()?;
-            if param_name.as_str() != "event" {
-                return None;
-            }
-            let fn_decl = hir.fn_decl_by_hir_id(hir_id)?;
-            let return_ty = fn_decl.output;
-            if !matches!(return_ty, rustc_hir::FnRetTy::DefaultReturn(_)) {
-                return None;
-            }
-            let param_ty = fn_decl.inputs.first()?;
-            let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = param_ty.kind else {
-                return None;
-            };
-            if path.segments.len() != 1 || !matches!(path.res, Res::Def(DefKind::Enum, _)) {
-                return None;
-            }
-            let segment = path.segments.first()?;
-            if segment.ident.as_str() != "Event" {
-                return None;
-            }
-            let gen_args = segment.args?.args;
-            if gen_args.is_empty() {
-                return None;
-            }
-            let rustc_hir::GenericArg::Type(gen_ty) = gen_args.first()? else {
-                return None;
-            };
-            let (_, gen_ty_name) = gen_ty.as_generic_param()?;
-            if gen_ty_name.as_str() != "T" {
-                return None;
-            }
-
-            // Checks that the tail expression is a call to `<frame_system::Pallet<T>>::deposit_event`.
-            let rustc_hir::ExprKind::Block(
-                rustc_hir::Block {
-                    expr: Some(tail_expr),
-                    ..
-                },
-                _,
-            ) = hir_body.value.kind
-            else {
-                return None;
-            };
-            let rustc_hir::ExprKind::Call(call_expr, call_args) = tail_expr.kind else {
-                return None;
-            };
-            if call_args.len() != 1 {
-                return None;
-            }
-            let rustc_hir::ExprKind::Path(rustc_hir::QPath::TypeRelative(call_ty, call_fn)) =
-                call_expr.kind
-            else {
-                return None;
-            };
-            if call_fn.ident.as_str() != "deposit_event" {
-                return None;
-            }
-            let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(None, call_ty_path)) =
-                call_ty.kind
-            else {
-                return None;
-            };
-            let Res::Def(DefKind::Struct, struct_def_id) = call_ty_path.res else {
-                return None;
-            };
-            let def_path = tcx.def_path_str(struct_def_id);
-            (def_path == "frame_system::Pallet").then_some(local_def_id)
-        })
-        .collect()
 }
 
 /// Verifies that the definition is an associated item of a non-trait `impl<T: Config> Pallet<T>`.

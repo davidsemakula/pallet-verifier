@@ -10,7 +10,10 @@ mod cli_utils;
 
 use std::{env, path::Path, process};
 
-use pallet_verifier::{EntryPointsCallbacks, VerifierCallbacks, VirtualFileLoader};
+use pallet_verifier::{
+    DefaultCallbacks, EntryPointsCallbacks, VerifierCallbacks, VirtualFileLoader,
+    CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
+};
 
 const COMMAND: &str = "pallet-verifier";
 
@@ -70,7 +73,67 @@ fn main() {
     let Some(entry_points_content) = entry_point_callbacks.entry_points_content() else {
         process::exit(rustc_driver::EXIT_FAILURE);
     };
-    let contracts = entry_point_callbacks.contracts();
+
+    // Compiles `mirai-annotations` crate and adds it as a dependency (if necessary).
+    let has_mirai_annotations_dep = cli_args.iter().enumerate().any(|(idx, arg)| {
+        arg.starts_with("mirai_annotations")
+            && cli_args.get(idx - 1).is_some_and(|arg| arg == "--extern")
+    });
+    if !has_mirai_annotations_dep {
+        let mut annotations_path = env::current_dir().expect("Expected valid current dir");
+        annotations_path.push("__pallet_verifier_artifacts/mirai_annotations/src/lib.rs");
+        let out_dir = cli_args
+            .iter()
+            .enumerate()
+            .find_map(|(idx, arg)| {
+                if arg == "--out-dir" {
+                    cli_args
+                        .get(idx + 1)
+                        .map(|arg| Path::new(arg).to_path_buf())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                let mut target_dir = env::current_dir().expect("Expected valid current dir");
+                target_dir.push("target/debug/deps");
+                target_dir
+            });
+        let mut annotations_out_file = Path::new(&out_dir).to_path_buf();
+        annotations_out_file.push("libmirai_annotations.rlib");
+        let annotations_out_file_str = annotations_out_file.to_string_lossy();
+        let annotations_args = [
+            // NOTE: `rustc` ignores the first argument, so we set that to "pallet-verifier".
+            "pallet-verifier".to_owned(),
+            "--crate-name=mirai_annotations".to_owned(),
+            "--edition=2021".to_owned(),
+            annotations_path.to_string_lossy().to_string(),
+            "--crate-type=lib".to_owned(),
+            "--emit=link".to_owned(),
+            "-o".to_owned(),
+            annotations_out_file_str.to_string(),
+            "--cfg=mirai".to_owned(),
+            "-Zalways_encode_mir".to_owned(),
+        ];
+        let mut rustc_callbacks = DefaultCallbacks;
+        let annotations_file_loader = VirtualFileLoader::new(
+            annotations_path,
+            Some(include_str!("../artifacts/mirai_annotations.rs").to_owned()),
+            None,
+        );
+        let mut annotations_compiler =
+            rustc_driver::RunCompiler::new(&annotations_args, &mut rustc_callbacks);
+        annotations_compiler.set_file_loader(Some(Box::new(annotations_file_loader)));
+        let annotations_result = annotations_compiler.run();
+        if annotations_result.is_err() {
+            process::exit(rustc_driver::EXIT_FAILURE);
+        }
+        cli_args.extend([
+            // Add `mirai-annotations` crate as a dependency.
+            "--extern".to_owned(),
+            format!("mirai_annotations={annotations_out_file_str}"),
+        ]);
+    }
 
     // Initializes "virtual" `FileLoader` for entry point and "contracts" content.
     // Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
@@ -79,10 +142,22 @@ fn main() {
         .find(|arg| Path::new(arg).extension().is_some_and(|ext| ext == "rs"))
         .expect("Expected target path as the first `*.rs` argument");
     let target_path = Path::new(&target_path_str).to_path_buf();
-    let virtual_file_loader = VirtualFileLoader::new(
+    let verifier_file_loader = VirtualFileLoader::new(
         target_path,
-        entry_points_content.to_owned(),
-        contracts.map(ToString::to_string),
+        None,
+        Some(
+            [
+                // Adds generated entry points.
+                (ENTRY_POINTS_MOD_NAME, entry_points_content),
+                // Adds MIRAI contracts for FRAME/Substrate functions.
+                (
+                    CONTRACTS_MOD_NAME,
+                    include_str!("../artifacts/contracts.rs").to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
     );
 
     // Analyzes FRAME pallet with MIRAI.
@@ -91,7 +166,7 @@ fn main() {
     let entry_point_names = entry_point_callbacks.entry_point_names();
     let mut verifier_callbacks = VerifierCallbacks::new(&entry_point_names);
     let mut verifier_compiler = rustc_driver::RunCompiler::new(&cli_args, &mut verifier_callbacks);
-    verifier_compiler.set_file_loader(Some(Box::new(virtual_file_loader)));
+    verifier_compiler.set_file_loader(Some(Box::new(verifier_file_loader)));
     let verifier_result = verifier_compiler.run();
 
     let exit_code = match verifier_result {
