@@ -891,6 +891,16 @@ fn process_used_items(
                         }
                     }
                 }
+            } else if matches!(
+                item_kind,
+                DefKind::AssocTy | DefKind::AssocFn | DefKind::AssocConst
+            ) {
+                if let Some(trait_def_id) = tcx
+                    .opt_associated_item(item_def_id)
+                    .and_then(|assoc_item| assoc_item.trait_container(tcx))
+                {
+                    next_used_items.insert(trait_def_id);
+                }
             }
         }
 
