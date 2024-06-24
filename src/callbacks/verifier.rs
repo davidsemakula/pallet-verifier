@@ -260,7 +260,10 @@ fn emit_diagnostics(
             .messages
             .first()
             .and_then(|(msg, _)| msg.as_str())
-            .is_some_and(|msg| msg.contains("MIR body") && msg.contains("without"));
+            .is_some_and(|msg| {
+                msg.contains("MIR body")
+                    && (msg.contains("without") || msg.contains("did not resolve"))
+            });
         if is_missing_mir_warning {
             // Ignores diagnostics about foreign functions with missing MIR bodies.
             // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
