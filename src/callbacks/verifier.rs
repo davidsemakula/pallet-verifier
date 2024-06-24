@@ -256,15 +256,16 @@ fn emit_diagnostics(
     };
 
     for mut diagnostic in diagnostics {
-        let is_missing_mir_warning = diagnostic
+        let is_missing_mir_or_incomplete_analysis = diagnostic
             .messages
             .first()
             .and_then(|(msg, _)| msg.as_str())
             .is_some_and(|msg| {
-                msg.contains("MIR body")
-                    && (msg.contains("without") || msg.contains("did not resolve"))
+                let is_missing_mir = msg.contains("MIR body")
+                    && (msg.contains("without") || msg.contains("did not resolve"));
+                is_missing_mir || msg.contains("incomplete analysis")
             });
-        if is_missing_mir_warning {
+        if is_missing_mir_or_incomplete_analysis {
             // Ignores diagnostics about foreign functions with missing MIR bodies.
             // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
             diagnostic.cancel();
