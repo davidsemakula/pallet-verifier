@@ -312,21 +312,6 @@ fn emit_diagnostics(
             continue;
         }
 
-        let is_primary_span_in_entry_point = is_span_in_entry_point(&diagnostic.span);
-        let is_primary_span_local = is_span_local(&diagnostic.span);
-        let has_related_non_entry_point_local_sub_diagnostics = || {
-            diagnostic.children.iter().any(|sub_diagnostic| {
-                !is_span_in_entry_point(&sub_diagnostic.span) && is_span_local(&sub_diagnostic.span)
-            })
-        };
-        if (is_primary_span_in_entry_point || !is_primary_span_local)
-            && !has_related_non_entry_point_local_sub_diagnostics()
-        {
-            // Ignores diagnostics that have no relation to the user-defined local item definitions.
-            diagnostic.cancel();
-            continue;
-        }
-
         // Ignores diagnostics that either have no relation to user-defined local item definitions,
         // or arise from FRAME and substrate "core" crates (i.e. substrate primitive/`sp_*` libraries,
         // `frame_support` and `frame_system` pallets, and SCALE codec libraries).
