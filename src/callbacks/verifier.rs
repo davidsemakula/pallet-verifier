@@ -3,10 +3,11 @@
 use rustc_driver::Compilation;
 use rustc_errors::{DiagnosticBuilder, Level, MultiSpan, Style, SubDiagnostic};
 use rustc_hash::FxHashSet;
+use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_interface::interface::Compiler;
-use rustc_middle::ty::TyCtxt;
+use rustc_middle::ty::{AssocKind, TyCtxt};
 use rustc_span::{
-    def_id::{DefId, LocalDefId, CRATE_DEF_ID},
+    def_id::{DefId, LocalDefId},
     Span,
 };
 
@@ -117,35 +118,17 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                 call_graph: CallGraph::new(call_graph_config, tcx),
             };
 
-            // Retrieves local module spans (and "contracts" module info).
-            let crate_root_span = tcx.source_span(CRATE_DEF_ID);
-            let mut local_mod_spans = FxHashSet::default();
-            local_mod_spans.insert(crate_root_span);
+            // Creates "summaries" for "contracts" (if any) with MIRAI.
+            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#summaries>
             let mut contracts_mod_def_id = None;
             let hir = tcx.hir();
             hir.for_each_module(|mod_def_id| {
-                if !mod_def_id.is_top_level_module() {
-                    let (mod_data, ..) = hir.get_module(mod_def_id);
-                    let mod_body_span = mod_data.spans.inner_span;
-                    if !crate_root_span.contains(mod_body_span)
-                        && !local_mod_spans
-                            .iter()
-                            .any(|span| span.contains(mod_body_span))
-                    {
-                        local_mod_spans.insert(mod_body_span);
-                    }
-
-                    let mod_local_def_id = mod_def_id.to_local_def_id();
-                    let is_contracts_mod = utils::def_name(mod_local_def_id, tcx)
-                        .is_some_and(|name| name.as_str() == CONTRACTS_MOD_NAME);
-                    if is_contracts_mod {
-                        contracts_mod_def_id = Some(mod_def_id);
-                    }
+                let is_contracts_mod = utils::def_name(mod_def_id.to_local_def_id(), tcx)
+                    .is_some_and(|name| name.as_str() == CONTRACTS_MOD_NAME);
+                if is_contracts_mod {
+                    contracts_mod_def_id = Some(mod_def_id);
                 }
             });
-
-            // Creates "summaries" for "contracts" (if any) with MIRAI.
-            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#summaries>
             if let Some(contracts_mod_def_id) = contracts_mod_def_id {
                 println!("Creating summaries for FRAME and Substrate functions ...");
                 // Collect "contract" `fn` ids.
@@ -179,7 +162,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                     analyze(def_id, &mut crate_visitor, &mut diagnostics, false);
 
                     // Emit diagnostics for generated entry point (if necessary).
-                    emit_diagnostics(local_def_id, diagnostics, &local_mod_spans, tcx);
+                    emit_diagnostics(diagnostics, local_def_id, tcx);
                 }
             }
 
@@ -236,23 +219,80 @@ fn analyze<'analysis>(
 
 /// Emit diagnostics for generated entry point (if necessary).
 fn emit_diagnostics(
-    local_def_id: LocalDefId,
     diagnostics: Vec<DiagnosticBuilder<()>>,
-    local_mod_spans: &FxHashSet<Span>,
+    local_def_id: LocalDefId,
     tcx: TyCtxt,
 ) {
-    let is_diagnostic_span_local = |span: &MultiSpan| {
-        span.primary_spans().iter().any(|diag_span| {
-            local_mod_spans
-                .iter()
-                .any(|mod_span| mod_span.contains(diag_span.source_callsite()))
-        })
+    let source_map = tcx.sess.source_map();
+    let is_span_local = |mspan: &MultiSpan| {
+        mspan
+            .primary_span()
+            .and_then(|span| source_map.span_to_location_info(span).0)
+            .is_some_and(|source_file| source_file.cnum == LOCAL_CRATE)
     };
     let entry_point_span = tcx.source_span(local_def_id);
-    let is_diagnostic_span_in_entry_point = |span: &MultiSpan| {
-        span.primary_spans()
+    let is_span_in_entry_point = |mspan: &MultiSpan| {
+        mspan
+            .primary_spans()
             .iter()
             .any(|diag_span| entry_point_span.contains(diag_span.source_callsite()))
+    };
+    // Checks if diagnostic arises from FRAME and substrate "core" crates
+    // (i.e. substrate primitive/`sp_*` libraries, `frame_support` and `frame_system` pallets,
+    // and SCALE codec libraries.
+    let is_span_in_frame_substrate_core = |mspan: &MultiSpan| {
+        mspan
+            .primary_span()
+            .and_then(|span| source_map.span_to_location_info(span).0)
+            .map(|source_file| {
+                let source_def_id = source_file.cnum.as_def_id();
+                tcx.def_path_str(source_def_id)
+            })
+            .is_some_and(|name| {
+                name.starts_with("sp_")
+                    || matches!(
+                        name.as_str(),
+                        "frame_support" | "frame_system" | "parity_scale_codec" | "scale_info"
+                    )
+            })
+    };
+    // Checks if diagnostic arises from `DispatchError` `From::from` conversion implementation via
+    // the `#[pallet::error]` macro.
+    let is_span_from_dispatch_error_from_impl = |mspan: &MultiSpan| {
+        mspan.primary_span().is_some_and(|span| {
+                // Handles local `#[pallet::error]` definitions.
+                span.parent()
+                    .and_then(|parent_local_def_id| {
+                        tcx.opt_associated_item(parent_local_def_id.to_def_id())
+                    })
+                    .is_some_and(|assoc_item| {
+                        let is_core_convert_from_impl = assoc_item.name.as_str() == "from"
+                            && assoc_item.kind == AssocKind::Fn
+                            && assoc_item
+                                .trait_item_def_id
+                                .is_some_and(|trait_item_def_id| {
+                                    let trait_item_path = tcx.def_path_str(trait_item_def_id);
+                                    matches!(trait_item_path.as_str(), "core::convert::From::from" | "std::convert::From::from")
+                                });
+                        let is_dispatch_error_impl =
+                            assoc_item.impl_container(tcx).is_some_and(|impl_def_id| {
+                                let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
+                                if let rustc_middle::ty::ImplSubject::Trait(trait_ref) = impl_subject {
+                                    trait_ref.self_ty().to_string() == "sp_runtime::DispatchError"
+                                } else {
+                                    false
+                                }
+                            });
+                        is_core_convert_from_impl && is_dispatch_error_impl
+                    })
+                    // Handles foreign `#[pallet::error]` definitions.
+                    || source_map.span_to_snippet(span).is_ok_and(|snippet| {
+                        snippet == "error"
+                            && source_map
+                                .span_to_snippet(source_map.span_extend_to_line(span))
+                                .is_ok_and(|line_snippet| line_snippet.contains("pallet::error"))
+                    })
+            })
     };
 
     for mut diagnostic in diagnostics {
@@ -272,12 +312,11 @@ fn emit_diagnostics(
             continue;
         }
 
-        let is_primary_span_in_entry_point = is_diagnostic_span_in_entry_point(&diagnostic.span);
-        let is_primary_span_local = is_diagnostic_span_local(&diagnostic.span);
+        let is_primary_span_in_entry_point = is_span_in_entry_point(&diagnostic.span);
+        let is_primary_span_local = is_span_local(&diagnostic.span);
         let has_related_non_entry_point_local_sub_diagnostics = || {
             diagnostic.children.iter().any(|sub_diagnostic| {
-                !is_diagnostic_span_in_entry_point(&sub_diagnostic.span)
-                    && is_diagnostic_span_local(&sub_diagnostic.span)
+                !is_span_in_entry_point(&sub_diagnostic.span) && is_span_local(&sub_diagnostic.span)
             })
         };
         if (is_primary_span_in_entry_point || !is_primary_span_local)
@@ -288,50 +327,40 @@ fn emit_diagnostics(
             continue;
         }
 
-        // Replaces primary (autogenerated) entry point or non-local span (if any),
-        // with the first sub-diagnostic span that points to a local item definition (if any).
-        if is_primary_span_in_entry_point || !is_primary_span_local {
-            let first_local_non_entry_point_span =
-                diagnostic.children.iter().find_map(|sub_diagnostic| {
-                    if !is_diagnostic_span_in_entry_point(&sub_diagnostic.span)
-                        && is_diagnostic_span_local(&sub_diagnostic.span)
-                    {
-                        sub_diagnostic.span.primary_span()
-                    } else {
-                        None
-                    }
-                });
-            let Some(first_local_span) = first_local_non_entry_point_span else {
-                // Ignores diagnostics that have no relation to the user-defined local item definitions.
-                diagnostic.cancel();
-                continue;
-            };
-            let orig_non_local_primary_span =
-                (!is_primary_span_in_entry_point).then(|| diagnostic.span.clone());
-            diagnostic.replace_span_with(first_local_span, true);
-            diagnostic.children.retain(|sub_diagnostic| {
-                let is_first_local_span = sub_diagnostic
-                    .span
-                    .primary_span()
-                    .is_some_and(|diag_span| diag_span == first_local_span);
-                !is_first_local_span && !is_diagnostic_span_in_entry_point(&sub_diagnostic.span)
-            });
-            // Prepends original non-local primary diagnostic as the first sub-diagnostic.
-            if let Some(orig_span) = orig_non_local_primary_span {
-                diagnostic.children.splice(
-                    0..0,
-                    std::iter::once(SubDiagnostic {
+        // Ignores diagnostics that either have no relation to user-defined local item definitions,
+        // or arise from FRAME and substrate "core" crates (i.e. substrate primitive/`sp_*` libraries,
+        // `frame_support` and `frame_system` pallets, and SCALE codec libraries).
+        let relevant_spans = std::iter::once(diagnostic.span.clone())
+            .chain(
+                diagnostic
+                    .children
+                    .iter()
+                    .map(|sub_diag| sub_diag.span.clone()),
+            )
+            .skip_while(|span| !is_span_local(span) || is_span_in_entry_point(span))
+            .collect::<Vec<_>>();
+        if relevant_spans.is_empty()
+            || relevant_spans.iter().any(|span| {
+                is_span_in_frame_substrate_core(span) || is_span_from_dispatch_error_from_impl(span)
+            })
+        {
+            diagnostic.cancel();
+            continue;
+        }
+
+        // Updates diagnostic to only include relevant sub-diagnostics.
+        if let Some((first_local_span, child_spans)) = relevant_spans.split_first() {
+            if let Some(first_local_span) = first_local_span.primary_span() {
+                diagnostic.replace_span_with(first_local_span, true);
+                diagnostic.children = child_spans
+                    .iter()
+                    .map(|span| SubDiagnostic {
                         level: Level::Note,
                         messages: vec![("related location".into(), Style::NoStyle)],
-                        span: orig_span,
-                    }),
-                );
+                        span: span.clone(),
+                    })
+                    .collect();
             }
-        } else {
-            // Removes (autogenerated) entry point spans.
-            diagnostic
-                .children
-                .retain(|sub_diagnostic| !is_diagnostic_span_in_entry_point(&sub_diagnostic.span));
         }
         diagnostic.emit();
     }
