@@ -1,5 +1,6 @@
 //! `rustc` callbacks and utilities for analyzing FRAME pallet with MIRAI.
 
+use rustc_ast::NestedMetaItem;
 use rustc_driver::Compilation;
 use rustc_errors::{DiagnosticBuilder, Level, MultiSpan, Style, SubDiagnostic};
 use rustc_hash::FxHashSet;
@@ -8,7 +9,7 @@ use rustc_interface::interface::Compiler;
 use rustc_middle::ty::{AssocKind, TyCtxt};
 use rustc_span::{
     def_id::{DefId, LocalDefId},
-    Span,
+    Span, Symbol,
 };
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
@@ -118,17 +119,50 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                 call_graph: CallGraph::new(call_graph_config, tcx),
             };
 
-            // Creates "summaries" for "contracts" (if any) with MIRAI.
-            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#summaries>
-            let mut contracts_mod_def_id = None;
+            // Finds "contracts" module and collects test module spans.
             let hir = tcx.hir();
+            let mut contracts_mod_def_id = None;
+            let mut test_mod_spans = FxHashSet::default();
             hir.for_each_module(|mod_def_id| {
-                let is_contracts_mod = utils::def_name(mod_def_id.to_local_def_id(), tcx)
+                let mod_local_def_id = mod_def_id.to_local_def_id();
+                let is_contracts_mod = utils::def_name(mod_local_def_id, tcx)
                     .is_some_and(|name| name.as_str() == CONTRACTS_MOD_NAME);
                 if is_contracts_mod {
                     contracts_mod_def_id = Some(mod_def_id);
+                } else {
+                    let (mod_data, mod_decl_span, mod_hir_id) = hir.get_module(mod_def_id);
+                    let mod_body_span = mod_data.spans.inner_span;
+                    let mod_attrs = hir.attrs(mod_hir_id);
+                    let has_cfg_test_attr = mod_attrs.iter().any(|attr| {
+                        let is_cfg_path = attr.has_name(Symbol::intern("cfg"));
+                        is_cfg_path
+                            && attr.meta_item_list().is_some_and(|meta_items| {
+                                let test_symbol = Symbol::intern("test");
+                                let is_test_path = |meta_items: &[NestedMetaItem]| {
+                                    meta_items
+                                        .iter()
+                                        .any(|meta_item| meta_item.has_name(test_symbol))
+                                };
+                                is_test_path(&meta_items)
+                                    || meta_items.iter().any(|meta_item| {
+                                        (meta_item.has_name(Symbol::intern("any"))
+                                            || meta_item.has_name(Symbol::intern("all")))
+                                            && meta_item.meta_item_list().is_some_and(is_test_path)
+                                    })
+                            })
+                    });
+                    if has_cfg_test_attr
+                        && !test_mod_spans.iter().any(|span: &Span| {
+                            span.contains(mod_decl_span) || span.contains(mod_body_span)
+                        })
+                    {
+                        test_mod_spans.insert(mod_body_span);
+                    }
                 }
             });
+
+            // Creates "summaries" for "contracts" (if any) with MIRAI.
+            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#summaries>
             if let Some(contracts_mod_def_id) = contracts_mod_def_id {
                 println!("Creating summaries for FRAME and Substrate functions ...");
                 // Collect "contract" `fn` ids.
@@ -162,7 +196,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                     analyze(def_id, &mut crate_visitor, &mut diagnostics, false);
 
                     // Emit diagnostics for generated entry point (if necessary).
-                    emit_diagnostics(diagnostics, local_def_id, tcx);
+                    emit_diagnostics(diagnostics, local_def_id, tcx, &test_mod_spans);
                 }
             }
 
@@ -222,6 +256,7 @@ fn emit_diagnostics(
     diagnostics: Vec<DiagnosticBuilder<()>>,
     local_def_id: LocalDefId,
     tcx: TyCtxt,
+    test_mod_spans: &FxHashSet<Span>,
 ) {
     let source_map = tcx.sess.source_map();
     let is_span_local = |mspan: &MultiSpan| {
@@ -236,6 +271,13 @@ fn emit_diagnostics(
             .primary_spans()
             .iter()
             .any(|diag_span| entry_point_span.contains(diag_span.source_callsite()))
+    };
+    let is_span_in_cfg_test_mod = |mspan: &MultiSpan| {
+        mspan.primary_spans().iter().any(|span| {
+            test_mod_spans
+                .iter()
+                .any(|mod_span| mod_span.contains(span.source_callsite()))
+        })
     };
     // Checks if diagnostic arises from FRAME and substrate "core" crates
     // (i.e. substrate primitive/`sp_*` libraries, `frame_support` and `frame_system` pallets,
@@ -314,7 +356,7 @@ fn emit_diagnostics(
 
         // Ignores diagnostics that either have no relation to user-defined local item definitions,
         // or arise from FRAME and substrate "core" crates (i.e. substrate primitive/`sp_*` libraries,
-        // `frame_support` and `frame_system` pallets, and SCALE codec libraries).
+        // `frame_support` and `frame_system` pallets, and SCALE codec libraries) or test-only code.
         let relevant_spans = std::iter::once(diagnostic.span.clone())
             .chain(
                 diagnostic
@@ -326,7 +368,9 @@ fn emit_diagnostics(
             .collect::<Vec<_>>();
         if relevant_spans.is_empty()
             || relevant_spans.iter().any(|span| {
-                is_span_in_frame_substrate_core(span) || is_span_from_dispatch_error_from_impl(span)
+                is_span_in_frame_substrate_core(span)
+                    || is_span_from_dispatch_error_from_impl(span)
+                    || is_span_in_cfg_test_mod(span)
             })
         {
             diagnostic.cancel();
