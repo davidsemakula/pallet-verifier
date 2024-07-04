@@ -112,27 +112,47 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             println!("Generating tractable entry points for FRAME pallet ...");
             let mut used_items = FxHashSet::default();
             phase = Phase::EntryPoints;
-            for local_def_id in local_def_ids.iter() {
-                let call = calls
-                    .get(local_def_id)
-                    .and_then(|(terminator, body)| compose_entry_point(terminator, body, tcx));
-                if let Some((name, content, local_used_items)) = call {
+            let config_type = calls.values().find_map(|(terminator, _)| {
+                if let TerminatorKind::Call { func, .. } = &terminator.kind {
+                    let (_, fn_generic_args) = func.const_fn_def()?;
+                    fn_generic_args.first()?.as_type()
+                } else {
+                    None
+                }
+            });
+            for local_def_id in local_def_ids {
+                let call_info = calls
+                    .get(&local_def_id)
+                    .map(|(terminator, body)| (terminator, *body));
+                let entry_point_result =
+                    compose_entry_point(local_def_id, tcx, call_info, config_type);
+                if let Some((name, content, local_used_items)) = entry_point_result {
                     entry_points.insert(name, content);
                     used_items.extend(local_used_items);
                 } else {
-                    let name = utils::def_name(*local_def_id, tcx)
+                    let name = utils::def_name(local_def_id, tcx)
                         .expect("Expected a name for dispatchable");
+                    let (msg, note, help) = if call_info.is_some() {
+                        (format!("Failed to generate tractable entry point for dispatchable: `{name}`"), None, None)
+                    } else {
+                        (
+                            format!("Couldn't find a call for dispatchable: `{name}`"),
+                            Some(format!(
+                                "pallet-verifier couldn't find a unit test for: `{name}`."
+                            )),
+                            Some(format!("Add a unit test that calls: `{name}`.")),
+                        )
+                    };
                     let mut warning = compiler
                         .sess
                         .dcx()
-                        .struct_warn(format!("Couldn't find a call for dispatchable: `{name}`"));
-                    warning.note(format!(
-                        "pallet-verifier couldn't find a unit test \
-                        or benchmark that calls: `{name}`."
-                    ));
-                    warning.help(format!(
-                        "Add a unit test or benchmark that calls: `{name}`."
-                    ));
+                        .struct_warn(msg);
+                    if let Some(note) = note {
+                        warning.note(note);
+                    }
+                    if let Some(help) = help {
+                        warning.help(help);
+                    }
                     warning.emit();
                 }
             }
@@ -164,7 +184,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                 _ => (
                     "Failed to generate tractable entry points",
                     None,
-                    Some("Add some unit tests or benchmarks for all dispatchable functions."),
+                    Some("Add some unit tests for all dispatchable functions."),
                 ),
             };
             let mut error = compiler.sess.dcx().struct_err(msg);
@@ -279,31 +299,42 @@ fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<Local
 ///
 /// NOTE: This function assumes the terminator wraps a call to a dispatchable function, but doesn't verify it.
 fn compose_entry_point<'tcx>(
-    terminator: &Terminator<'tcx>,
-    owner_body: &Body<'tcx>,
+    fn_local_def_id: LocalDefId,
     tcx: TyCtxt<'tcx>,
+    call_info: Option<(&Terminator<'tcx>, &Body<'tcx>)>,
+    config_type_fallback: Option<Ty<'tcx>>,
 ) -> Option<(String, String, FxHashSet<DefId>)> {
-    let TerminatorKind::Call {
-        func,
-        args: call_args,
-        fn_span,
-        ..
-    } = &terminator.kind
-    else {
-        return None;
-    };
-    let (fn_def_id, fn_generic_args) = func.const_fn_def()?;
-
     // Dispatchable name.
-    let fn_local_def_id = fn_def_id.as_local()?;
     let fn_name = utils::def_name(fn_local_def_id, tcx)?;
 
-    // `T: Config` type, name, generic param `DefId` and trait info.
-    let config_type = fn_generic_args.first()?.as_type()?;
+    // `T: Config` type, owner body (if any), call args (if any) and call span (if any).
+    let (config_type, owner_body_opt, call_args_opt, fn_span_opt) = if let Some((
+        TerminatorKind::Call {
+            func,
+            args,
+            fn_span,
+            ..
+        },
+        body,
+    )) =
+        call_info.map(|(terminator, body)| (&terminator.kind, body))
+    {
+        let (fn_def_id, fn_generic_args) = func.const_fn_def()?;
+        if fn_def_id != fn_local_def_id.to_def_id() {
+            return None;
+        }
+        let config_type = fn_generic_args.first()?.as_type()?;
+        (config_type, Some(body), Some(args), Some(fn_span))
+    } else {
+        // Bails if no fallback `T: Config` type was provided.
+        (config_type_fallback?, None, None, None)
+    };
+
+    // `T: Config` name, generic param `DefId` and trait info.
     let config_def_id = config_type.ty_adt_def()?.did();
     let config_local_def_id = config_def_id.as_local()?;
     let config_name = utils::def_name(config_local_def_id, tcx)?;
-    let assoc_item = tcx.opt_associated_item(fn_def_id)?;
+    let assoc_item = tcx.opt_associated_item(fn_local_def_id.to_def_id())?;
     if assoc_item.container != AssocItemContainer::ImplContainer {
         return None;
     }
@@ -355,7 +386,7 @@ fn compose_entry_point<'tcx>(
     let fn_decl = hir.fn_decl_by_hir_id(hir_id)?;
     let fn_params_ty = fn_decl.inputs;
     let source_map = tcx.sess.source_map();
-    let local_decls = owner_body.local_decls();
+    let local_decls_opt = owner_body_opt.map(|owner_body| owner_body.local_decls());
     let config_name_fq = format!("<{config_name} as crate::pallet::Config>");
     let config_name_fq_sys = format!("<{config_name} as frame_system::Config>");
     for (idx, fn_param) in fn_params.iter().enumerate() {
@@ -475,14 +506,18 @@ fn compose_entry_point<'tcx>(
         } else {
             // Composes entry point param and/or dispatchable call args based on
             // dispatchable call arg type or value.
+            let Some(call_args) = call_args_opt else {
+                // Bails if call args aren't available.
+                return None;
+            };
             let call_arg = call_args
                 .get(idx)
                 .expect("Expected dipatchable call argument: {param_name}");
             match &call_arg.node {
                 Operand::Copy(place) | Operand::Move(place) => {
                     // Adds entry point param and/or dispatchable call arg.
-                    let local_decl = &local_decls
-                        .get(place.local)
+                    let local_decl = local_decls_opt
+                        .and_then(|local_decls| local_decls.get(place.local))
                         .expect("Expected local declaration");
                     let arg_ty = local_decl.ty;
                     if let Some(arg_ty_str) = tractable_param_type(&arg_ty, &mut used_items, tcx) {
@@ -542,11 +577,14 @@ fn compose_entry_point<'tcx>(
 
     // Collects used local and item definitions, and item imports.
     let mut stmts = FxHashSet::default();
-    let mut call_spans = vec![*fn_span];
+    let mut call_spans = Vec::new();
+    if let Some(fn_span) = fn_span_opt {
+        call_spans.push(*fn_span);
+    }
     while !locals.is_empty() {
         // Adds `let` assignments for locals to statements.
         stmts.extend(locals.iter().filter_map(|local| {
-            let local_decl = local_decls.get(*local).expect("Expected local declaration");
+            let local_decl = local_decls_opt.and_then(|local_decls| local_decls.get(*local))?;
             let span = local_decl.source_info.span.source_callsite();
             let is_in_call = call_spans.iter().any(|sp| sp.contains(span));
             if !is_in_call {
@@ -558,7 +596,9 @@ fn compose_entry_point<'tcx>(
 
         // Collects used local and item definitions, and item imports for current locals.
         let mut visitor = ValueVisitor::new(&locals);
-        visitor.visit_body(owner_body);
+        if let Some(owner_body) = owner_body_opt {
+            visitor.visit_body(owner_body);
+        }
 
         // Updates used item definitions and imports.
         item_defs.extend(visitor.item_defs);

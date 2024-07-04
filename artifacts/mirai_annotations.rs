@@ -1,3 +1,5 @@
+// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/annotations/src/lib.rs>
+//
 // Copyright (c) Facebook, Inc. and its affiliates.
 //
 // This source code is licensed under the MIT license found in the
