@@ -434,13 +434,19 @@ fn compose_entry_point<'tcx>(
             let const_expr = hir.body(anon_const.body).value;
             if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = const_expr.kind
             {
-                if let Res::Def(DefKind::ConstParam, const_param_def_id) = path.res {
-                    let const_ty = tcx.type_of(const_param_def_id).skip_binder();
-                    if matches!(const_ty.kind(), TyKind::Int(_) | TyKind::Uint(_)) {
-                        int_const_generic_params.push((const_expr, const_ty));
-                    } else {
-                        has_non_int_const_generic_params = true;
+                match path.res {
+                    Res::Def(DefKind::ConstParam, const_param_def_id) => {
+                        let const_ty = tcx.type_of(const_param_def_id).skip_binder();
+                        if matches!(const_ty.kind(), TyKind::Int(_) | TyKind::Uint(_)) {
+                            int_const_generic_params.push((const_expr, const_ty));
+                        } else {
+                            has_non_int_const_generic_params = true;
+                        }
                     }
+                    Res::Def(DefKind::Const, const_def_id) => {
+                        used_items.insert(const_def_id);
+                    }
+                    _ => (),
                 }
             }
         }
@@ -785,6 +791,7 @@ fn process_used_items(
             let is_importable = matches!(
                 item_kind,
                 DefKind::Mod
+                    | DefKind::Const
                     | DefKind::Fn
                     | DefKind::Struct
                     | DefKind::Enum
@@ -867,12 +874,13 @@ fn process_used_items(
                     let node = tcx.hir_node_by_def_id(item_local_def_id);
                     if let rustc_hir::Node::Item(item) = node {
                         match item.kind {
-                            rustc_hir::ItemKind::Fn(fn_sig, generics, _) => {
-                                process_fn_sig(&fn_sig, &mut next_used_items);
+                            rustc_hir::ItemKind::Const(ty, generics, _)
+                            | rustc_hir::ItemKind::TyAlias(ty, generics) => {
+                                process_hir_ty(ty, &mut next_used_items, &mut vec![], &mut vec![]);
                                 process_generics(generics, &mut next_used_items);
                             }
-                            rustc_hir::ItemKind::TyAlias(ty, generics) => {
-                                process_hir_ty(ty, &mut next_used_items, &mut vec![], &mut vec![]);
+                            rustc_hir::ItemKind::Fn(fn_sig, generics, _) => {
+                                process_fn_sig(&fn_sig, &mut next_used_items);
                                 process_generics(generics, &mut next_used_items);
                             }
                             rustc_hir::ItemKind::Enum(enum_def, generics) => {
