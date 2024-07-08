@@ -254,19 +254,31 @@ enum Phase {
 fn dispatchable_names(tcx: TyCtxt<'_>) -> FxHashSet<&str> {
     let mut results = FxHashSet::default();
     let hir = tcx.hir();
-    for item_id in hir.items() {
-        let item = hir.item(item_id);
-        if item.ident.as_str() == "Call" {
-            if let rustc_hir::ItemKind::Enum(enum_def, enum_generics) = item.kind {
-                if !is_config_bounded(enum_generics, tcx) {
-                    continue;
-                }
-                for variant in enum_def.variants {
-                    let name = variant.ident.as_str();
-                    if !name.starts_with("__") {
-                        results.insert(name);
+    let mut call_enums: Vec<_> = hir
+        .items()
+        .filter_map(|item_id| {
+            let item = hir.item(item_id);
+            if item.ident.as_str() == "Call" {
+                if let rustc_hir::ItemKind::Enum(enum_def, enum_generics) = item.kind {
+                    if is_config_bounded(enum_generics, tcx) {
+                        return Some((item_id.owner_id.to_def_id(), enum_def));
                     }
                 }
+            }
+            None
+        })
+        .collect();
+    let n_call_enums = call_enums.len();
+    if n_call_enums > 0 {
+        if n_call_enums > 1 {
+            // Picks `Call` enum with a definition "closest" to the crate root.
+            call_enums.sort_by_key(|(def_id, _)| tcx.def_path(*def_id).data.len());
+        }
+        let (_, enum_def) = call_enums.first().expect("Expected one `Call` enum");
+        for variant in enum_def.variants {
+            let name = variant.ident.as_str();
+            if !name.starts_with("__") {
+                results.insert(name);
             }
         }
     }
