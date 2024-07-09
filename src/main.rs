@@ -62,17 +62,28 @@ fn main() {
 /// Calls `cargo` with `pallet-verifier` (specifically this cargo subcommand) set as `RUSTC_WRAPPER`.
 fn call_cargo() {
     // Builds cargo command.
+    // Ref: <https://doc.rust-lang.org/cargo/commands/cargo-test.html>
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cmd.arg("test");
     cmd.arg("--lib");
     cmd.arg("--no-run");
 
     // Sets `RUSTC_WRAPPER` to `pallet-verifier` (specifically this cargo subcommand).
+    // Ref: <https://doc.rust-lang.org/cargo/reference/config.html#buildrustc-wrapper>
     let path = env::current_exe().expect("Expected valid executable path");
     cmd.env("RUSTC_WRAPPER", path);
 
-    // Enables dumping MIR for all functions.
-    cmd.env("RUSTFLAGS", "-Zalways_encode_mir");
+    // Enables dumping MIR for all functions, and disables debug assertions, and enables overflow checks.
+    // Ref: <https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags>
+    // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
+    // Ref: <https://github.com/rust-lang/rust/blob/master/compiler/rustc_session/src/options.rs#L1632>
+    // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
+    // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#debug-assertions>
+    // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#overflow-checks>
+    cmd.env(
+        "RUSTFLAGS",
+        "-Zalways-encode-mir=yes -Cdebug-assertions=no -Coverflow-checks=yes",
+    );
 
     // Explicitly set toolchain to match `pallet-verifier`.
     if let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") {

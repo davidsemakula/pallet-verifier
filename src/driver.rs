@@ -43,6 +43,7 @@ fn main() {
     let mut cli_args: Vec<_> = env::args().collect();
     // Setting `RUSTC_WRAPPER` causes Cargo to pass 'rustc' as the first argument.
     // We're invoking the compiler programmatically, so we remove it (if present).
+    // Ref: <https://doc.rust-lang.org/cargo/reference/config.html#buildrustc-wrapper>
     // Ref: <https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-reads>
     // Ref: <https://github.com/rust-lang/rust-clippy/blob/caad063933e5012b152d883a6c03f1d0ad5ec6a8/src/driver.rs#L244-L251>
     let is_rustc_wrapper_mode = cli_args
@@ -54,11 +55,21 @@ fn main() {
     if env::var("CARGO_PKG_NAME").is_err() || env::var("CARGO_PRIMARY_PACKAGE").is_err() {
         // Presumably, this is some kind of direct call to the `pallet-verifier` binary,
         // instead of via `cargo verify-pallet`, so we need to set some extra flags.
+        // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
         cli_args.extend([
             // Enables compilation of unit tests and test harness generation.
+            // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--test-build-a-test-harness>
             "--test".to_owned(),
             // Enables dumping MIR for all functions.
-            "-Zalways-encode-mir".to_owned(),
+            // Ref: <https://github.com/rust-lang/rust/blob/master/compiler/rustc_session/src/options.rs#L1632>
+            // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
+            "-Zalways-encode-mir=yes".to_owned(),
+            // Disables debug assertions.
+            // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#debug-assertions>
+            "-Cdebug-assertions=no".to_owned(),
+            // Enables overflow checks.
+            // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#overflow-checks>
+            "-Coverflow-checks=yes".to_owned(),
         ]);
     }
 
@@ -75,6 +86,7 @@ fn main() {
     };
 
     // Compiles `mirai-annotations` crate and adds it as a dependency (if necessary).
+    // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
     let has_mirai_annotations_dep = cli_args.iter().enumerate().any(|(idx, arg)| {
         arg.starts_with("mirai_annotations")
             && cli_args.get(idx - 1).is_some_and(|arg| arg == "--extern")
@@ -113,7 +125,7 @@ fn main() {
             "-o".to_owned(),
             annotations_out_file_str.to_string(),
             "--cfg=mirai".to_owned(),
-            "-Zalways_encode_mir".to_owned(),
+            "-Zalways_encode_mir=yes".to_owned(),
         ];
         let mut rustc_callbacks = DefaultCallbacks;
         let annotations_file_loader = VirtualFileLoader::new(
@@ -130,6 +142,7 @@ fn main() {
         }
         cli_args.extend([
             // Add `mirai-annotations` crate as a dependency.
+            // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--extern-specify-where-an-external-library-is-located>
             "--extern".to_owned(),
             format!("mirai_annotations={annotations_out_file_str}"),
         ]);
