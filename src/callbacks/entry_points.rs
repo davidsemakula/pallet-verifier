@@ -3,7 +3,10 @@
 //! See [`EntryPointsCallbacks`] doc.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustc_hir::def::{DefKind, Res};
+use rustc_hir::{
+    def::{DefKind, Res},
+    intravisit::Visitor as _,
+};
 use rustc_middle::{
     mir::{
         visit::Visitor, AggregateKind, Body, HasLocalDecls, Local, LocalDecl, Location, Operand,
@@ -399,70 +402,7 @@ fn compose_entry_point<'tcx>(
     let fn_params_ty = fn_decl.inputs;
     let source_map = tcx.sess.source_map();
     let local_decls_opt = owner_body_opt.map(|owner_body| owner_body.local_decls());
-    let config_name_fq = format!("<{config_name} as crate::pallet::Config>");
-    let config_name_fq_sys = format!("<{config_name} as frame_system::Config>");
     for (idx, fn_param) in fn_params.iter().enumerate() {
-        // Collects used items, generics and anonymous constants for param type.
-        let param_ty = fn_params_ty.get(idx).expect("Expected param type");
-        let mut types = vec![param_ty];
-        let mut anon_consts = Vec::new();
-        process_hir_ty(param_ty, &mut used_items, &mut types, &mut anon_consts);
-        let mut config_generic_params = Vec::new();
-        let mut int_const_generic_params = Vec::new();
-        let mut config_related_types = FxHashMap::default();
-        let mut has_non_config_generic_params = false;
-        let mut has_raw_indirection_dynamic_or_opaque_types = false;
-        let mut has_non_int_const_generic_params = false;
-        for ty in types.iter() {
-            if let Some((generic_param_def_id, _)) = ty.as_generic_param() {
-                if generic_param_def_id == config_param_def_id {
-                    config_generic_params.push(ty);
-                } else {
-                    has_non_config_generic_params = true;
-                }
-            } else if let rustc_hir::TyKind::Path(rustc_hir::QPath::TypeRelative(gen_ty, segment)) =
-                ty.kind
-            {
-                let is_config_param =
-                    gen_ty
-                        .as_generic_param()
-                        .is_some_and(|(generic_param_def_id, _)| {
-                            generic_param_def_id == config_param_def_id
-                        });
-                if is_config_param {
-                    config_related_types.insert(gen_ty.span, segment);
-                }
-            } else {
-                has_raw_indirection_dynamic_or_opaque_types |= matches!(
-                    ty.kind,
-                    rustc_hir::TyKind::Ptr(_)
-                        | rustc_hir::TyKind::BareFn(_)
-                        | rustc_hir::TyKind::OpaqueDef(_, _, _)
-                        | rustc_hir::TyKind::TraitObject(_, _, _)
-                )
-            }
-        }
-        for anon_const in anon_consts {
-            let const_expr = hir.body(anon_const.body).value;
-            if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = const_expr.kind
-            {
-                match path.res {
-                    Res::Def(DefKind::ConstParam, const_param_def_id) => {
-                        let const_ty = tcx.type_of(const_param_def_id).skip_binder();
-                        if matches!(const_ty.kind(), TyKind::Int(_) | TyKind::Uint(_)) {
-                            int_const_generic_params.push((const_expr, const_ty));
-                        } else {
-                            has_non_int_const_generic_params = true;
-                        }
-                    }
-                    Res::Def(DefKind::Const, const_def_id) => {
-                        used_items.insert(const_def_id);
-                    }
-                    _ => (),
-                }
-            }
-        }
-
         // Creates a unique param name.
         let pat = fn_param.pat;
         let param_name = source_map
@@ -471,55 +411,21 @@ fn compose_entry_point<'tcx>(
         let unique_name = format!("{param_name}__{fn_name}");
 
         // Composes entry point param and/or dispatchable call arg.
-        if !has_non_config_generic_params
-            && !has_raw_indirection_dynamic_or_opaque_types
-            && !has_non_int_const_generic_params
-        {
+        let param_ty = fn_params_ty.get(idx).expect("Expected param type");
+        let specialized_user_ty = tractable_param_hir_type(
+            fn_param,
+            param_ty,
+            config_local_def_id,
+            config_param_def_id,
+            &config_trait_item_names,
+            &mut used_items,
+            tcx,
+        );
+        if let Some(specialized_user_ty) = specialized_user_ty {
             // Composes entry point param, and corresponding dispatchable call arg vars,
             // by replacing `T: Config` param types with concrete `Config` type,
             // and integer const generic params with an arbitrary large value.
-            let mut user_ty = source_map
-                .span_to_snippet(fn_param.ty_span)
-                .expect("Expected snippet for span");
-            if !config_generic_params.is_empty() || !int_const_generic_params.is_empty() {
-                let offset = fn_param.ty_span.lo().to_usize();
-                let mut offset_shift = 0;
-                let replacements = config_generic_params
-                    .into_iter()
-                    .map(|config_param_ty| {
-                        (
-                            config_param_ty.span,
-                            match config_related_types.get(&config_param_ty.span) {
-                                Some(segment) => {
-                                    let related_ty_name = segment.ident.as_str();
-                                    if config_trait_item_names.contains(related_ty_name) {
-                                        &config_name_fq
-                                    } else {
-                                        &config_name_fq_sys
-                                    }
-                                }
-                                None => config_name.as_str(),
-                            },
-                        )
-                    })
-                    .chain(
-                        // We use 1000 arbitrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
-                        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#k-limits>
-                        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/k_limits.rs>
-                        int_const_generic_params
-                            .into_iter()
-                            .map(|(config_expr, _)| (config_expr.span, "1000")),
-                    )
-                    .unique_by(|(span, _)| *span)
-                    .sorted_by_key(|(span, _)| *span);
-                for (span, replacement) in replacements {
-                    let start = span.lo().to_usize() - offset + offset_shift;
-                    let end = span.hi().to_usize() - offset + offset_shift;
-                    user_ty.replace_range(start..end, replacement);
-                    offset_shift += replacement.len() - (end - start);
-                }
-            }
-            params.push(format!("{unique_name}: {user_ty}"));
+            params.push(format!("{unique_name}: {specialized_user_ty}"));
             args.push(unique_name);
         } else {
             // Composes entry point param and/or dispatchable call args based on
@@ -792,7 +698,6 @@ fn process_used_items(
     item_defs: &mut FxHashSet<String>,
     tcx: TyCtxt<'_>,
 ) {
-    let crate_vis = Visibility::Restricted(CRATE_DEF_ID.to_def_id());
     let hir = tcx.hir();
     let source_map = tcx.sess.source_map();
     while !used_items.is_empty() {
@@ -819,8 +724,7 @@ fn process_used_items(
                 rustc_middle::middle::stability::EvalResult::Allow
             );
             if is_importable && is_stable_or_enabled {
-                let vis = tcx.visibility(item_def_id);
-                if !item_def_id.is_local() || vis.is_at_least(crate_vis, tcx) {
+                if !item_def_id.is_local() || is_visible_from_crate_root(item_def_id, tcx) {
                     // Add use declaration for foreign items, and local items that are visible from the crate root.
                     use_decls.insert(format!(
                         "use {}{};",
@@ -1587,6 +1491,183 @@ fn tractable_param_type(
     Some(ty_str)
 }
 
+/// Composes tractable entry point param type from HIR type (if possible).
+///
+/// NOTE: A tractable type must *NOT* include any generics and/or raw indirection.
+fn tractable_param_hir_type<'tcx>(
+    fn_param: &'tcx rustc_hir::Param,
+    ty: &'tcx rustc_hir::Ty<'tcx>,
+    config_local_def_id: LocalDefId,
+    config_param_def_id: DefId,
+    config_trait_item_names: &FxHashSet<&str>,
+    used_items: &mut FxHashSet<DefId>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<String> {
+    let mut visitor = TyVisitor::new(tcx);
+    visitor.visit_ty(ty);
+
+    let hir = tcx.hir();
+    let mut config_generic_params = Vec::new();
+    let mut int_const_generic_params = Vec::new();
+    let mut abs_item_paths = Vec::new();
+    let mut config_related_types = FxHashMap::default();
+
+    for gen_ty in visitor.types.iter() {
+        let has_raw_indirection_dynamic_or_opaque_types = matches!(
+            gen_ty.kind,
+            rustc_hir::TyKind::Ptr(_)
+                | rustc_hir::TyKind::BareFn(_)
+                | rustc_hir::TyKind::OpaqueDef(_, _, _)
+                | rustc_hir::TyKind::TraitObject(_, _, _)
+        );
+        if has_raw_indirection_dynamic_or_opaque_types {
+            // Bails if any types have "raw" indirection, opaque or dynamic types.
+            return None;
+        }
+
+        if let Some((generic_param_def_id, _)) = gen_ty.as_generic_param() {
+            if generic_param_def_id == config_param_def_id {
+                config_generic_params.push(gen_ty);
+            } else {
+                // Bails there are any non-`T: Config` generic params.
+                return None;
+            }
+        } else if let rustc_hir::TyKind::Path(rustc_hir::QPath::TypeRelative(gen_ty, segment)) =
+            gen_ty.kind
+        {
+            let is_config_param =
+                gen_ty
+                    .as_generic_param()
+                    .is_some_and(|(generic_param_def_id, _)| {
+                        generic_param_def_id == config_param_def_id
+                    });
+            if is_config_param {
+                config_related_types.insert(gen_ty.span, segment);
+            }
+        } else if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = gen_ty.kind {
+            match path.res {
+                Res::Def(def_kind, def_id) => {
+                    if matches!(
+                        def_kind,
+                        DefKind::Struct
+                            | DefKind::Enum
+                            | DefKind::Union
+                            | DefKind::Trait
+                            | DefKind::TyAlias
+                            | DefKind::TraitAlias
+                    ) && is_visible_from_crate_root(def_id, tcx)
+                    {
+                        let mut def_path = tcx.def_path_str(def_id);
+                        if def_id.is_local() {
+                            def_path = format!("crate::{def_path}");
+                        }
+                        let args_span = path
+                            .segments
+                            .last()
+                            .and_then(|segment| segment.args)
+                            .map(|args| args.span_ext);
+                        let def_span = match args_span {
+                            Some(args_span) => {
+                                Span::new(path.span.lo(), args_span.lo(), path.span.ctxt(), None)
+                            }
+                            None => path.span,
+                        };
+                        abs_item_paths.push((path, def_id, def_path, def_span));
+                    } else {
+                        used_items.insert(def_id);
+                    }
+                }
+                Res::SelfTyParam { trait_: def_id }
+                | Res::SelfTyAlias {
+                    alias_to: def_id, ..
+                }
+                | Res::SelfCtor(def_id) => {
+                    used_items.insert(def_id);
+                }
+                _ => (),
+            };
+        }
+    }
+    for anon_const in visitor.anon_consts {
+        let const_expr = hir.body(anon_const.body).value;
+        if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = const_expr.kind {
+            match path.res {
+                Res::Def(DefKind::ConstParam, const_param_def_id) => {
+                    let const_ty = tcx.type_of(const_param_def_id).skip_binder();
+                    if matches!(const_ty.kind(), TyKind::Int(_) | TyKind::Uint(_)) {
+                        int_const_generic_params.push((const_expr, const_ty));
+                    } else {
+                        // Bails if there are any non-integer const generic params.
+                        return None;
+                    }
+                }
+                Res::Def(DefKind::Const, const_def_id) => {
+                    used_items.insert(const_def_id);
+                }
+                _ => (),
+            }
+        }
+    }
+
+    // Composes entry point param, and corresponding dispatchable call arg vars,
+    // by replacing `T: Config` param types with concrete `Config` type,
+    // and integer const generic params with an arbitrary large value.
+    let source_map = tcx.sess.source_map();
+    let mut user_ty = source_map
+        .span_to_snippet(fn_param.ty_span)
+        .expect("Expected snippet for span");
+    if !config_generic_params.is_empty()
+        || !int_const_generic_params.is_empty()
+        || !abs_item_paths.is_empty()
+    {
+        let config_name = utils::def_name(config_local_def_id, tcx)?;
+        let config_name_fq = format!("<{config_name} as crate::pallet::Config>");
+        let config_name_fq_sys = format!("<{config_name} as frame_system::Config>");
+        let offset = fn_param.ty_span.lo().to_usize();
+        let mut offset_shift = 0;
+        let replacements = config_generic_params
+            .iter()
+            .map(|config_param_ty| {
+                (
+                    config_param_ty.span,
+                    match config_related_types.get(&config_param_ty.span) {
+                        Some(segment) => {
+                            let related_ty_name = segment.ident.as_str();
+                            if config_trait_item_names.contains(related_ty_name) {
+                                &config_name_fq
+                            } else {
+                                &config_name_fq_sys
+                            }
+                        }
+                        None => config_name.as_str(),
+                    },
+                )
+            })
+            .chain(
+                abs_item_paths
+                    .iter()
+                    .map(|(_, _, name, span)| (*span, name.as_str())),
+            )
+            .chain(
+                // We use 1000 arbitrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
+                // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#k-limits>
+                // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/k_limits.rs>
+                int_const_generic_params
+                    .iter()
+                    .map(|(config_expr, _)| (config_expr.span, "1000")),
+            )
+            .unique_by(|(span, _)| *span)
+            .sorted_by_key(|(span, _)| *span);
+        for (span, replacement) in replacements {
+            let start = span.lo().to_usize() - offset + offset_shift;
+            let end = span.hi().to_usize() - offset + offset_shift;
+            user_ty.replace_range(start..end, replacement);
+            offset_shift += replacement.len() - (end - start);
+        }
+    }
+    Some(user_ty)
+}
+
 /// Returns the well-formed `let` statement for the `local` (if any);
 fn let_statement_for_local(local_decl: &LocalDecl, tcx: TyCtxt<'_>) -> Option<(String, Span)> {
     let span_local = local_decl.source_info.span;
@@ -1649,4 +1730,46 @@ fn let_statement_for_local(local_decl: &LocalDecl, tcx: TyCtxt<'_>) -> Option<(S
     let span_stmt = span_let_to_span_inclusive
         .with_hi(span_let_to_span_inclusive.hi() + BytePos(snippet_span_to_semi.len() as u32));
     Some((snippet_stmt, span_stmt))
+}
+
+/// Collects all HIR types and anonymous constants.
+struct TyVisitor<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    types: Vec<&'tcx rustc_hir::Ty<'tcx>>,
+    anon_consts: Vec<&'tcx rustc_hir::AnonConst>,
+}
+
+impl<'tcx> TyVisitor<'tcx> {
+    fn new(tcx: TyCtxt<'tcx>) -> Self {
+        Self {
+            tcx,
+            types: Vec::new(),
+            anon_consts: Vec::new(),
+        }
+    }
+}
+
+impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for TyVisitor<'tcx> {
+    type NestedFilter = rustc_middle::hir::nested_filter::All;
+
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
+    }
+
+    fn visit_ty(&mut self, t: &'tcx rustc_hir::Ty<'tcx>) {
+        self.types.push(t);
+        rustc_hir::intravisit::walk_ty(self, t);
+    }
+
+    fn visit_anon_const(&mut self, c: &'tcx rustc_hir::AnonConst) {
+        self.anon_consts.push(c);
+        rustc_hir::intravisit::walk_anon_const(self, c);
+    }
+}
+
+/// Checks if an item (given it's `DefId`) is "visible" from the crate root.
+fn is_visible_from_crate_root(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
+    let crate_vis = Visibility::Restricted(CRATE_DEF_ID.to_def_id());
+    let vis = tcx.visibility(def_id);
+    vis.is_at_least(crate_vis, tcx)
 }
