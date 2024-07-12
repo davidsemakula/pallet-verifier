@@ -348,7 +348,6 @@ fn compose_entry_point<'tcx>(
     // `T: Config` name, generic param `DefId` and trait info.
     let config_def_id = config_type.ty_adt_def()?.did();
     let config_local_def_id = config_def_id.as_local()?;
-    let config_name = utils::def_name(config_local_def_id, tcx)?;
     let assoc_item = tcx.opt_associated_item(fn_local_def_id.to_def_id())?;
     if assoc_item.container != AssocItemContainer::ImplContainer {
         return None;
@@ -359,7 +358,6 @@ fn compose_entry_point<'tcx>(
     let impl_generics = hir.get_generics(impl_local_def_id)?;
     let config_param_name = Symbol::intern("T");
     let config_param_local_def_id = impl_generics.get_named(config_param_name)?.def_id;
-    let config_param_def_id = config_param_local_def_id.to_def_id();
     let config_trait_local_def_id = impl_generics
         .bounds_for_param(config_param_local_def_id)
         .find_map(|bound_info| {
@@ -373,22 +371,10 @@ fn compose_entry_point<'tcx>(
                 None
             })
         })?;
-    let config_trait_node = tcx.hir_node_by_def_id(config_trait_local_def_id);
-    let rustc_hir::Node::Item(config_trait_item) = config_trait_node else {
-        return None;
-    };
-    let rustc_hir::ItemKind::Trait(.., config_trait_item_refs) = config_trait_item.kind else {
-        return None;
-    };
-    let config_trait_item_names: FxHashSet<_> = config_trait_item_refs
-        .iter()
-        .map(|item| item.ident.as_str())
-        .collect();
 
     // Item imports and definitions.
     let mut used_items = FxHashSet::default();
     let mut item_defs = FxHashSet::default();
-    used_items.insert(config_def_id);
 
     // Compose entry point params, and corresponding dispatchable call args.
     let mut params = Vec::new();
@@ -416,8 +402,8 @@ fn compose_entry_point<'tcx>(
             fn_param,
             param_ty,
             config_local_def_id,
-            config_param_def_id,
-            &config_trait_item_names,
+            config_trait_local_def_id,
+            config_param_local_def_id,
             &mut used_items,
             tcx,
         );
@@ -625,13 +611,18 @@ fn compose_entry_point<'tcx>(
         .sorted_by_key(|(_, span)| *span)
         .map(|(snippet, _)| snippet)
         .join("\n    ");
+    let pallet_mod = tcx.parent_module_from_def_id(fn_local_def_id);
+    let pallet_mod_path = tcx.def_path_str(pallet_mod);
+    let config_impl_path = tcx.def_path_str(config_def_id);
     let content = format!(
         r"
 pub fn {name}({params_list}) {{
     {assign_decls}
 
-    crate::Pallet::<{config_name}>::{fn_name}({args_list});
-}}"
+    crate::{}{}Pallet::<crate::{config_impl_path}>::{fn_name}({args_list});
+}}",
+        pallet_mod_path,
+        if pallet_mod_path.is_empty() { "" } else { "::" }
     );
     Some((name, content, used_items))
 }
@@ -1497,9 +1488,9 @@ fn tractable_param_type(
 fn tractable_param_hir_type<'tcx>(
     fn_param: &'tcx rustc_hir::Param,
     ty: &'tcx rustc_hir::Ty<'tcx>,
-    config_local_def_id: LocalDefId,
-    config_param_def_id: DefId,
-    config_trait_item_names: &FxHashSet<&str>,
+    config_impl_local_def_id: LocalDefId,
+    config_trait_local_def_id: LocalDefId,
+    config_param_local_def_id: LocalDefId,
     used_items: &mut FxHashSet<DefId>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<String> {
@@ -1509,7 +1500,7 @@ fn tractable_param_hir_type<'tcx>(
     let hir = tcx.hir();
     let mut config_generic_params = Vec::new();
     let mut int_const_generic_params = Vec::new();
-    let mut abs_item_paths = Vec::new();
+    let mut fq_item_paths = Vec::new();
     let mut config_related_types = FxHashMap::default();
 
     for gen_ty in visitor.types.iter() {
@@ -1526,7 +1517,7 @@ fn tractable_param_hir_type<'tcx>(
         }
 
         if let Some((generic_param_def_id, _)) = gen_ty.as_generic_param() {
-            if generic_param_def_id == config_param_def_id {
+            if generic_param_def_id == config_param_local_def_id.to_def_id() {
                 config_generic_params.push(gen_ty);
             } else {
                 // Bails there are any non-`T: Config` generic params.
@@ -1539,7 +1530,7 @@ fn tractable_param_hir_type<'tcx>(
                 gen_ty
                     .as_generic_param()
                     .is_some_and(|(generic_param_def_id, _)| {
-                        generic_param_def_id == config_param_def_id
+                        generic_param_def_id == config_param_local_def_id.to_def_id()
                     });
             if is_config_param {
                 config_related_types.insert(gen_ty.span, segment);
@@ -1572,7 +1563,7 @@ fn tractable_param_hir_type<'tcx>(
                             }
                             None => path.span,
                         };
-                        abs_item_paths.push((path, def_id, def_path, def_span));
+                        fq_item_paths.push((path, def_id, def_path, def_span));
                     } else {
                         used_items.insert(def_id);
                     }
@@ -1618,11 +1609,14 @@ fn tractable_param_hir_type<'tcx>(
         .expect("Expected snippet for span");
     if !config_generic_params.is_empty()
         || !int_const_generic_params.is_empty()
-        || !abs_item_paths.is_empty()
+        || !fq_item_paths.is_empty()
     {
-        let config_name = utils::def_name(config_local_def_id, tcx)?;
-        let config_name_fq = format!("<{config_name} as crate::pallet::Config>");
-        let config_name_fq_sys = format!("<{config_name} as frame_system::Config>");
+        let config_impl_path = format!("crate::{}", tcx.def_path_str(config_impl_local_def_id));
+        let config_trait_path = tcx.def_path_str(config_trait_local_def_id);
+        let config_impl_path_fq = format!("<{config_impl_path} as crate::{config_trait_path}>");
+        let config_impl_path_fq_sys = format!("<{config_impl_path} as frame_system::Config>");
+        let config_trait_item_names = trait_assoc_item_names(config_trait_local_def_id, tcx);
+
         let offset = fn_param.ty_span.lo().to_usize();
         let mut offset_shift = 0;
         let replacements = config_generic_params
@@ -1633,18 +1627,21 @@ fn tractable_param_hir_type<'tcx>(
                     match config_related_types.get(&config_param_ty.span) {
                         Some(segment) => {
                             let related_ty_name = segment.ident.as_str();
-                            if config_trait_item_names.contains(related_ty_name) {
-                                &config_name_fq
+                            let is_ty_name_in_config_trait = config_trait_item_names
+                                .as_ref()
+                                .is_some_and(|names| names.contains(related_ty_name));
+                            if is_ty_name_in_config_trait {
+                                &config_impl_path_fq
                             } else {
-                                &config_name_fq_sys
+                                &config_impl_path_fq_sys
                             }
                         }
-                        None => config_name.as_str(),
+                        None => config_impl_path.as_str(),
                     },
                 )
             })
             .chain(
-                abs_item_paths
+                fq_item_paths
                     .iter()
                     .map(|(_, _, name, span)| (*span, name.as_str())),
             )
@@ -1772,4 +1769,24 @@ fn is_visible_from_crate_root(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
     let crate_vis = Visibility::Restricted(CRATE_DEF_ID.to_def_id());
     let vis = tcx.visibility(def_id);
     vis.is_at_least(crate_vis, tcx)
+}
+
+/// Returns names of associated items of a trait.
+fn trait_assoc_item_names(
+    trait_local_def_id: LocalDefId,
+    tcx: TyCtxt<'_>,
+) -> Option<FxHashSet<&str>> {
+    let trait_node = tcx.hir_node_by_def_id(trait_local_def_id);
+    let rustc_hir::Node::Item(trait_item) = trait_node else {
+        return None;
+    };
+    let rustc_hir::ItemKind::Trait(.., trait_item_refs) = trait_item.kind else {
+        return None;
+    };
+    Some(
+        trait_item_refs
+            .iter()
+            .map(|item| item.ident.as_str())
+            .collect(),
+    )
 }
