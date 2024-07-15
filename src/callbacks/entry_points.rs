@@ -734,116 +734,104 @@ fn process_used_items(
                         .span_to_snippet(span)
                         .expect("Expected snippet for local item");
 
-                    // Adds `impl`s source snippets for ADT item, and collects child used items for impls.
-                    let is_adt =
-                        matches!(item_kind, DefKind::Struct | DefKind::Enum | DefKind::Union);
-                    if is_adt {
-                        let mut impls = FxHashSet::default();
-                        let adt_impl = |item_id: rustc_hir::ItemId| {
-                            let item = hir.item(item_id);
-                            let rustc_hir::ItemKind::Impl(impl_item) = item.kind else {
-                                return None;
-                            };
-                            let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) =
-                                impl_item.self_ty.kind
-                            else {
-                                return None;
-                            };
-                            let Res::Def(
-                                DefKind::Struct | DefKind::Enum | DefKind::Union,
-                                adt_def_id,
-                            ) = path.res
-                            else {
-                                return None;
-                            };
-                            (adt_def_id == item_def_id).then_some((impl_item, item.span))
-                        };
-                        for (impl_item, span) in hir.items().filter_map(adt_impl) {
-                            // Adds `impl` snippet.
-                            let impl_source = source_map
-                                .span_to_snippet(span)
-                                .expect("Expected snippet for local item");
-                            impls.insert(impl_source);
-
-                            // Collects child used items for `impl`.
-                            process_impl(impl_item, &mut next_used_items, tcx);
-                        }
-
-                        // Adds `impl`s to ADT source.
-                        let impls_source = impls.iter().join("\n\n");
-                        source = format!("{source}\n\n{impls_source}");
-                    }
-
-                    // Adds item source snippet.
-                    item_defs.insert(source);
-
                     // Collects child used items.
                     let node = tcx.hir_node_by_def_id(item_local_def_id);
                     if let rustc_hir::Node::Item(item) = node {
-                        match item.kind {
+                        match &item.kind {
                             rustc_hir::ItemKind::Const(ty, generics, _)
                             | rustc_hir::ItemKind::TyAlias(ty, generics) => {
-                                process_hir_ty(ty, &mut next_used_items, &mut vec![], &mut vec![]);
-                                process_generics(generics, &mut next_used_items);
+                                process_hir_ty(ty, &mut next_used_items, tcx);
+                                process_generics(generics, &mut next_used_items, tcx);
                             }
                             rustc_hir::ItemKind::Fn(fn_sig, generics, _) => {
-                                process_fn_sig(&fn_sig, &mut next_used_items);
-                                process_generics(generics, &mut next_used_items);
+                                process_fn_sig(fn_sig, &mut next_used_items, tcx);
+                                process_generics(generics, &mut next_used_items, tcx);
                             }
                             rustc_hir::ItemKind::Enum(enum_def, generics) => {
                                 for variant in enum_def.variants {
-                                    process_variants(&variant.data, &mut next_used_items);
+                                    process_variants(&variant.data, &mut next_used_items, tcx);
                                 }
-                                process_generics(generics, &mut next_used_items);
+                                process_generics(generics, &mut next_used_items, tcx);
                             }
                             rustc_hir::ItemKind::Struct(variants, generics)
                             | rustc_hir::ItemKind::Union(variants, generics) => {
-                                process_variants(&variants, &mut next_used_items);
-                                process_generics(generics, &mut next_used_items);
+                                process_variants(variants, &mut next_used_items, tcx);
+                                process_generics(generics, &mut next_used_items, tcx);
                             }
                             rustc_hir::ItemKind::Trait(_, _, generics, bounds, assoc_items) => {
-                                for assoc_item_ref in assoc_items {
+                                for assoc_item_ref in *assoc_items {
                                     let assoc_item = hir.trait_item(assoc_item_ref.id);
-                                    match assoc_item.kind {
+                                    match &assoc_item.kind {
                                         rustc_hir::TraitItemKind::Const(ty, _) => {
-                                            process_hir_ty(
-                                                ty,
-                                                &mut next_used_items,
-                                                &mut vec![],
-                                                &mut vec![],
-                                            );
+                                            process_hir_ty(ty, &mut next_used_items, tcx);
                                         }
                                         rustc_hir::TraitItemKind::Fn(fn_sig, _) => {
-                                            process_fn_sig(&fn_sig, &mut next_used_items);
+                                            process_fn_sig(fn_sig, &mut next_used_items, tcx);
                                         }
                                         rustc_hir::TraitItemKind::Type(bounds, ty) => {
-                                            for bound in bounds {
+                                            for bound in *bounds {
                                                 process_generic_bound(bound, &mut next_used_items);
                                             }
                                             if let Some(ty) = ty {
-                                                process_hir_ty(
-                                                    ty,
-                                                    &mut next_used_items,
-                                                    &mut vec![],
-                                                    &mut vec![],
-                                                );
+                                                process_hir_ty(ty, &mut next_used_items, tcx);
                                             }
                                         }
                                     }
                                 }
-                                process_generics(generics, &mut next_used_items);
-                                for bound in bounds {
+                                process_generics(generics, &mut next_used_items, tcx);
+                                for bound in *bounds {
                                     process_generic_bound(bound, &mut next_used_items);
                                 }
                             }
                             rustc_hir::ItemKind::TraitAlias(generics, bounds) => {
-                                process_generics(generics, &mut next_used_items);
-                                for bound in bounds {
+                                process_generics(generics, &mut next_used_items, tcx);
+                                for bound in *bounds {
                                     process_generic_bound(bound, &mut next_used_items);
                                 }
                             }
                             _ => (),
                         }
+
+                        // Adds `impl`s source snippets for ADT item, and collects child used items for impls.
+                        if matches!(item_kind, DefKind::Struct | DefKind::Enum | DefKind::Union) {
+                            let mut impls = FxHashSet::default();
+                            let adt_impl = |item_id: rustc_hir::ItemId| {
+                                let item = hir.item(item_id);
+                                let rustc_hir::ItemKind::Impl(impl_item) = item.kind else {
+                                    return None;
+                                };
+                                let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) =
+                                    impl_item.self_ty.kind
+                                else {
+                                    return None;
+                                };
+                                let Res::Def(
+                                    DefKind::Struct | DefKind::Enum | DefKind::Union,
+                                    adt_def_id,
+                                ) = path.res
+                                else {
+                                    return None;
+                                };
+                                (adt_def_id == item_def_id).then_some((impl_item, item.span))
+                            };
+                            for (impl_item, span) in hir.items().filter_map(adt_impl) {
+                                // Collects child used items for `impl`.
+                                process_impl(impl_item, &mut next_used_items, tcx);
+
+                                // Adds `impl` snippet.
+                                let impl_source = source_map
+                                    .span_to_snippet(span)
+                                    .expect("Expected snippet for local item");
+                                impls.insert(impl_source);
+                            }
+
+                            // Adds `impl`s to ADT source.
+                            let impls_source = impls.iter().join("\n\n");
+                            source = format!("{source}\n\n{impls_source}");
+                        }
+
+                        // Adds item source snippet.
+                        item_defs.insert(source);
                     }
                 }
             } else if matches!(
@@ -863,34 +851,77 @@ fn process_used_items(
         used_items = next_used_items;
     }
 
+    /// Collects used items for HIR type.
+    fn process_hir_ty<'tcx>(
+        ty: &'tcx rustc_hir::Ty<'tcx>,
+        used_items: &mut FxHashSet<DefId>,
+        tcx: TyCtxt<'tcx>,
+    ) {
+        let mut visitor = TyVisitor::new(tcx);
+        visitor.visit_ty(ty);
+
+        for gen_ty in visitor.types {
+            if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = gen_ty.kind {
+                match path.res {
+                    Res::Def(_, def_id)
+                    | Res::SelfTyParam { trait_: def_id }
+                    | Res::SelfTyAlias {
+                        alias_to: def_id, ..
+                    }
+                    | Res::SelfCtor(def_id) => {
+                        used_items.insert(def_id);
+                    }
+                    _ => (),
+                };
+            }
+        }
+        for anon_const in visitor.anon_consts {
+            let const_expr = tcx.hir().body(anon_const.body).value;
+            if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = const_expr.kind
+            {
+                if let Res::Def(DefKind::Const, const_def_id) = path.res {
+                    used_items.insert(const_def_id);
+                }
+            }
+        }
+    }
+
     /// Collects child used items in `fn` signature.
-    fn process_fn_sig(sig: &rustc_hir::FnSig, used_items: &mut FxHashSet<DefId>) {
+    fn process_fn_sig<'tcx>(
+        sig: &'tcx rustc_hir::FnSig,
+        used_items: &mut FxHashSet<DefId>,
+        tcx: TyCtxt<'tcx>,
+    ) {
         let fn_decl = sig.decl;
         for param_ty in fn_decl.inputs {
-            process_hir_ty(param_ty, used_items, &mut vec![], &mut vec![]);
+            process_hir_ty(param_ty, used_items, tcx);
         }
         if let rustc_hir::FnRetTy::Return(return_ty) = fn_decl.output {
-            process_hir_ty(return_ty, used_items, &mut vec![], &mut vec![]);
+            process_hir_ty(return_ty, used_items, tcx);
         };
     }
 
     /// Collects child used items for ADT variants.
-    fn process_variants(variants: &rustc_hir::VariantData, used_items: &mut FxHashSet<DefId>) {
+    fn process_variants<'tcx>(
+        variants: &'tcx rustc_hir::VariantData,
+        used_items: &mut FxHashSet<DefId>,
+        tcx: TyCtxt<'tcx>,
+    ) {
         if let rustc_hir::VariantData::Tuple(_, _, variant_def_id)
         | rustc_hir::VariantData::Unit(_, variant_def_id) = variants
         {
             used_items.insert(variant_def_id.to_def_id());
         }
         for field in variants.fields() {
-            process_hir_ty(field.ty, used_items, &mut vec![], &mut vec![])
+            process_hir_ty(field.ty, used_items, tcx);
         }
     }
 
     /// Collects child used items for `impl`.
-    fn process_impl(
-        impl_item: &rustc_hir::Impl,
+    fn process_impl<'tcx>(
+        impl_item: &'tcx rustc_hir::Impl,
         used_items: &mut FxHashSet<DefId>,
-        tcx: TyCtxt<'_>,
+        tcx: TyCtxt<'tcx>,
     ) {
         // Adds trait (if any) to used items.
         let trait_def_id = impl_item
@@ -906,38 +937,42 @@ fn process_used_items(
             impl_item.self_ty.kind
         {
             if let Some(self_ty) = self_ty {
-                process_hir_ty(self_ty, used_items, &mut vec![], &mut vec![]);
+                process_hir_ty(self_ty, used_items, tcx);
             }
             let generic_args = path.segments.iter().flat_map(|segment| segment.args().args);
             for arg in generic_args {
                 if let rustc_hir::GenericArg::Type(arg_ty) = arg {
-                    process_hir_ty(arg_ty, used_items, &mut vec![], &mut vec![]);
+                    process_hir_ty(arg_ty, used_items, tcx);
                 }
             }
         }
 
         // Collects used items in generics.
-        process_generics(impl_item.generics, used_items);
+        process_generics(impl_item.generics, used_items, tcx);
 
         // Collects used items for assoc items.
         for assoc_item_ref in impl_item.items {
             let assoc_item = tcx.hir().impl_item(assoc_item_ref.id);
-            match assoc_item.kind {
+            match &assoc_item.kind {
                 rustc_hir::ImplItemKind::Const(ty, _) => {
-                    process_hir_ty(ty, used_items, &mut vec![], &mut vec![]);
+                    process_hir_ty(ty, used_items, tcx);
                 }
                 rustc_hir::ImplItemKind::Fn(fn_sig, _) => {
-                    process_fn_sig(&fn_sig, used_items);
+                    process_fn_sig(fn_sig, used_items, tcx);
                 }
                 rustc_hir::ImplItemKind::Type(ty) => {
-                    process_hir_ty(ty, used_items, &mut vec![], &mut vec![]);
+                    process_hir_ty(ty, used_items, tcx);
                 }
             }
         }
     }
 
     /// Collects child used items for generics.
-    fn process_generics(generics: &rustc_hir::Generics, used_items: &mut FxHashSet<DefId>) {
+    fn process_generics<'tcx>(
+        generics: &'tcx rustc_hir::Generics,
+        used_items: &mut FxHashSet<DefId>,
+        tcx: TyCtxt<'tcx>,
+    ) {
         for predicate in generics.predicates {
             match predicate {
                 rustc_hir::WherePredicate::BoundPredicate(bound_info) => {
@@ -947,7 +982,7 @@ fn process_used_items(
                 }
                 rustc_hir::WherePredicate::EqPredicate(eq_predicate) => {
                     for ty in [eq_predicate.lhs_ty, eq_predicate.rhs_ty] {
-                        process_hir_ty(ty, used_items, &mut vec![], &mut vec![])
+                        process_hir_ty(ty, used_items, tcx);
                     }
                 }
                 rustc_hir::WherePredicate::RegionPredicate(_) => (),
@@ -1259,182 +1294,23 @@ fn process_operand(
 ///
 /// Primitive types (e.g. `bool`, `int*`), `str` and unit (i.e. `()`) are ignored.
 fn process_type(ty: &Ty, used_items: &mut FxHashSet<DefId>) {
-    match ty.peel_refs().kind() {
-        TyKind::Bool
-        | TyKind::Char
-        | TyKind::Int(_)
-        | TyKind::Uint(_)
-        | TyKind::Float(_)
-        | TyKind::Str
-        | TyKind::Never
-        | TyKind::FnPtr(_)
-        | TyKind::Dynamic(_, _, _)
-        | TyKind::Param(_)
-        | TyKind::Bound(_, _)
-        | TyKind::Placeholder(_)
-        | TyKind::Infer(_)
-        | TyKind::Error(_) => (),
-        TyKind::Adt(def, args) => {
-            used_items.insert(def.did());
-            for arg_ty in args.iter().filter_map(GenericArg::as_type) {
-                process_type(&arg_ty, used_items);
+    for gen_ty in ty.walk().filter_map(GenericArg::as_type) {
+        match gen_ty.kind() {
+            TyKind::Adt(def, _) => {
+                used_items.insert(def.did());
             }
-        }
-        TyKind::Foreign(def_id) => {
-            used_items.insert(*def_id);
-        }
-        TyKind::Array(ty, _) | TyKind::Slice(ty) | TyKind::Ref(_, ty, _) => {
-            process_type(ty, used_items);
-        }
-        TyKind::RawPtr(ty_mut) => {
-            process_type(&ty_mut.ty, used_items);
-        }
-        TyKind::FnDef(def_id, args) => {
-            used_items.insert(*def_id);
-            for arg_ty in args.iter().filter_map(GenericArg::as_type) {
-                process_type(&arg_ty, used_items);
+            TyKind::Foreign(def_id)
+            | TyKind::FnDef(def_id, _)
+            | TyKind::Closure(def_id, _)
+            | TyKind::Coroutine(def_id, _)
+            | TyKind::CoroutineWitness(def_id, _) => {
+                used_items.insert(*def_id);
             }
-        }
-        TyKind::Closure(def_id, args)
-        | TyKind::Coroutine(def_id, args)
-        | TyKind::CoroutineWitness(def_id, args) => {
-            used_items.insert(*def_id);
-            for arg_ty in args.iter().filter_map(GenericArg::as_type) {
-                process_type(&arg_ty, used_items);
+            TyKind::Alias(_, alias) => {
+                used_items.insert(alias.def_id);
             }
+            _ => (),
         }
-        TyKind::Tuple(types) => {
-            for ty in *types {
-                process_type(&ty, used_items);
-            }
-        }
-        TyKind::Alias(_, alias) => {
-            used_items.insert(alias.def_id);
-            for arg_ty in alias.args.iter().filter_map(GenericArg::as_type) {
-                process_type(&arg_ty, used_items);
-            }
-        }
-    }
-}
-
-/// Collects used items and types for HIR type.
-///
-/// Primitive types (e.g. `bool`, `int*`), `str` and unit (i.e. `()`) are ignored.
-fn process_hir_ty<'tcx>(
-    ty: &rustc_hir::Ty<'tcx>,
-    used_items: &mut FxHashSet<DefId>,
-    types: &mut Vec<&rustc_hir::Ty<'tcx>>,
-    anon_consts: &mut Vec<rustc_hir::AnonConst>,
-) {
-    match ty.kind {
-        rustc_hir::TyKind::Slice(ty) => {
-            types.push(ty);
-            process_hir_ty(ty, used_items, types, anon_consts)
-        }
-        rustc_hir::TyKind::Array(ty, len) => {
-            types.push(ty);
-            process_hir_ty(ty, used_items, types, anon_consts);
-            if let rustc_hir::ArrayLen::Body(anon_const) = len {
-                anon_consts.push(anon_const);
-            }
-        }
-        rustc_hir::TyKind::Ptr(mut_ty) | rustc_hir::TyKind::Ref(_, mut_ty) => {
-            types.push(mut_ty.ty);
-            process_hir_ty(mut_ty.ty, used_items, types, anon_consts)
-        }
-        rustc_hir::TyKind::Tup(tys) => {
-            for ty in tys {
-                types.push(ty);
-                process_hir_ty(ty, used_items, types, anon_consts)
-            }
-        }
-        rustc_hir::TyKind::Path(qpath) => match qpath {
-            rustc_hir::QPath::Resolved(ty, path) => {
-                match path.res {
-                    Res::Def(_, def_id) => {
-                        used_items.insert(def_id);
-                    }
-                    Res::SelfTyParam { trait_: def_id }
-                    | Res::SelfTyAlias {
-                        alias_to: def_id, ..
-                    }
-                    | Res::SelfCtor(def_id) => {
-                        used_items.insert(def_id);
-                    }
-                    Res::Local(_)
-                    | Res::PrimTy(_)
-                    | Res::ToolMod
-                    | Res::NonMacroAttr(_)
-                    | Res::Err => (),
-                };
-                for segment in path.segments {
-                    for arg in segment.args().args {
-                        match arg {
-                            rustc_hir::GenericArg::Type(ty) => {
-                                types.push(*ty);
-                                process_hir_ty(ty, used_items, types, anon_consts);
-                            }
-                            rustc_hir::GenericArg::Const(anon_const) => {
-                                anon_consts.push(anon_const.value);
-                            }
-                            rustc_hir::GenericArg::Lifetime(_)
-                            | rustc_hir::GenericArg::Infer(_) => (),
-                        }
-                    }
-                }
-                if let Some(ty) = ty {
-                    types.push(ty);
-                    process_hir_ty(ty, used_items, types, anon_consts);
-                }
-            }
-            rustc_hir::QPath::TypeRelative(ty, segment) => {
-                types.push(ty);
-                process_hir_ty(ty, used_items, types, anon_consts);
-                for arg in segment.args().args {
-                    match arg {
-                        rustc_hir::GenericArg::Type(ty) => {
-                            types.push(*ty);
-                            process_hir_ty(ty, used_items, types, anon_consts);
-                        }
-                        rustc_hir::GenericArg::Const(anon_const) => {
-                            anon_consts.push(anon_const.value);
-                        }
-                        rustc_hir::GenericArg::Lifetime(_) | rustc_hir::GenericArg::Infer(_) => (),
-                    }
-                }
-            }
-            rustc_hir::QPath::LangItem(_, _) => (),
-        },
-        rustc_hir::TyKind::OpaqueDef(_, generic_args, _) => {
-            for arg in generic_args {
-                match arg {
-                    rustc_hir::GenericArg::Type(ty) => {
-                        types.push(*ty);
-                        process_hir_ty(ty, used_items, types, anon_consts);
-                    }
-                    rustc_hir::GenericArg::Const(anon_const) => {
-                        anon_consts.push(anon_const.value);
-                    }
-                    rustc_hir::GenericArg::Lifetime(_) | rustc_hir::GenericArg::Infer(_) => (),
-                }
-            }
-        }
-        rustc_hir::TyKind::TraitObject(trait_refs, _, _) => {
-            for trait_def_id in trait_refs
-                .iter()
-                .filter_map(|trait_ref| trait_ref.trait_ref.trait_def_id())
-            {
-                used_items.insert(trait_def_id);
-            }
-        }
-        rustc_hir::TyKind::Typeof(anon_const) => {
-            anon_consts.push(anon_const);
-        }
-        rustc_hir::TyKind::BareFn(_)
-        | rustc_hir::TyKind::Never
-        | rustc_hir::TyKind::Infer
-        | rustc_hir::TyKind::InferDelegation(_, _)
-        | rustc_hir::TyKind::Err(_) => (),
     }
 }
 
@@ -1503,7 +1379,7 @@ fn tractable_param_hir_type<'tcx>(
     let mut fq_item_paths = Vec::new();
     let mut config_related_types = FxHashMap::default();
 
-    for gen_ty in visitor.types.iter() {
+    for gen_ty in visitor.types {
         let has_raw_indirection_dynamic_or_opaque_types = matches!(
             gen_ty.kind,
             rustc_hir::TyKind::Ptr(_)
@@ -1523,17 +1399,17 @@ fn tractable_param_hir_type<'tcx>(
                 // Bails there are any non-`T: Config` generic params.
                 return None;
             }
-        } else if let rustc_hir::TyKind::Path(rustc_hir::QPath::TypeRelative(gen_ty, segment)) =
+        } else if let rustc_hir::TyKind::Path(rustc_hir::QPath::TypeRelative(rel_ty, segment)) =
             gen_ty.kind
         {
             let is_config_param =
-                gen_ty
+                rel_ty
                     .as_generic_param()
                     .is_some_and(|(generic_param_def_id, _)| {
                         generic_param_def_id == config_param_local_def_id.to_def_id()
                     });
             if is_config_param {
-                config_related_types.insert(gen_ty.span, segment);
+                config_related_types.insert(rel_ty.span, segment);
             }
         } else if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = gen_ty.kind {
             match path.res {
