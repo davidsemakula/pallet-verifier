@@ -684,17 +684,21 @@ fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
 ///
 /// NOTE: Ignores items that aren't importable and/or depend on unstable features that aren't enabled.
 fn process_used_items(
-    mut used_items: FxHashSet<DefId>,
+    used_items: FxHashSet<DefId>,
     use_decls: &mut FxHashSet<String>,
     item_defs: &mut FxHashSet<String>,
     tcx: TyCtxt<'_>,
 ) {
     let hir = tcx.hir();
     let source_map = tcx.sess.source_map();
-    while !used_items.is_empty() {
+    let mut aliased_used_items: FxHashSet<(DefId, Option<Symbol>)> = used_items
+        .into_iter()
+        .map(|def_id| (def_id, None))
+        .collect();
+    while !aliased_used_items.is_empty() {
         // Tracks child used items for next iteration.
         let mut next_used_items = FxHashSet::default();
-        for item_def_id in used_items.drain() {
+        for (item_def_id, item_alias) in aliased_used_items.drain() {
             let item_kind = tcx.def_kind(item_def_id);
             let is_importable = matches!(
                 item_kind,
@@ -706,7 +710,7 @@ fn process_used_items(
                     | DefKind::Union
                     | DefKind::Trait
                     | DefKind::TraitAlias
-                    | DefKind::TyAlias { .. }
+                    | DefKind::TyAlias
                     | DefKind::Macro(_)
                     | DefKind::ForeignTy
             );
@@ -718,13 +722,18 @@ fn process_used_items(
                 if !item_def_id.is_local() || is_visible_from_crate_root(item_def_id, tcx) {
                     // Add use declaration for foreign items, and local items that are visible from the crate root.
                     use_decls.insert(format!(
-                        "use {}{};",
+                        "use {}{}{};",
                         if item_def_id.is_local() {
                             "crate::"
                         } else {
                             ""
                         },
-                        tcx.def_path_str(item_def_id)
+                        tcx.def_path_str(item_def_id),
+                        if let Some(item_alias) = item_alias {
+                            format!(" as {item_alias}")
+                        } else {
+                            String::new()
+                        }
                     ));
                 } else {
                     // Copy/re-define local items that aren't visible from the crate root.
@@ -842,19 +851,19 @@ fn process_used_items(
                     .opt_associated_item(item_def_id)
                     .and_then(|assoc_item| assoc_item.trait_container(tcx))
                 {
-                    next_used_items.insert(trait_def_id);
+                    next_used_items.insert((trait_def_id, None));
                 }
             }
         }
 
         // Process used items in next iteration.
-        used_items = next_used_items;
+        aliased_used_items = next_used_items;
     }
 
     /// Collects used items for HIR type.
     fn process_hir_ty<'tcx>(
         ty: &'tcx rustc_hir::Ty<'tcx>,
-        used_items: &mut FxHashSet<DefId>,
+        used_items: &mut FxHashSet<(DefId, Option<Symbol>)>,
         tcx: TyCtxt<'tcx>,
     ) {
         let mut visitor = TyVisitor::new(tcx);
@@ -863,13 +872,76 @@ fn process_used_items(
         for gen_ty in visitor.types {
             if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = gen_ty.kind {
                 match path.res {
-                    Res::Def(_, def_id)
-                    | Res::SelfTyParam { trait_: def_id }
+                    Res::Def(def_kind, def_id) => {
+                        if matches!(
+                            def_kind,
+                            DefKind::AssocTy | DefKind::AssocFn | DefKind::AssocConst
+                        ) {
+                            if let Some(trait_def_id) = tcx
+                                .opt_associated_item(def_id)
+                                .and_then(|assoc_item| assoc_item.trait_container(tcx))
+                            {
+                                if let Some((trait_segments, _)) =
+                                    path.segments.split_last_chunk::<1>()
+                                {
+                                    let user_trait_path = trait_segments
+                                        .iter()
+                                        .map(|segment| segment.ident)
+                                        .join("::");
+                                    let trait_def_path = tcx.def_path_str(trait_def_id);
+                                    if user_trait_path == trait_def_path {
+                                        // Ignore fully-qualified trait paths.
+                                        continue;
+                                    }
+
+                                    let trait_user_name =
+                                        trait_segments.last().map(|segment| segment.ident.name);
+                                    let trait_def_name = trait_def_path.split("::").last();
+                                    if let Some((alias, _)) = trait_user_name
+                                        .zip(trait_def_name)
+                                        .filter(|(user_name, name)| user_name.as_str() != *name)
+                                    {
+                                        // Add trait along with it's alias.
+                                        used_items.insert((trait_def_id, Some(alias)));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        if matches!(
+                            def_kind,
+                            DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait
+                        ) {
+                            let user_adt_path =
+                                path.segments.iter().map(|segment| segment.ident).join("::");
+                            let adt_def_path = tcx.def_path_str(def_id);
+                            if user_adt_path == adt_def_path {
+                                // Ignore fully-qualified ADT paths.
+                                continue;
+                            }
+
+                            let adt_user_name =
+                                path.segments.last().map(|segment| segment.ident.name);
+                            let adt_def_name = adt_def_path.split("::").last();
+
+                            if let Some((alias, _)) = adt_user_name
+                                .zip(adt_def_name)
+                                .filter(|(user_name, name)| user_name.as_str() != *name)
+                            {
+                                // Add ADT along with it's alias.
+                                used_items.insert((def_id, Some(alias)));
+                                continue;
+                            }
+                        }
+                        used_items.insert((def_id, None));
+                    }
+                    Res::SelfTyParam { trait_: def_id }
                     | Res::SelfTyAlias {
                         alias_to: def_id, ..
                     }
                     | Res::SelfCtor(def_id) => {
-                        used_items.insert(def_id);
+                        used_items.insert((def_id, None));
                     }
                     _ => (),
                 };
@@ -880,7 +952,7 @@ fn process_used_items(
             if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = const_expr.kind
             {
                 if let Res::Def(DefKind::Const, const_def_id) = path.res {
-                    used_items.insert(const_def_id);
+                    used_items.insert((const_def_id, None));
                 }
             }
         }
@@ -889,7 +961,7 @@ fn process_used_items(
     /// Collects child used items in `fn` signature.
     fn process_fn_sig<'tcx>(
         sig: &'tcx rustc_hir::FnSig,
-        used_items: &mut FxHashSet<DefId>,
+        used_items: &mut FxHashSet<(DefId, Option<Symbol>)>,
         tcx: TyCtxt<'tcx>,
     ) {
         let fn_decl = sig.decl;
@@ -904,13 +976,13 @@ fn process_used_items(
     /// Collects child used items for ADT variants.
     fn process_variants<'tcx>(
         variants: &'tcx rustc_hir::VariantData,
-        used_items: &mut FxHashSet<DefId>,
+        used_items: &mut FxHashSet<(DefId, Option<Symbol>)>,
         tcx: TyCtxt<'tcx>,
     ) {
         if let rustc_hir::VariantData::Tuple(_, _, variant_def_id)
         | rustc_hir::VariantData::Unit(_, variant_def_id) = variants
         {
-            used_items.insert(variant_def_id.to_def_id());
+            used_items.insert((variant_def_id.to_def_id(), None));
         }
         for field in variants.fields() {
             process_hir_ty(field.ty, used_items, tcx);
@@ -920,7 +992,7 @@ fn process_used_items(
     /// Collects child used items for `impl`.
     fn process_impl<'tcx>(
         impl_item: &'tcx rustc_hir::Impl,
-        used_items: &mut FxHashSet<DefId>,
+        used_items: &mut FxHashSet<(DefId, Option<Symbol>)>,
         tcx: TyCtxt<'tcx>,
     ) {
         // Adds trait (if any) to used items.
@@ -929,7 +1001,7 @@ fn process_used_items(
             .as_ref()
             .and_then(rustc_hir::TraitRef::trait_def_id);
         if let Some(trait_def_id) = trait_def_id {
-            used_items.insert(trait_def_id);
+            used_items.insert((trait_def_id, None));
         }
 
         // Collects used items in path (if any).
@@ -970,7 +1042,7 @@ fn process_used_items(
     /// Collects child used items for generics.
     fn process_generics<'tcx>(
         generics: &'tcx rustc_hir::Generics,
-        used_items: &mut FxHashSet<DefId>,
+        used_items: &mut FxHashSet<(DefId, Option<Symbol>)>,
         tcx: TyCtxt<'tcx>,
     ) {
         for predicate in generics.predicates {
@@ -991,10 +1063,13 @@ fn process_used_items(
     }
 
     /// Collects child used items for generic bound.
-    fn process_generic_bound(bound: &rustc_hir::GenericBound, used_items: &mut FxHashSet<DefId>) {
+    fn process_generic_bound(
+        bound: &rustc_hir::GenericBound,
+        used_items: &mut FxHashSet<(DefId, Option<Symbol>)>,
+    ) {
         if let Some(trait_ref) = bound.trait_ref() {
             if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
-                used_items.insert(trait_def_id);
+                used_items.insert((trait_def_id, None));
             }
         }
     }
