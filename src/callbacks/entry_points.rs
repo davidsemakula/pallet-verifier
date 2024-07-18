@@ -16,6 +16,7 @@ use rustc_middle::{
 };
 use rustc_span::{
     def_id::{DefId, LocalDefId, CRATE_DEF_ID},
+    symbol::Ident,
     BytePos, Pos, Span, Symbol,
 };
 
@@ -115,20 +116,76 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             println!("Generating tractable entry points for FRAME pallet ...");
             let mut used_items = FxHashSet::default();
             phase = Phase::EntryPoints;
-            let config_type = calls.values().find_map(|(terminator, _)| {
+            let Some(generics) = calls.iter().find_map(|(fn_local_def_id, (terminator, _))| {
                 if let TerminatorKind::Call { func, .. } = &terminator.kind {
                     let (_, fn_generic_args) = func.const_fn_def()?;
-                    fn_generic_args.first()?.as_type()
+                    let ty_args: Vec<_> = fn_generic_args
+                        .iter()
+                        .filter_map(GenericArg::as_type)
+                        .collect();
+
+                    let assoc_item = tcx.opt_associated_item(fn_local_def_id.to_def_id())?;
+                    if assoc_item.container != AssocItemContainer::ImplContainer {
+                        return None;
+                    }
+                    let impl_def_id = assoc_item.container_id(tcx);
+                    let impl_local_def_id = impl_def_id.as_local()?;
+                    let impl_generics = hir.get_generics(impl_local_def_id)?;
+                    let config_param_name = Symbol::intern("T");
+                    let config_param_local_def_id =
+                        impl_generics.get_named(config_param_name)?.def_id;
+                    let config_trait_local_def_id = impl_generics
+                        .bounds_for_param(config_param_local_def_id)
+                        .find_map(|bound_info| {
+                            bound_info.bounds.iter().find_map(|bound| {
+                                let trait_ref = bound.trait_ref()?;
+                                if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
+                                    let trait_local_def_id = trait_def_id.as_local()?;
+                                    let trait_name = utils::def_name(trait_local_def_id, tcx)?;
+                                    return (trait_name.as_str() == "Config")
+                                        .then_some(trait_local_def_id);
+                                }
+                                None
+                            })
+                        })?;
+
+                    let ty_params: Vec<_> = impl_generics
+                        .params
+                        .iter()
+                        .filter(|param| {
+                            matches!(param.kind, rustc_hir::GenericParamKind::Type { .. })
+                        })
+                        .collect();
+                    let mut ty_param_impls = FxHashMap::default();
+                    if ty_params.len() == ty_args.len() {
+                        for (idx, param) in ty_params.iter().enumerate() {
+                            let param_name = param.name.ident();
+                            let param_def_id = param.def_id;
+                            let arg_ty = ty_args
+                                .get(idx)
+                                .expect("Expected a generic arg at index {idx}");
+                            ty_param_impls.insert(param_def_id, (param_name, *arg_ty));
+                        }
+                    }
+
+                    Some(Generics::new(
+                        config_trait_local_def_id,
+                        config_param_local_def_id,
+                        ty_args,
+                        ty_param_impls,
+                    ))
                 } else {
                     None
                 }
-            });
+            }) else {
+                return;
+            };
             for local_def_id in local_def_ids {
                 let call_info = calls
                     .get(&local_def_id)
                     .map(|(terminator, body)| (terminator, *body));
                 let entry_point_result =
-                    compose_entry_point(local_def_id, tcx, call_info, config_type);
+                    compose_entry_point(local_def_id, tcx, call_info, &generics);
                 if let Some((name, content, local_used_items)) = entry_point_result {
                     entry_points.insert(name, content);
                     used_items.extend(local_used_items);
@@ -136,10 +193,10 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                     let name = utils::def_name(local_def_id, tcx)
                         .expect("Expected a name for dispatchable");
                     let (msg, note, help) = if call_info.is_some() {
-                        (format!("Failed to generate tractable entry point for dispatchable: `{name}`"), None, None)
+                        ("Failed to generate tractable entry point", None, None)
                     } else {
                         (
-                            format!("Couldn't find a call for dispatchable: `{name}`"),
+                            "Couldn't find a call",
                             Some(format!(
                                 "pallet-verifier couldn't find a unit test for: `{name}`."
                             )),
@@ -149,7 +206,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                     let mut warning = compiler
                         .sess
                         .dcx()
-                        .struct_warn(msg);
+                        .struct_warn(format!("{msg} for dispatchable: `{name}`"));
                     if let Some(note) = note {
                         warning.note(note);
                     }
@@ -249,6 +306,45 @@ enum Phase {
     EntryPoints,
 }
 
+/// Generic info for specializing entry points.
+struct Generics<'tcx> {
+    config_trait_local_def_id: LocalDefId,
+    config_param_local_def_id: LocalDefId,
+    ty_args: Vec<Ty<'tcx>>,
+    ty_param_impls: FxHashMap<LocalDefId, (Ident, Ty<'tcx>)>,
+}
+
+impl<'tcx> Generics<'tcx> {
+    /// Create a new instance of generics info.
+    pub fn new(
+        config_trait_local_def_id: LocalDefId,
+        config_param_local_def_id: LocalDefId,
+        ty_args: Vec<Ty<'tcx>>,
+        ty_param_impls: FxHashMap<LocalDefId, (Ident, Ty<'tcx>)>,
+    ) -> Self {
+        Self {
+            config_trait_local_def_id,
+            config_param_local_def_id,
+            ty_args,
+            ty_param_impls,
+        }
+    }
+
+    /// Creates turbofish arguments from generics info.
+    pub fn turbofish_args(&self, used_items: &mut FxHashSet<DefId>, tcx: TyCtxt<'_>) -> String {
+        format!(
+            "::<{}>",
+            self.ty_args
+                .iter()
+                .map(|ty| {
+                    tractable_param_type(ty, used_items, tcx)
+                        .expect("Expected tractable generic args")
+                })
+                .join(", ")
+        )
+    }
+}
+
 /// Finds names of dispatchable functions.
 ///
 /// Dispatchable functions are represented as variants of an enum `Call<T: Config>`
@@ -317,13 +413,16 @@ fn compose_entry_point<'tcx>(
     fn_local_def_id: LocalDefId,
     tcx: TyCtxt<'tcx>,
     call_info: Option<(&Terminator<'tcx>, &Body<'tcx>)>,
-    config_type_fallback: Option<Ty<'tcx>>,
+    generics: &Generics,
 ) -> Option<(String, String, FxHashSet<DefId>)> {
     // Dispatchable name.
     let fn_name = utils::def_name(fn_local_def_id, tcx)?;
 
-    // `T: Config` type, owner body (if any), call args (if any) and call span (if any).
-    let (config_type, owner_body_opt, call_args_opt, fn_span_opt) = if let Some((
+    // owner body (if any), call args (if any) and call span (if any).
+    let mut owner_body_opt = None;
+    let mut call_args_opt = None;
+    let mut fn_span_opt = None;
+    if let Some((
         TerminatorKind::Call {
             func,
             args,
@@ -331,46 +430,16 @@ fn compose_entry_point<'tcx>(
             ..
         },
         body,
-    )) =
-        call_info.map(|(terminator, body)| (&terminator.kind, body))
+    )) = call_info.map(|(terminator, body)| (&terminator.kind, body))
     {
-        let (fn_def_id, fn_generic_args) = func.const_fn_def()?;
+        let (fn_def_id, _) = func.const_fn_def()?;
         if fn_def_id != fn_local_def_id.to_def_id() {
             return None;
         }
-        let config_type = fn_generic_args.first()?.as_type()?;
-        (config_type, Some(body), Some(args), Some(fn_span))
-    } else {
-        // Bails if no fallback `T: Config` type was provided.
-        (config_type_fallback?, None, None, None)
-    };
-
-    // `T: Config` name, generic param `DefId` and trait info.
-    let config_def_id = config_type.ty_adt_def()?.did();
-    let config_local_def_id = config_def_id.as_local()?;
-    let assoc_item = tcx.opt_associated_item(fn_local_def_id.to_def_id())?;
-    if assoc_item.container != AssocItemContainer::ImplContainer {
-        return None;
+        owner_body_opt = Some(body);
+        call_args_opt = Some(args);
+        fn_span_opt = Some(fn_span);
     }
-    let impl_def_id = assoc_item.container_id(tcx);
-    let impl_local_def_id = impl_def_id.as_local()?;
-    let hir = tcx.hir();
-    let impl_generics = hir.get_generics(impl_local_def_id)?;
-    let config_param_name = Symbol::intern("T");
-    let config_param_local_def_id = impl_generics.get_named(config_param_name)?.def_id;
-    let config_trait_local_def_id = impl_generics
-        .bounds_for_param(config_param_local_def_id)
-        .find_map(|bound_info| {
-            bound_info.bounds.iter().find_map(|bound| {
-                let trait_ref = bound.trait_ref()?;
-                if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
-                    let trait_local_def_id = trait_def_id.as_local()?;
-                    let trait_name = utils::def_name(trait_local_def_id, tcx)?;
-                    return (trait_name.as_str() == "Config").then_some(trait_local_def_id);
-                }
-                None
-            })
-        })?;
 
     // Item imports and definitions.
     let mut used_items = FxHashSet::default();
@@ -381,6 +450,7 @@ fn compose_entry_point<'tcx>(
     let mut args = Vec::new();
     let mut locals = FxHashSet::default();
     let hir_id = tcx.local_def_id_to_hir_id(fn_local_def_id);
+    let hir = tcx.hir();
     let hir_body_id = hir.body_owned_by(fn_local_def_id);
     let hir_body = hir.body(hir_body_id);
     let fn_params = hir_body.params;
@@ -398,15 +468,8 @@ fn compose_entry_point<'tcx>(
 
         // Composes entry point param and/or dispatchable call arg.
         let param_ty = fn_params_ty.get(idx).expect("Expected param type");
-        let specialized_user_ty = tractable_param_hir_type(
-            fn_param,
-            param_ty,
-            config_local_def_id,
-            config_trait_local_def_id,
-            config_param_local_def_id,
-            &mut used_items,
-            tcx,
-        );
+        let specialized_user_ty =
+            tractable_param_hir_type(fn_param, param_ty, generics, &mut used_items, tcx);
         if let Some(specialized_user_ty) = specialized_user_ty {
             // Composes entry point param, and corresponding dispatchable call arg vars,
             // by replacing `T: Config` param types with concrete `Config` type,
@@ -613,13 +676,13 @@ fn compose_entry_point<'tcx>(
         .join("\n    ");
     let pallet_mod = tcx.parent_module_from_def_id(fn_local_def_id);
     let pallet_mod_path = tcx.def_path_str(pallet_mod);
-    let config_impl_path = tcx.def_path_str(config_def_id);
+    let generic_args = generics.turbofish_args(&mut used_items, tcx);
     let content = format!(
         r"
 pub fn {name}({params_list}) {{
     {assign_decls}
 
-    crate::{}{}Pallet::<crate::{config_impl_path}>::{fn_name}({args_list});
+    crate::{}{}Pallet{generic_args}::{fn_name}({args_list});
 }}",
         pallet_mod_path,
         if pallet_mod_path.is_empty() { "" } else { "::" }
@@ -1417,20 +1480,27 @@ fn tractable_param_type(
     }
 
     // Makes local type paths resolvable.
-    let mut ty_str = ty.to_string();
+    let mut tractable_ty_path = ty.to_string();
     for gen_ty in ty.walk().filter_map(GenericArg::as_type) {
         if let TyKind::Adt(def, _) = gen_ty.peel_refs().kind() {
             let def_id = def.did();
-            used_items.insert(def_id);
             if let Some(local_def_id) = def_id.as_local() {
-                let gen_ty_str = tcx.def_path_str(def_id);
-                let gen_ty_name =
-                    utils::def_name(local_def_id, tcx).expect("Expected local definition name");
-                ty_str = ty_str.replace(&gen_ty_str, gen_ty_name.as_str());
+                let gen_ty_path = tcx.def_path_str(def_id);
+                let resolvable_ty_path = if is_visible_from_crate_root(def_id, tcx) {
+                    format!("crate::{gen_ty_path}")
+                } else {
+                    used_items.insert(def_id);
+                    utils::def_name(local_def_id, tcx)
+                        .expect("Expected local definition name")
+                        .to_string()
+                };
+                tractable_ty_path = tractable_ty_path.replace(&gen_ty_path, &resolvable_ty_path);
+            } else {
+                used_items.insert(def_id);
             }
         }
     }
-    Some(ty_str)
+    Some(tractable_ty_path)
 }
 
 /// Composes tractable entry point param type from HIR type (if possible).
@@ -1439,9 +1509,7 @@ fn tractable_param_type(
 fn tractable_param_hir_type<'tcx>(
     fn_param: &'tcx rustc_hir::Param,
     ty: &'tcx rustc_hir::Ty<'tcx>,
-    config_impl_local_def_id: LocalDefId,
-    config_trait_local_def_id: LocalDefId,
-    config_param_local_def_id: LocalDefId,
+    generics: &Generics,
     used_items: &mut FxHashSet<DefId>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<String> {
@@ -1449,7 +1517,7 @@ fn tractable_param_hir_type<'tcx>(
     visitor.visit_ty(ty);
 
     let hir = tcx.hir();
-    let mut config_generic_params = Vec::new();
+    let mut ty_generic_params = Vec::new();
     let mut int_const_generic_params = Vec::new();
     let mut fq_item_paths = Vec::new();
     let mut config_related_types = FxHashMap::default();
@@ -1468,8 +1536,14 @@ fn tractable_param_hir_type<'tcx>(
         }
 
         if let Some((generic_param_def_id, _)) = gen_ty.as_generic_param() {
-            if generic_param_def_id == config_param_local_def_id.to_def_id() {
-                config_generic_params.push(gen_ty);
+            let gen_param_impl =
+                generic_param_def_id
+                    .as_local()
+                    .and_then(|generic_param_local_def_id| {
+                        generics.ty_param_impls.get(&generic_param_local_def_id)
+                    });
+            if let Some((_, arg_ty)) = gen_param_impl {
+                ty_generic_params.push((gen_ty, arg_ty, generic_param_def_id));
             } else {
                 // Bails there are any non-`T: Config` generic params.
                 return None;
@@ -1481,7 +1555,7 @@ fn tractable_param_hir_type<'tcx>(
                 rel_ty
                     .as_generic_param()
                     .is_some_and(|(generic_param_def_id, _)| {
-                        generic_param_def_id == config_param_local_def_id.to_def_id()
+                        generic_param_def_id == generics.config_param_local_def_id.to_def_id()
                     });
             if is_config_param {
                 config_related_types.insert(rel_ty.span, segment);
@@ -1558,58 +1632,56 @@ fn tractable_param_hir_type<'tcx>(
     let mut user_ty = source_map
         .span_to_snippet(fn_param.ty_span)
         .expect("Expected snippet for span");
-    if !config_generic_params.is_empty()
+    if !ty_generic_params.is_empty()
         || !int_const_generic_params.is_empty()
         || !fq_item_paths.is_empty()
     {
-        let config_impl_path = format!("crate::{}", tcx.def_path_str(config_impl_local_def_id));
-        let config_trait_path = tcx.def_path_str(config_trait_local_def_id);
-        let config_impl_path_fq = format!("<{config_impl_path} as crate::{config_trait_path}>");
-        let config_impl_path_fq_sys = format!("<{config_impl_path} as frame_system::Config>");
-        let config_trait_item_names = trait_assoc_item_names(config_trait_local_def_id, tcx);
-
         let offset = fn_param.ty_span.lo().to_usize();
         let mut offset_shift = 0;
-        let replacements = config_generic_params
-            .iter()
-            .map(|config_param_ty| {
-                (
-                    config_param_ty.span,
-                    match config_related_types.get(&config_param_ty.span) {
-                        Some(segment) => {
-                            let related_ty_name = segment.ident.as_str();
-                            let is_ty_name_in_config_trait = config_trait_item_names
-                                .as_ref()
-                                .is_some_and(|names| names.contains(related_ty_name));
-                            if is_ty_name_in_config_trait {
-                                &config_impl_path_fq
-                            } else {
-                                &config_impl_path_fq_sys
-                            }
+        let config_trait_item_names =
+            trait_assoc_item_names(generics.config_trait_local_def_id, tcx);
+        let replacements = ty_generic_params
+            .into_iter()
+            .map(|(param_ty, arg_ty, generic_param_def_id)| {
+                let mut arg_ty_path = tractable_param_type(arg_ty, used_items, tcx)
+                    .expect("Expected tractable generic args");
+                if generic_param_def_id == generics.config_param_local_def_id.to_def_id() {
+                    if let Some(segment) = config_related_types.get(&param_ty.span) {
+                        let related_ty_name = segment.ident.as_str();
+                        let is_ty_name_in_config_trait = config_trait_item_names
+                            .as_ref()
+                            .is_some_and(|names| names.contains(related_ty_name));
+                        if is_ty_name_in_config_trait {
+                            arg_ty_path = format!(
+                                "<{arg_ty_path} as crate::{}>",
+                                tcx.def_path_str(generics.config_trait_local_def_id)
+                            );
+                        } else {
+                            arg_ty_path = format!("<{arg_ty_path} as frame_system::Config>");
                         }
-                        None => config_impl_path.as_str(),
-                    },
-                )
+                    }
+                }
+                (param_ty.span, arg_ty_path)
             })
             .chain(
                 fq_item_paths
-                    .iter()
-                    .map(|(_, _, name, span)| (*span, name.as_str())),
+                    .into_iter()
+                    .map(|(_, _, name, span)| (span, name)),
             )
             .chain(
                 // We use 1000 arbitrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
                 // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#k-limits>
                 // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/k_limits.rs>
                 int_const_generic_params
-                    .iter()
-                    .map(|(config_expr, _)| (config_expr.span, "1000")),
+                    .into_iter()
+                    .map(|(config_expr, _)| (config_expr.span, "1000".to_string())),
             )
             .unique_by(|(span, _)| *span)
             .sorted_by_key(|(span, _)| *span);
         for (span, replacement) in replacements {
             let start = span.lo().to_usize() - offset + offset_shift;
             let end = span.hi().to_usize() - offset + offset_shift;
-            user_ty.replace_range(start..end, replacement);
+            user_ty.replace_range(start..end, &replacement);
             offset_shift += replacement.len() - (end - start);
         }
     }
