@@ -15,8 +15,7 @@ use rustc_middle::{
     ty::{AssocItemContainer, GenericArg, ImplSubject, Ty, TyCtxt, TyKind, Visibility},
 };
 use rustc_span::{
-    def_id::{DefId, LocalDefId, CRATE_DEF_ID},
-    symbol::Ident,
+    def_id::{DefId, LocalDefId, LocalModDefId, CRATE_DEF_ID},
     BytePos, Pos, Span, Symbol,
 };
 
@@ -52,27 +51,29 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
         let mut item_defs = FxHashSet::default();
 
         queries.global_ctxt().unwrap().enter(|tcx| {
-            // Find names of dispatchable functions.
-            let names = dispatchable_names(tcx);
-            if names.is_empty() {
+            // Find names and parent module of dispatchable functions.
+            let Some((dispatchable_names, call_enum_local_def_id)) = dispatchable_calls_info(tcx)
+            else {
                 return;
-            }
+            };
+            let pallet_mod_local_def_id = tcx.parent_module_from_def_id(call_enum_local_def_id);
 
             // Finds `DefId`s of dispatchable functions.
             phase = Phase::DefIds;
             println!("Searching for dispatchable function definitions ...");
-            let local_def_ids = dispatchable_ids(&names, tcx);
-            if local_def_ids.is_empty() {
+            let dispatchable_local_def_ids =
+                dispatchable_ids(&dispatchable_names, pallet_mod_local_def_id, tcx);
+            if dispatchable_local_def_ids.is_empty() {
                 return;
             }
 
             // Adds warnings for `Call` variants whose dispatchable function wasn't found.
-            if names.len() != local_def_ids.len() {
-                let id_names: Vec<_> = local_def_ids
+            if dispatchable_names.len() != dispatchable_local_def_ids.len() {
+                let id_names: Vec<_> = dispatchable_local_def_ids
                     .iter()
                     .filter_map(|local_def_id| utils::def_name(*local_def_id, tcx))
                     .collect();
-                for name in names {
+                for name in dispatchable_names {
                     let symbol = Symbol::intern(name);
                     if !id_names.contains(&symbol) {
                         let mut warning = compiler.sess.dcx().struct_warn(format!(
@@ -93,6 +94,15 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             println!("Searching for dispatchable function calls ...");
             let mut calls = FxHashMap::default();
             let hir = tcx.hir();
+            let Some(pallet_struct_def_id) =
+                dispatchable_local_def_ids.iter().find_map(|local_def_id| {
+                    let (_, impl_) = impl_for_assoc_item(local_def_id.to_def_id(), tcx)?;
+                    let adt_def_id = adt_for_impl(&impl_)?;
+                    is_pallet_struct(adt_def_id, tcx).then_some(adt_def_id)
+                })
+            else {
+                return;
+            };
             for local_def_id in hir.body_owners() {
                 let body_owner_kind = hir.body_owner_kind(local_def_id);
                 if matches!(
@@ -100,7 +110,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                     rustc_hir::BodyOwnerKind::Fn | rustc_hir::BodyOwnerKind::Closure
                 ) {
                     let body = tcx.optimized_mir(local_def_id);
-                    let mut visitor = DispatchableCallVisitor::new(&local_def_ids);
+                    let mut visitor = PalletCallVisitor::new(pallet_struct_def_id, tcx);
                     visitor.visit_body(body);
 
                     for (callee_local_def_id, terminator) in visitor.calls {
@@ -116,76 +126,87 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             println!("Generating tractable entry points for FRAME pallet ...");
             let mut used_items = FxHashSet::default();
             phase = Phase::EntryPoints;
-            let Some(generics) = calls.iter().find_map(|(fn_local_def_id, (terminator, _))| {
-                if let TerminatorKind::Call { func, .. } = &terminator.kind {
-                    let (_, fn_generic_args) = func.const_fn_def()?;
-                    let ty_args: Vec<_> = fn_generic_args
-                        .iter()
-                        .filter_map(GenericArg::as_type)
-                        .collect();
-
-                    let assoc_item = tcx.opt_associated_item(fn_local_def_id.to_def_id())?;
-                    if assoc_item.container != AssocItemContainer::ImplContainer {
-                        return None;
+            let Some(generics) = calls
+                .iter()
+                // Prefer generics from dispatchable function calls.
+                .sorted_by_key(|(local_def_id, _)| {
+                    if dispatchable_local_def_ids.contains(local_def_id) {
+                        0
+                    } else {
+                        1
                     }
-                    let impl_def_id = assoc_item.container_id(tcx);
-                    let impl_local_def_id = impl_def_id.as_local()?;
-                    let impl_generics = hir.get_generics(impl_local_def_id)?;
-                    let config_param_name = Symbol::intern("T");
-                    let config_param_local_def_id =
-                        impl_generics.get_named(config_param_name)?.def_id;
-                    let config_trait_local_def_id = impl_generics
-                        .bounds_for_param(config_param_local_def_id)
-                        .find_map(|bound_info| {
-                            bound_info.bounds.iter().find_map(|bound| {
-                                let trait_ref = bound.trait_ref()?;
-                                if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
-                                    let trait_local_def_id = trait_def_id.as_local()?;
-                                    let trait_name = utils::def_name(trait_local_def_id, tcx)?;
-                                    return (trait_name.as_str() == "Config")
-                                        .then_some(trait_local_def_id);
-                                }
-                                None
-                            })
-                        })?;
+                })
+                .find_map(|(local_def_id, (terminator, _))| {
+                    if let TerminatorKind::Call { func, .. } = &terminator.kind {
+                        let (_, fn_generic_args) = func.const_fn_def()?;
+                        let ty_args: Vec<_> = fn_generic_args
+                            .iter()
+                            .filter_map(GenericArg::as_type)
+                            .collect();
 
-                    let ty_params: Vec<_> = impl_generics
-                        .params
-                        .iter()
-                        .filter(|param| {
-                            matches!(param.kind, rustc_hir::GenericParamKind::Type { .. })
-                        })
-                        .collect();
-                    let mut ty_param_impls = FxHashMap::default();
-                    if ty_params.len() == ty_args.len() {
-                        for (idx, param) in ty_params.iter().enumerate() {
-                            let param_name = param.name.ident();
-                            let param_def_id = param.def_id;
-                            let arg_ty = ty_args
-                                .get(idx)
-                                .expect("Expected a generic arg at index {idx}");
-                            ty_param_impls.insert(param_def_id, (param_name, *arg_ty));
+                        let assoc_item = tcx.opt_associated_item(local_def_id.to_def_id())?;
+                        if assoc_item.container != AssocItemContainer::ImplContainer {
+                            return None;
                         }
-                    }
+                        let impl_def_id = assoc_item.container_id(tcx);
+                        let impl_local_def_id = impl_def_id.as_local()?;
+                        let impl_generics = hir.get_generics(impl_local_def_id)?;
+                        let config_param_name = Symbol::intern("T");
+                        let config_param_local_def_id =
+                            impl_generics.get_named(config_param_name)?.def_id;
+                        let config_trait_local_def_id = impl_generics
+                            .bounds_for_param(config_param_local_def_id)
+                            .find_map(|bound_info| {
+                                bound_info.bounds.iter().find_map(|bound| {
+                                    let trait_ref = bound.trait_ref()?;
+                                    if let Res::Def(DefKind::Trait, trait_def_id) =
+                                        trait_ref.path.res
+                                    {
+                                        let trait_local_def_id = trait_def_id.as_local()?;
+                                        let trait_name = utils::def_name(trait_local_def_id, tcx)?;
+                                        return (trait_name.as_str() == "Config")
+                                            .then_some(trait_local_def_id);
+                                    }
+                                    None
+                                })
+                            })?;
 
-                    Some(Generics::new(
-                        config_trait_local_def_id,
-                        config_param_local_def_id,
-                        ty_args,
-                        ty_param_impls,
-                    ))
-                } else {
-                    None
-                }
-            }) else {
+                        let ty_params: Vec<_> = impl_generics
+                            .params
+                            .iter()
+                            .filter(|param| {
+                                matches!(param.kind, rustc_hir::GenericParamKind::Type { .. })
+                            })
+                            .collect();
+                        let mut ty_param_impls = FxHashMap::default();
+                        if ty_params.len() == ty_args.len() {
+                            for (idx, param) in ty_params.iter().enumerate() {
+                                let param_name = param.name.ident().name;
+                                let arg_ty = ty_args
+                                    .get(idx)
+                                    .expect("Expected a generic arg at index {idx}");
+                                ty_param_impls.insert(param_name, *arg_ty);
+                            }
+                        }
+
+                        Some(Generics::new(
+                            config_trait_local_def_id,
+                            ty_args,
+                            ty_param_impls,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+            else {
                 return;
             };
-            for local_def_id in local_def_ids {
+            for local_def_id in dispatchable_local_def_ids {
                 let call_info = calls
                     .get(&local_def_id)
                     .map(|(terminator, body)| (terminator, *body));
                 let entry_point_result =
-                    compose_entry_point(local_def_id, tcx, call_info, &generics);
+                    compose_entry_point(local_def_id, tcx, &generics, call_info);
                 if let Some((name, content, local_used_items)) = entry_point_result {
                     entry_points.insert(name, content);
                     used_items.extend(local_used_items);
@@ -229,12 +250,13 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             // Sets error message based on the analysis phase reached.
             let (msg, note, help) = match phase {
                 Phase::Names => (
-                    "Couldn't find any dispatchable functions",
+                    "Couldn't find any dispatchable functions in public interface",
                     Some("pallet-verifier can only analyze FRAME pallets"),
                     Some("Learn more at https://github.com/davidsemakula/pallet-verifier"),
                 ),
                 Phase::DefIds => (
-                    "Failed to find definitions for any dispatchable function",
+                    "Failed to find definitions for any dispatchable function \
+                    in public interface",
                     Some("This is most likely a bug in pallet-verifier."),
                     Some(
                         "Please consider filling a bug report at \
@@ -242,7 +264,8 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                     ),
                 ),
                 _ => (
-                    "Failed to generate tractable entry points",
+                    "Failed to generate tractable entry points for any dispatchable function \
+                    in public interface",
                     None,
                     Some("Add some unit tests for all dispatchable functions."),
                 ),
@@ -309,22 +332,19 @@ enum Phase {
 /// Generic info for specializing entry points.
 struct Generics<'tcx> {
     config_trait_local_def_id: LocalDefId,
-    config_param_local_def_id: LocalDefId,
     ty_args: Vec<Ty<'tcx>>,
-    ty_param_impls: FxHashMap<LocalDefId, (Ident, Ty<'tcx>)>,
+    ty_param_impls: FxHashMap<Symbol, Ty<'tcx>>,
 }
 
 impl<'tcx> Generics<'tcx> {
     /// Create a new instance of generics info.
     pub fn new(
         config_trait_local_def_id: LocalDefId,
-        config_param_local_def_id: LocalDefId,
         ty_args: Vec<Ty<'tcx>>,
-        ty_param_impls: FxHashMap<LocalDefId, (Ident, Ty<'tcx>)>,
+        ty_param_impls: FxHashMap<Symbol, Ty<'tcx>>,
     ) -> Self {
         Self {
             config_trait_local_def_id,
-            config_param_local_def_id,
             ty_args,
             ty_param_impls,
         }
@@ -345,13 +365,14 @@ impl<'tcx> Generics<'tcx> {
     }
 }
 
-/// Finds names of dispatchable functions.
+/// Finds names of dispatchable functions, also returns the `DefId` of the `Call` enum.
 ///
 /// Dispatchable functions are represented as variants of an enum `Call<T: Config>`
 /// with attributes `#[codec(index: u8 = ..)]`.
 /// Notably, there's a "phantom" variant `__Ignore` which should be, well, ignored :)
-fn dispatchable_names(tcx: TyCtxt<'_>) -> FxHashSet<&str> {
+fn dispatchable_calls_info(tcx: TyCtxt<'_>) -> Option<(FxHashSet<&str>, LocalDefId)> {
     let mut results = FxHashSet::default();
+    let mut enum_def_id = None;
     let hir = tcx.hir();
     let mut call_enums: Vec<_> = hir
         .items()
@@ -359,8 +380,13 @@ fn dispatchable_names(tcx: TyCtxt<'_>) -> FxHashSet<&str> {
             let item = hir.item(item_id);
             if item.ident.as_str() == "Call" {
                 if let rustc_hir::ItemKind::Enum(enum_def, enum_generics) = item.kind {
-                    if is_config_bounded(enum_generics, tcx) {
-                        return Some((item_id.owner_id.to_def_id(), enum_def));
+                    if let Some(enum_local_def_id) = item_id.owner_id.to_def_id().as_local() {
+                        if is_config_bounded(enum_generics, tcx) {
+                            let parent_mod_def_id =
+                                tcx.parent_module_from_def_id(enum_local_def_id).to_def_id();
+                            return is_visible_from_crate_root(parent_mod_def_id, tcx)
+                                .then_some((enum_local_def_id, enum_def));
+                        }
                     }
                 }
             }
@@ -371,9 +397,11 @@ fn dispatchable_names(tcx: TyCtxt<'_>) -> FxHashSet<&str> {
     if n_call_enums > 0 {
         if n_call_enums > 1 {
             // Picks `Call` enum with a definition "closest" to the crate root.
-            call_enums.sort_by_key(|(def_id, _)| tcx.def_path(*def_id).data.len());
+            call_enums
+                .sort_by_key(|(local_def_id, _)| tcx.def_path(local_def_id.to_def_id()).data.len());
         }
-        let (_, enum_def) = call_enums.first().expect("Expected one `Call` enum");
+        let (local_def_id, enum_def) = call_enums.first().expect("Expected one `Call` enum");
+        enum_def_id = Some(*local_def_id);
         for variant in enum_def.variants {
             let name = variant.ident.as_str();
             if !name.starts_with("__") {
@@ -381,14 +409,19 @@ fn dispatchable_names(tcx: TyCtxt<'_>) -> FxHashSet<&str> {
             }
         }
     }
-    results
+    (!results.is_empty()).then_some(results).zip(enum_def_id)
 }
 
 /// Finds definitions of dispatchable functions.
 ///
-/// Dispatchable function definitions are associated `fn`s of `impl<T: Config> Pallet<T>`,
-/// whose name is a variant of the `Call<T: Config>` enum.
-fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<LocalDefId> {
+/// Dispatchable function definitions are associated `fn`s of
+/// a non-trait `impl<T: Config, *> Pallet<T>`, where `Pallet` is a `struct`,
+/// and the name of the `fn` is a variant of the `Call<T: Config, *>` enum.
+fn dispatchable_ids(
+    names: &FxHashSet<&str>,
+    pallet_mod_local_def_id: LocalModDefId,
+    tcx: TyCtxt<'_>,
+) -> FxHashSet<LocalDefId> {
     let hir = tcx.hir();
     hir.body_owners()
         .filter_map(|local_def_id| {
@@ -400,10 +433,48 @@ fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<Local
             if !names.contains(&fn_name.as_str()) {
                 return None;
             }
+            let parent_mod_local_def_id = tcx.parent_module_from_def_id(local_def_id);
+            if parent_mod_local_def_id != pallet_mod_local_def_id {
+                return None;
+            }
             let def_id = local_def_id.to_def_id();
-            is_pallet_assoc_item(def_id, tcx).then_some(local_def_id)
+            let (_, impl_) = impl_for_assoc_item(def_id, tcx)?;
+            let adt_def_id = adt_for_impl(&impl_)?;
+            (impl_.of_trait.is_none()
+                && is_config_bounded(impl_.generics, tcx)
+                && is_pallet_struct(adt_def_id, tcx))
+            .then_some(local_def_id)
         })
         .collect()
+}
+
+// Verifies that the definition is a local `struct` named `Pallet`.
+fn is_pallet_struct(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
+    tcx.def_kind(def_id) == DefKind::Struct
+        && def_id.as_local().is_some_and(|local_def_id| {
+            return utils::def_name(local_def_id, tcx)
+                .is_some_and(|name| name.as_str() == "Pallet");
+        })
+}
+
+/// Verifies that the generics include a `<T: Config>` bound.
+fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
+    let param_name = Symbol::intern("T");
+    generics.get_named(param_name).is_some_and(|param| {
+        generics.bounds_for_param(param.def_id).any(|bound_info| {
+            bound_info.bounds.iter().any(|bound| {
+                bound.trait_ref().is_some_and(|trait_ref| {
+                    if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
+                        return trait_def_id.as_local().is_some_and(|trait_local_def_id| {
+                            utils::def_name(trait_local_def_id, tcx)
+                                .is_some_and(|trait_name| trait_name.as_str() == "Config")
+                        });
+                    }
+                    false
+                })
+            })
+        })
+    })
 }
 
 /// Composes an entry point (returns a `name`, `content` and "used item" `DefId`s).
@@ -412,8 +483,8 @@ fn dispatchable_ids(names: &FxHashSet<&str>, tcx: TyCtxt<'_>) -> FxHashSet<Local
 fn compose_entry_point<'tcx>(
     fn_local_def_id: LocalDefId,
     tcx: TyCtxt<'tcx>,
-    call_info: Option<(&Terminator<'tcx>, &Body<'tcx>)>,
     generics: &Generics,
+    call_info: Option<(&Terminator<'tcx>, &Body<'tcx>)>,
 ) -> Option<(String, String, FxHashSet<DefId>)> {
     // Dispatchable name.
     let fn_name = utils::def_name(fn_local_def_id, tcx)?;
@@ -690,58 +761,6 @@ pub fn {name}({params_list}) {{
     Some((name, content, used_items))
 }
 
-/// Verifies that the definition is an associated item of a non-trait `impl<T: Config> Pallet<T>`.
-fn is_pallet_assoc_item(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
-    let impl_assoc_item = tcx
-        .opt_associated_item(def_id)
-        .filter(|assoc_item| assoc_item.container == AssocItemContainer::ImplContainer);
-    let impl_local_def_id =
-        impl_assoc_item.and_then(|impl_assoc_item| impl_assoc_item.container_id(tcx).as_local());
-    if let Some(impl_local_def_id) = impl_local_def_id {
-        let node = tcx.hir_node_by_def_id(impl_local_def_id);
-        if let rustc_hir::Node::Item(item) = node {
-            if let rustc_hir::ItemKind::Impl(impl_item) = item.kind {
-                if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) =
-                    impl_item.self_ty.kind
-                {
-                    if impl_item.of_trait.is_none() && is_config_bounded(impl_item.generics, tcx) {
-                        if let Res::Def(DefKind::Struct, struct_def_id) = path.res {
-                            let struct_name =
-                                struct_def_id.as_local().and_then(|struct_local_def_id| {
-                                    utils::def_name(struct_local_def_id, tcx)
-                                });
-                            return struct_name
-                                .is_some_and(|struct_name| struct_name.as_str() == "Pallet");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Verifies that the generics include a `<T: Config>` bound.
-fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
-    let param_name = Symbol::intern("T");
-    generics.get_named(param_name).is_some_and(|param| {
-        generics.bounds_for_param(param.def_id).any(|bound_info| {
-            bound_info.bounds.iter().any(|bound| {
-                bound.trait_ref().is_some_and(|trait_ref| {
-                    if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
-                        return trait_def_id.as_local().is_some_and(|trait_local_def_id| {
-                            utils::def_name(trait_local_def_id, tcx)
-                                .is_some_and(|trait_name| trait_name.as_str() == "Config")
-                        });
-                    }
-                    false
-                })
-            })
-        })
-    })
-}
-
 /// Collects use declarations or copies/re-defines used items depending on item kind, source,
 /// visibility, stability and enabled features.
 ///
@@ -754,6 +773,7 @@ fn process_used_items(
 ) {
     let hir = tcx.hir();
     let source_map = tcx.sess.source_map();
+    let mut processed_items = FxHashSet::default();
     let mut aliased_used_items: FxHashSet<(DefId, Option<Symbol>)> = used_items
         .into_iter()
         .map(|def_id| (def_id, None))
@@ -762,6 +782,7 @@ fn process_used_items(
         // Tracks child used items for next iteration.
         let mut next_used_items = FxHashSet::default();
         for (item_def_id, item_alias) in aliased_used_items.drain() {
+            processed_items.insert(item_def_id);
             let item_kind = tcx.def_kind(item_def_id);
             let is_importable = matches!(
                 item_kind,
@@ -919,8 +940,11 @@ fn process_used_items(
             }
         }
 
-        // Process used items in next iteration.
-        aliased_used_items = next_used_items;
+        // Process child used items in next iteration.
+        aliased_used_items = next_used_items
+            .into_iter()
+            .filter(|(item_id, _)| !processed_items.contains(item_id))
+            .collect();
     }
 
     /// Collects used items for HIR type.
@@ -1138,22 +1162,24 @@ fn process_used_items(
     }
 }
 
-/// MIR visitor that collects "specialized" calls to the specified dispatchable functions.
-struct DispatchableCallVisitor<'tcx, 'analysis> {
-    def_ids: &'analysis FxHashSet<LocalDefId>,
+/// MIR visitor that collects "specialized" calls to the pallet struct associated functions.
+struct PalletCallVisitor<'tcx> {
+    pallet_struct_def_id: DefId,
+    tcx: TyCtxt<'tcx>,
     calls: FxHashMap<LocalDefId, Terminator<'tcx>>,
 }
 
-impl<'tcx, 'analysis> DispatchableCallVisitor<'tcx, 'analysis> {
-    pub fn new(def_ids: &'analysis FxHashSet<LocalDefId>) -> Self {
+impl<'tcx> PalletCallVisitor<'tcx> {
+    pub fn new(pallet_struct_def_id: DefId, tcx: TyCtxt<'tcx>) -> Self {
         Self {
-            def_ids,
+            pallet_struct_def_id,
+            tcx,
             calls: FxHashMap::default(),
         }
     }
 }
 
-impl<'tcx, 'analysis> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'analysis> {
+impl<'tcx> Visitor<'tcx> for PalletCallVisitor<'tcx> {
     fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
         if let TerminatorKind::Call { func, .. } = &terminator.kind {
             let call_info = func.const_fn_def().and_then(|(def_id, gen_args)| {
@@ -1174,9 +1200,17 @@ impl<'tcx, 'analysis> Visitor<'tcx> for DispatchableCallVisitor<'tcx, 'analysis>
                             is_param_ty
                         })
                 };
-                if self.def_ids.contains(&local_def_id)
-                    && !self.calls.contains_key(&local_def_id)
+                let is_pallet_assoc_item = || {
+                    impl_for_assoc_item(local_def_id.to_def_id(), self.tcx).is_some_and(
+                        |(_, impl_)| {
+                            adt_for_impl(&impl_)
+                                .is_some_and(|adt_def_id| adt_def_id == self.pallet_struct_def_id)
+                        },
+                    )
+                };
+                if !self.calls.contains_key(&local_def_id)
                     && !contains_type_params()
+                    && is_pallet_assoc_item()
                 {
                     self.calls.insert(local_def_id, terminator.clone());
                 }
@@ -1517,6 +1551,7 @@ fn tractable_param_hir_type<'tcx>(
     visitor.visit_ty(ty);
 
     let hir = tcx.hir();
+    let config_param_name = Symbol::intern("T");
     let mut ty_generic_params = Vec::new();
     let mut int_const_generic_params = Vec::new();
     let mut fq_item_paths = Vec::new();
@@ -1535,15 +1570,10 @@ fn tractable_param_hir_type<'tcx>(
             return None;
         }
 
-        if let Some((generic_param_def_id, _)) = gen_ty.as_generic_param() {
-            let gen_param_impl =
-                generic_param_def_id
-                    .as_local()
-                    .and_then(|generic_param_local_def_id| {
-                        generics.ty_param_impls.get(&generic_param_local_def_id)
-                    });
-            if let Some((_, arg_ty)) = gen_param_impl {
-                ty_generic_params.push((gen_ty, arg_ty, generic_param_def_id));
+        if let Some((_, generic_param_name)) = gen_ty.as_generic_param() {
+            let gen_param_impl = generics.ty_param_impls.get(&generic_param_name.name);
+            if let Some(arg_ty) = gen_param_impl {
+                ty_generic_params.push((gen_ty, arg_ty, generic_param_name.name));
             } else {
                 // Bails there are any non-`T: Config` generic params.
                 return None;
@@ -1554,8 +1584,8 @@ fn tractable_param_hir_type<'tcx>(
             let is_config_param =
                 rel_ty
                     .as_generic_param()
-                    .is_some_and(|(generic_param_def_id, _)| {
-                        generic_param_def_id == generics.config_param_local_def_id.to_def_id()
+                    .is_some_and(|(_, generic_param_name)| {
+                        generic_param_name.name == config_param_name
                     });
             if is_config_param {
                 config_related_types.insert(rel_ty.span, segment);
@@ -1642,10 +1672,10 @@ fn tractable_param_hir_type<'tcx>(
             trait_assoc_item_names(generics.config_trait_local_def_id, tcx);
         let replacements = ty_generic_params
             .into_iter()
-            .map(|(param_ty, arg_ty, generic_param_def_id)| {
+            .map(|(param_ty, arg_ty, generic_param_name)| {
                 let mut arg_ty_path = tractable_param_type(arg_ty, used_items, tcx)
                     .expect("Expected tractable generic args");
-                if generic_param_def_id == generics.config_param_local_def_id.to_def_id() {
+                if generic_param_name == config_param_name {
                     if let Some(segment) = config_related_types.get(&param_ty.span) {
                         let related_ty_name = segment.ident.as_str();
                         let is_ty_name_in_config_trait = config_trait_item_names
@@ -1787,11 +1817,55 @@ impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for TyVisitor<'tcx> {
     }
 }
 
+/// Returns parent `impl` (if any) of an associated item.
+fn impl_for_assoc_item(def_id: DefId, tcx: TyCtxt<'_>) -> Option<(LocalDefId, rustc_hir::Impl)> {
+    let assoc_item = tcx.opt_associated_item(def_id)?;
+    if assoc_item.container != AssocItemContainer::ImplContainer {
+        return None;
+    }
+    let impl_local_def_id = assoc_item.container_id(tcx).as_local()?;
+    let node = tcx.hir_node_by_def_id(impl_local_def_id);
+    if let rustc_hir::Node::Item(item) = node {
+        if let rustc_hir::ItemKind::Impl(impl_) = item.kind {
+            return Some((impl_local_def_id, *impl_));
+        }
+    }
+    None
+}
+
+/// Returns subject `ADT` (if any) for an `impl`.
+fn adt_for_impl(impl_: &rustc_hir::Impl) -> Option<DefId> {
+    if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = impl_.self_ty.kind {
+        if let Res::Def(DefKind::Struct | DefKind::Enum | DefKind::Union, adt_def_id) = path.res {
+            return Some(adt_def_id);
+        }
+    }
+    None
+}
+
 /// Checks if an item (given it's `DefId`) is "visible" from the crate root.
 fn is_visible_from_crate_root(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
     let crate_vis = Visibility::Restricted(CRATE_DEF_ID.to_def_id());
     let vis = tcx.visibility(def_id);
-    vis.is_at_least(crate_vis, tcx)
+    if vis.is_at_least(crate_vis, tcx) {
+        if let Some(local_def_id) = def_id.as_local() {
+            let mut parent_mod_def_id = tcx.parent_module_from_def_id(local_def_id);
+            loop {
+                if parent_mod_def_id.is_top_level_module() {
+                    return true;
+                }
+                if is_visible_from_crate_root(parent_mod_def_id.to_def_id(), tcx) {
+                    parent_mod_def_id =
+                        tcx.parent_module_from_def_id(parent_mod_def_id.to_local_def_id());
+                } else {
+                    return false;
+                }
+            }
+        } else {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns names of associated items of a trait.
