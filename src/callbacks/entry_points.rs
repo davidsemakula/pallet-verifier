@@ -15,7 +15,7 @@ use rustc_middle::{
     ty::{AssocItemContainer, GenericArg, ImplSubject, Ty, TyCtxt, TyKind, Visibility},
 };
 use rustc_span::{
-    def_id::{DefId, LocalDefId, LocalModDefId, CRATE_DEF_ID},
+    def_id::{DefId, DefPathHash, LocalDefId, LocalModDefId, CRATE_DEF_ID},
     BytePos, Pos, Span, Symbol,
 };
 
@@ -31,8 +31,9 @@ use crate::ENTRY_POINT_FN_PREFIX;
 /// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#entry-points>
 #[derive(Default)]
 pub struct EntryPointsCallbacks {
-    /// Map of generated entry point `fn` names and their definitions.
-    entry_points: FxHashMap<String, String>,
+    /// Map from generated entry point `fn` names and their definitions and stable `DefPathHash`
+    /// of the target dispatchable `fn`.
+    entry_points: FxHashMap<String, (String, DefPathHash)>,
     /// Use declarations and item definitions for generated entry points.
     use_decls: FxHashSet<String>,
     item_defs: FxHashSet<String>,
@@ -208,7 +209,8 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                 let entry_point_result =
                     compose_entry_point(local_def_id, tcx, &generics, call_info);
                 if let Some((name, content, local_used_items)) = entry_point_result {
-                    entry_points.insert(name, content);
+                    let def_path_hash = hir.def_path_hash(local_def_id);
+                    entry_points.insert(name, (content, def_path_hash));
                     used_items.extend(local_used_items);
                 } else {
                     let name = utils::def_name(local_def_id, tcx)
@@ -295,7 +297,11 @@ impl EntryPointsCallbacks {
         (!self.entry_points.is_empty()).then(|| {
             let use_decls = self.use_decls.iter().join("\n");
             let item_defs = self.item_defs.iter().join("\n");
-            let entry_points = self.entry_points.values().join("\n\n");
+            let entry_points = self
+                .entry_points
+                .values()
+                .map(|(content, _)| content)
+                .join("\n\n");
             format!(
                 r"
 #![allow(unused)]
@@ -314,6 +320,15 @@ impl EntryPointsCallbacks {
     /// Returns `fn` names of all generated tractable entry points.
     pub fn entry_point_names(&self) -> FxHashSet<&str> {
         self.entry_points.keys().map(String::as_str).collect()
+    }
+
+    /// Returns a map from generated entry point `fn` names to a stable `DefPathHash` of the
+    /// target dispatchable `fn`.
+    pub fn entry_points_map(&self) -> FxHashMap<&str, DefPathHash> {
+        self.entry_points
+            .iter()
+            .map(|(name, (_, hash))| (name.as_str(), *hash))
+            .collect()
     }
 }
 

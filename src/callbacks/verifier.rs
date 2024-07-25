@@ -3,16 +3,16 @@
 use rustc_ast::NestedMetaItem;
 use rustc_driver::Compilation;
 use rustc_errors::{DiagnosticBuilder, Level, MultiSpan, Style, SubDiagnostic};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_interface::interface::Compiler;
 use rustc_middle::ty::{AssocKind, TyCtxt};
 use rustc_span::{
-    def_id::{DefId, LocalDefId},
+    def_id::{DefId, DefPathHash, LocalDefId},
     Span, Symbol,
 };
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, process, rc::Rc};
 
 use mirai::{
     body_visitor::BodyVisitor, call_graph::CallGraph, constant_domain::ConstantValueCache,
@@ -26,14 +26,14 @@ use crate::{CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks for analyzing FRAME pallet with MIRAI.
 pub struct VerifierCallbacks<'compilation> {
-    entry_point_names: &'compilation FxHashSet<&'compilation str>,
+    entry_points: &'compilation FxHashMap<&'compilation str, DefPathHash>,
     mirai_config: Option<MiraiConfig>,
 }
 
 impl<'compilation> VerifierCallbacks<'compilation> {
-    pub fn new(entry_point_names: &'compilation FxHashSet<&'compilation str>) -> Self {
+    pub fn new(entry_points: &'compilation FxHashMap<&'compilation str, DefPathHash>) -> Self {
         Self {
-            entry_point_names,
+            entry_points,
             mirai_config: None,
         }
     }
@@ -61,7 +61,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
         // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L143-L149>
         let max_time_body = 60;
         // Between 300 and 600 seconds.
-        let max_time_crate = ((5 + self.entry_point_names.len()) * max_time_body as usize)
+        let max_time_crate = ((5 + self.entry_points.len()) * max_time_body as usize)
             .max(max_time_body as usize * 10) as u64;
         let options = mirai::options::Options {
             diag_level: mirai::options::DiagLevel::Paranoid,
@@ -182,13 +182,36 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
 
             // Finds and analyzes the generated entry points.
             for local_def_id in hir.body_owners() {
-                let entry_point_info = utils::def_name(local_def_id, tcx)
-                    .filter(|def_name| self.entry_point_names.contains(def_name.as_str()));
-                if let Some(entry_point_name) = entry_point_info {
-                    println!(
-                        "Analyzing dispatchable: `{}` ...",
-                        entry_point_name.as_str().replace(ENTRY_POINT_FN_PREFIX, "")
-                    );
+                let entry_point_info = utils::def_name(local_def_id, tcx).and_then(|def_name| {
+                    self.entry_points.iter().find_map(|(name, target_hash)| {
+                        if *name == def_name.as_str() {
+                            let mut dispatchable_def_id_error = || {
+                                let mut error = compiler.sess.dcx().struct_err(format!(
+                                    "Couldn't find definition for dispatchable: `{}`",
+                                    def_name.as_str().replace(ENTRY_POINT_FN_PREFIX, "")
+                                ));
+                                error.note("This is most likely a bug in pallet-verifier.");
+                                error.help(
+                                    "Please consider filling a bug report at \
+                                        https://github.com/davidsemakula/pallet-verifier/issues",
+                                );
+                                error.emit();
+                                process::exit(rustc_driver::EXIT_FAILURE)
+                            };
+                            let dispatchable_def_id = tcx.def_path_hash_to_def_id(
+                                *target_hash,
+                                &mut dispatchable_def_id_error,
+                            );
+                            dispatchable_def_id.as_local()
+                        } else {
+                            None
+                        }
+                    })
+                });
+                if let Some(dispatchable_local_def_id) = entry_point_info {
+                    let dispatchable_name = utils::def_name(dispatchable_local_def_id, tcx)
+                        .expect("Expected a name for dispatchable");
+                    println!("Analyzing dispatchable: `{dispatchable_name}` ...",);
 
                     // Analyzes entry point with MIRAI and collects diagnostics.
                     let mut diagnostics = Vec::new();
@@ -254,7 +277,7 @@ fn analyze<'analysis>(
 /// Emit diagnostics for generated entry point (if necessary).
 fn emit_diagnostics(
     diagnostics: Vec<DiagnosticBuilder<()>>,
-    local_def_id: LocalDefId,
+    entry_point_local_def_id: LocalDefId,
     tcx: TyCtxt,
     test_mod_spans: &FxHashSet<Span>,
 ) {
@@ -265,7 +288,7 @@ fn emit_diagnostics(
             .and_then(|span| source_map.span_to_location_info(span).0)
             .is_some_and(|source_file| source_file.cnum == LOCAL_CRATE)
     };
-    let entry_point_span = tcx.source_span(local_def_id);
+    let entry_point_span = tcx.source_span(entry_point_local_def_id);
     let is_span_in_entry_point = |mspan: &MultiSpan| {
         mspan
             .primary_spans()
@@ -367,10 +390,10 @@ fn emit_diagnostics(
             .skip_while(|span| !is_span_local(span) || is_span_in_entry_point(span))
             .collect::<Vec<_>>();
         if relevant_spans.is_empty()
-            || relevant_spans.iter().any(|span| {
-                is_span_in_frame_substrate_core(span)
-                    || is_span_from_dispatch_error_from_impl(span)
-                    || is_span_in_cfg_test_mod(span)
+            || relevant_spans.iter().any(|mspan| {
+                is_span_in_frame_substrate_core(mspan)
+                    || is_span_from_dispatch_error_from_impl(mspan)
+                    || is_span_in_cfg_test_mod(mspan)
             })
         {
             diagnostic.cancel();
