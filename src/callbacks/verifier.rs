@@ -8,7 +8,7 @@ use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_interface::interface::Compiler;
 use rustc_middle::ty::{AssocKind, TyCtxt};
 use rustc_span::{
-    def_id::{DefId, DefPathHash, LocalDefId},
+    def_id::{CrateNum, DefId, DefPathHash, LocalDefId},
     Span, Symbol,
 };
 
@@ -306,58 +306,75 @@ fn emit_diagnostics(
     // (i.e. substrate primitive/`sp_*` libraries, `frame_support` and `frame_system` pallets,
     // and SCALE codec libraries.
     let is_span_in_frame_substrate_core = |mspan: &MultiSpan| {
-        mspan
-            .primary_span()
-            .and_then(|span| source_map.span_to_location_info(span).0)
-            .map(|source_file| {
-                let source_def_id = source_file.cnum.as_def_id();
-                tcx.def_path_str(source_def_id)
-            })
-            .is_some_and(|name| {
-                name.starts_with("sp_")
-                    || matches!(
-                        name.as_str(),
-                        "frame_support" | "frame_system" | "parity_scale_codec" | "scale_info"
-                    )
-            })
+        let is_core_crate = |crate_num: CrateNum| {
+            let source_def_id = crate_num.as_def_id();
+            let name = tcx.def_path_str(source_def_id);
+            name.starts_with("sp_")
+                || matches!(
+                    name.as_str(),
+                    "frame_support"
+                        | "frame_support_procedural"
+                        | "frame_system"
+                        | "parity_scale_codec"
+                        | "parity_scale_codec_derive"
+                        | "scale_info"
+                        | "scale_info_derive"
+                )
+        };
+        mspan.primary_span().is_some_and(|span| {
+            if let (Some(source_file), ..) = source_map.span_to_location_info(span) {
+                if is_core_crate(source_file.cnum) {
+                    return true;
+                }
+            }
+            if span.from_expansion() {
+                if let Some(macro_def_id) = span.ctxt().outer_expn_data().macro_def_id {
+                    return is_core_crate(macro_def_id.krate);
+                }
+            }
+            false
+        })
     };
     // Checks if diagnostic arises from `DispatchError` `From::from` conversion implementation via
     // the `#[pallet::error]` macro.
     let is_span_from_dispatch_error_from_impl = |mspan: &MultiSpan| {
         mspan.primary_span().is_some_and(|span| {
-                // Handles local `#[pallet::error]` definitions.
-                span.parent()
-                    .and_then(|parent_local_def_id| {
-                        tcx.opt_associated_item(parent_local_def_id.to_def_id())
-                    })
-                    .is_some_and(|assoc_item| {
-                        let is_core_convert_from_impl = assoc_item.name.as_str() == "from"
-                            && assoc_item.kind == AssocKind::Fn
-                            && assoc_item
-                                .trait_item_def_id
-                                .is_some_and(|trait_item_def_id| {
-                                    let trait_item_path = tcx.def_path_str(trait_item_def_id);
-                                    matches!(trait_item_path.as_str(), "core::convert::From::from" | "std::convert::From::from")
-                                });
-                        let is_dispatch_error_impl =
-                            assoc_item.impl_container(tcx).is_some_and(|impl_def_id| {
-                                let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
-                                if let rustc_middle::ty::ImplSubject::Trait(trait_ref) = impl_subject {
-                                    trait_ref.self_ty().to_string() == "sp_runtime::DispatchError"
-                                } else {
-                                    false
-                                }
+            // Handles local `#[pallet::error]` definitions.
+            span.parent()
+                .and_then(|parent_local_def_id| {
+                    tcx.opt_associated_item(parent_local_def_id.to_def_id())
+                })
+                .is_some_and(|assoc_item| {
+                    let is_core_convert_from_impl = assoc_item.name.as_str() == "from"
+                        && assoc_item.kind == AssocKind::Fn
+                        && assoc_item
+                            .trait_item_def_id
+                            .is_some_and(|trait_item_def_id| {
+                                let trait_item_path = tcx.def_path_str(trait_item_def_id);
+                                matches!(
+                                    trait_item_path.as_str(),
+                                    "core::convert::From::from" | "std::convert::From::from"
+                                )
                             });
-                        is_core_convert_from_impl && is_dispatch_error_impl
-                    })
-                    // Handles foreign `#[pallet::error]` definitions.
-                    || source_map.span_to_snippet(span).is_ok_and(|snippet| {
-                        snippet == "error"
-                            && source_map
-                                .span_to_snippet(source_map.span_extend_to_line(span))
-                                .is_ok_and(|line_snippet| line_snippet.contains("pallet::error"))
-                    })
-            })
+                    let is_dispatch_error_impl =
+                        assoc_item.impl_container(tcx).is_some_and(|impl_def_id| {
+                            let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
+                            if let rustc_middle::ty::ImplSubject::Trait(trait_ref) = impl_subject {
+                                trait_ref.self_ty().to_string() == "sp_runtime::DispatchError"
+                            } else {
+                                false
+                            }
+                        });
+                    is_core_convert_from_impl && is_dispatch_error_impl
+                })
+                // Handles foreign `#[pallet::error]` definitions.
+                || source_map.span_to_snippet(span).is_ok_and(|snippet| {
+                    snippet == "error"
+                        && source_map
+                            .span_to_snippet(source_map.span_extend_to_line(span))
+                            .is_ok_and(|line_snippet| line_snippet.contains("pallet::error"))
+                })
+        })
     };
 
     for mut diagnostic in diagnostics {
