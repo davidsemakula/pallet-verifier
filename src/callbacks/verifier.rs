@@ -1,6 +1,5 @@
 //! `rustc` callbacks and utilities for analyzing FRAME pallet with MIRAI.
 
-use rustc_ast::NestedMetaItem;
 use rustc_driver::Compilation;
 use rustc_errors::{DiagnosticBuilder, Level, MultiSpan, Style, SubDiagnostic};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -9,7 +8,7 @@ use rustc_interface::interface::Compiler;
 use rustc_middle::ty::{AssocKind, TyCtxt};
 use rustc_span::{
     def_id::{CrateNum, DefId, DefPathHash, LocalDefId},
-    Span, Symbol,
+    Span,
 };
 
 use std::{cell::RefCell, collections::HashMap, process, rc::Rc};
@@ -132,26 +131,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                 } else {
                     let (mod_data, mod_decl_span, mod_hir_id) = hir.get_module(mod_def_id);
                     let mod_body_span = mod_data.spans.inner_span;
-                    let mod_attrs = hir.attrs(mod_hir_id);
-                    let has_cfg_test_attr = mod_attrs.iter().any(|attr| {
-                        let is_cfg_path = attr.has_name(Symbol::intern("cfg"));
-                        is_cfg_path
-                            && attr.meta_item_list().is_some_and(|meta_items| {
-                                let test_symbol = Symbol::intern("test");
-                                let is_test_path = |meta_items: &[NestedMetaItem]| {
-                                    meta_items
-                                        .iter()
-                                        .any(|meta_item| meta_item.has_name(test_symbol))
-                                };
-                                is_test_path(&meta_items)
-                                    || meta_items.iter().any(|meta_item| {
-                                        (meta_item.has_name(Symbol::intern("any"))
-                                            || meta_item.has_name(Symbol::intern("all")))
-                                            && meta_item.meta_item_list().is_some_and(is_test_path)
-                                    })
-                            })
-                    });
-                    if has_cfg_test_attr
+                    if utils::has_cfg_test_attr(mod_hir_id, tcx)
                         && !test_mod_spans.iter().any(|span: &Span| {
                             span.contains(mod_decl_span) || span.contains(mod_body_span)
                         })
@@ -372,7 +352,10 @@ fn emit_diagnostics(
                     snippet == "error"
                         && source_map
                             .span_to_snippet(source_map.span_extend_to_line(span))
-                            .is_ok_and(|line_snippet| line_snippet.contains("pallet::error"))
+                        .is_ok_and(|mut line_snippet| {
+                            line_snippet.retain(|c| !c.is_whitespace());
+                            line_snippet.contains("#[pallet::error")
+                        })
                 })
         })
     };

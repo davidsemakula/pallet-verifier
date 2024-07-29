@@ -6,6 +6,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{
     def::{DefKind, Res},
     intravisit::Visitor as _,
+    HirId,
 };
 use rustc_middle::{
     mir::{
@@ -45,22 +46,22 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
         compiler: &rustc_interface::interface::Compiler,
         queries: &'tcx rustc_interface::Queries<'tcx>,
     ) -> rustc_driver::Compilation {
-        println!("Searching for dispatchable function declarations ...");
-        let mut phase = Phase::Names;
+        println!("Searching for FRAME pallet definition ...");
+        let mut phase = Phase::Pallet;
         let mut entry_points = FxHashMap::default();
         let mut use_decls = FxHashSet::default();
         let mut item_defs = FxHashSet::default();
 
         queries.global_ctxt().unwrap().enter(|tcx| {
-            // Find names and parent module of dispatchable functions.
-            let Some((dispatchable_names, call_enum_local_def_id)) = dispatchable_calls_info(tcx)
-            else {
+            // Find pallet struct, it's parent module and dispatchable names.
+            let Some(pallet_struct_local_def_id) = pallet_struct(tcx) else {
                 return;
             };
-            let pallet_mod_local_def_id = tcx.parent_module_from_def_id(call_enum_local_def_id);
+            let pallet_mod_local_def_id = tcx.parent_module_from_def_id(pallet_struct_local_def_id);
+            let dispatchable_names = dispatchable_calls(pallet_mod_local_def_id, tcx);
 
             // Finds `DefId`s of dispatchable functions.
-            phase = Phase::DefIds;
+            phase = Phase::AssocFns;
             println!("Searching for dispatchable function definitions ...");
             let dispatchable_local_def_ids =
                 dispatchable_ids(&dispatchable_names, pallet_mod_local_def_id, tcx);
@@ -90,20 +91,11 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                 }
             }
 
-            // Finds dispatchable function calls.
+            // Finds pallet associated function calls.
             phase = Phase::Calls;
-            println!("Searching for dispatchable function calls ...");
+            println!("Searching for pallet associated function calls ...");
             let mut calls = FxHashMap::default();
             let hir = tcx.hir();
-            let Some(pallet_struct_def_id) =
-                dispatchable_local_def_ids.iter().find_map(|local_def_id| {
-                    let (_, impl_) = impl_for_assoc_item(local_def_id.to_def_id(), tcx)?;
-                    let adt_def_id = adt_for_impl(&impl_)?;
-                    is_pallet_struct(adt_def_id, tcx).then_some(adt_def_id)
-                })
-            else {
-                return;
-            };
             for local_def_id in hir.body_owners() {
                 let body_owner_kind = hir.body_owner_kind(local_def_id);
                 if matches!(
@@ -111,7 +103,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                     rustc_hir::BodyOwnerKind::Fn | rustc_hir::BodyOwnerKind::Closure
                 ) {
                     let body = tcx.optimized_mir(local_def_id);
-                    let mut visitor = PalletCallVisitor::new(pallet_struct_def_id, tcx);
+                    let mut visitor = PalletCallVisitor::new(pallet_struct_local_def_id, tcx);
                     visitor.visit_body(body);
 
                     for (callee_local_def_id, terminator) in visitor.calls {
@@ -207,7 +199,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                     .get(&local_def_id)
                     .map(|(terminator, body)| (terminator, *body));
                 let entry_point_result =
-                    compose_entry_point(local_def_id, tcx, &generics, call_info);
+                    compose_entry_point(local_def_id, &generics, tcx, call_info);
                 if let Some((name, content, local_used_items)) = entry_point_result {
                     let def_path_hash = hir.def_path_hash(local_def_id);
                     entry_points.insert(name, (content, def_path_hash));
@@ -251,12 +243,12 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             // Stops compilation if we fail to generate any tractable entry points.
             // Sets error message based on the analysis phase reached.
             let (msg, note, help) = match phase {
-                Phase::Names => (
+                Phase::Pallet => (
                     "Couldn't find any dispatchable functions in public interface",
                     Some("pallet-verifier can only analyze FRAME pallets"),
                     Some("Learn more at https://github.com/davidsemakula/pallet-verifier"),
                 ),
-                Phase::DefIds => (
+                Phase::AssocFns => (
                     "Failed to find definitions for any dispatchable function \
                     in public interface",
                     Some("This is most likely a bug in pallet-verifier."),
@@ -334,13 +326,13 @@ impl EntryPointsCallbacks {
 
 /// The analysis phase.
 enum Phase {
-    /// Finding dispatchable names.
-    Names,
-    /// Finding dispatchable `DefId`s.
-    DefIds,
-    /// Finding a call for each dispatchable.
+    /// Finding pallet and dispatchable names.
+    Pallet,
+    /// Finding pallet associated function `DefId`s.
+    AssocFns,
+    /// Finding calls for pallet associated functions.
     Calls,
-    /// Composing entry points for dispatchables with calls.
+    /// Composing entry points for dispatchables and public associated functions.
     EntryPoints,
 }
 
@@ -380,28 +372,51 @@ impl<'tcx> Generics<'tcx> {
     }
 }
 
-/// Finds names of dispatchable functions, also returns the `DefId` of the `Call` enum.
+/// Finds `Pallet<T, ...>` struct.
+fn pallet_struct(tcx: TyCtxt<'_>) -> Option<LocalDefId> {
+    let hir = tcx.hir();
+    hir.items()
+        .filter_map(|item_id| {
+            let item = hir.item(item_id);
+            if item.ident.as_str() == "Pallet" {
+                if let rustc_hir::ItemKind::Struct(_, struct_generics) = item.kind {
+                    let struct_local_def_id = item_id.owner_id.def_id;
+                    let has_t_generic_param =
+                        struct_generics.get_named(Symbol::intern("T")).is_some();
+                    if has_t_generic_param
+                        && !is_test_only_item(item.hir_id(), tcx)
+                        && is_visible_from_crate_root(struct_local_def_id.to_def_id(), tcx)
+                    {
+                        return Some(struct_local_def_id);
+                    }
+                }
+            }
+            None
+        })
+        .sorted_by_key(|local_def_id| tcx.def_path(local_def_id.to_def_id()).data.len())
+        .next()
+}
+
+/// Finds names of dispatchable functions.
 ///
 /// Dispatchable functions are represented as variants of an enum `Call<T: Config>`
 /// with attributes `#[codec(index: u8 = ..)]`.
 /// Notably, there's a "phantom" variant `__Ignore` which should be, well, ignored :)
-fn dispatchable_calls_info(tcx: TyCtxt<'_>) -> Option<(FxHashSet<&str>, LocalDefId)> {
+fn dispatchable_calls(pallet_mod_local_def_id: LocalModDefId, tcx: TyCtxt<'_>) -> FxHashSet<&str> {
     let mut results = FxHashSet::default();
-    let mut enum_def_id = None;
     let hir = tcx.hir();
     let mut call_enums: Vec<_> = hir
-        .items()
+        .module_items(pallet_mod_local_def_id)
         .filter_map(|item_id| {
             let item = hir.item(item_id);
             if item.ident.as_str() == "Call" {
                 if let rustc_hir::ItemKind::Enum(enum_def, enum_generics) = item.kind {
-                    if let Some(enum_local_def_id) = item_id.owner_id.to_def_id().as_local() {
-                        if is_config_bounded(enum_generics, tcx) {
-                            let parent_mod_def_id =
-                                tcx.parent_module_from_def_id(enum_local_def_id).to_def_id();
-                            return is_visible_from_crate_root(parent_mod_def_id, tcx)
-                                .then_some((enum_local_def_id, enum_def));
-                        }
+                    let enum_local_def_id = item_id.owner_id.def_id;
+                    if is_config_bounded(enum_generics, tcx)
+                        && !is_test_only_item(item.hir_id(), tcx)
+                        && is_visible_from_crate_root(enum_local_def_id.to_def_id(), tcx)
+                    {
+                        return Some((enum_local_def_id, enum_def));
                     }
                 }
             }
@@ -415,8 +430,7 @@ fn dispatchable_calls_info(tcx: TyCtxt<'_>) -> Option<(FxHashSet<&str>, LocalDef
             call_enums
                 .sort_by_key(|(local_def_id, _)| tcx.def_path(local_def_id.to_def_id()).data.len());
         }
-        let (local_def_id, enum_def) = call_enums.first().expect("Expected one `Call` enum");
-        enum_def_id = Some(*local_def_id);
+        let (_, enum_def) = call_enums.first().expect("Expected one `Call` enum");
         for variant in enum_def.variants {
             let name = variant.ident.as_str();
             if !name.starts_with("__") {
@@ -424,7 +438,7 @@ fn dispatchable_calls_info(tcx: TyCtxt<'_>) -> Option<(FxHashSet<&str>, LocalDef
             }
         }
     }
-    (!results.is_empty()).then_some(results).zip(enum_def_id)
+    results
 }
 
 /// Finds definitions of dispatchable functions.
@@ -472,7 +486,7 @@ fn is_pallet_struct(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
         })
 }
 
-/// Verifies that the generics include a `<T: Config>` bound.
+/// Verifies that the generics include a `T: Config` bound.
 fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
     let param_name = Symbol::intern("T");
     generics.get_named(param_name).is_some_and(|param| {
@@ -497,8 +511,8 @@ fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
 /// NOTE: This function assumes the terminator wraps a call to a dispatchable function, but doesn't verify it.
 fn compose_entry_point<'tcx>(
     fn_local_def_id: LocalDefId,
-    tcx: TyCtxt<'tcx>,
     generics: &Generics,
+    tcx: TyCtxt<'tcx>,
     call_info: Option<(&Terminator<'tcx>, &Body<'tcx>)>,
 ) -> Option<(String, String, FxHashSet<DefId>)> {
     // Dispatchable name.
@@ -1179,15 +1193,15 @@ fn process_used_items(
 
 /// MIR visitor that collects "specialized" calls to the pallet struct associated functions.
 struct PalletCallVisitor<'tcx> {
-    pallet_struct_def_id: DefId,
+    pallet_struct_local_def_id: LocalDefId,
     tcx: TyCtxt<'tcx>,
     calls: FxHashMap<LocalDefId, Terminator<'tcx>>,
 }
 
 impl<'tcx> PalletCallVisitor<'tcx> {
-    pub fn new(pallet_struct_def_id: DefId, tcx: TyCtxt<'tcx>) -> Self {
+    pub fn new(pallet_struct_local_def_id: LocalDefId, tcx: TyCtxt<'tcx>) -> Self {
         Self {
-            pallet_struct_def_id,
+            pallet_struct_local_def_id,
             tcx,
             calls: FxHashMap::default(),
         }
@@ -1218,8 +1232,9 @@ impl<'tcx> Visitor<'tcx> for PalletCallVisitor<'tcx> {
                 let is_pallet_assoc_item = || {
                     impl_for_assoc_item(local_def_id.to_def_id(), self.tcx).is_some_and(
                         |(_, impl_)| {
-                            adt_for_impl(&impl_)
-                                .is_some_and(|adt_def_id| adt_def_id == self.pallet_struct_def_id)
+                            adt_for_impl(&impl_).is_some_and(|adt_def_id| {
+                                adt_def_id == self.pallet_struct_local_def_id.to_def_id()
+                            })
                         },
                     )
                 };
@@ -1858,6 +1873,26 @@ fn adt_for_impl(impl_: &rustc_hir::Impl) -> Option<DefId> {
     None
 }
 
+/// Returns names of associated items of a trait.
+fn trait_assoc_item_names(
+    trait_local_def_id: LocalDefId,
+    tcx: TyCtxt<'_>,
+) -> Option<FxHashSet<&str>> {
+    let trait_node = tcx.hir_node_by_def_id(trait_local_def_id);
+    let rustc_hir::Node::Item(trait_item) = trait_node else {
+        return None;
+    };
+    let rustc_hir::ItemKind::Trait(.., trait_item_refs) = trait_item.kind else {
+        return None;
+    };
+    Some(
+        trait_item_refs
+            .iter()
+            .map(|item| item.ident.as_str())
+            .collect(),
+    )
+}
+
 /// Checks if an item (given it's `DefId`) is "visible" from the crate root.
 fn is_visible_from_crate_root(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
     let crate_vis = Visibility::Restricted(CRATE_DEF_ID.to_def_id());
@@ -1883,22 +1918,15 @@ fn is_visible_from_crate_root(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
     false
 }
 
-/// Returns names of associated items of a trait.
-fn trait_assoc_item_names(
-    trait_local_def_id: LocalDefId,
-    tcx: TyCtxt<'_>,
-) -> Option<FxHashSet<&str>> {
-    let trait_node = tcx.hir_node_by_def_id(trait_local_def_id);
-    let rustc_hir::Node::Item(trait_item) = trait_node else {
-        return None;
-    };
-    let rustc_hir::ItemKind::Trait(.., trait_item_refs) = trait_item.kind else {
-        return None;
-    };
-    Some(
-        trait_item_refs
-            .iter()
-            .map(|item| item.ident.as_str())
-            .collect(),
-    )
+/// Checks if an item (given it's `HirId`) is only accessible in tests.
+fn is_test_only_item(hir_id: HirId, tcx: TyCtxt<'_>) -> bool {
+    if utils::has_cfg_test_attr(hir_id, tcx) {
+        return true;
+    }
+    let parent_mod_def_id = tcx.parent_module(hir_id);
+    let mod_hir_id = tcx.local_def_id_to_hir_id(parent_mod_def_id.to_local_def_id());
+    if mod_hir_id == hir_id {
+        return false;
+    }
+    is_test_only_item(mod_hir_id, tcx)
 }
