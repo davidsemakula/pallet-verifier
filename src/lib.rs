@@ -38,3 +38,23 @@ pub const ENTRY_POINTS_MOD_NAME: &str = "__pallet_verifier_entry_points";
 pub const ENTRY_POINT_FN_PREFIX: &str = "__pallet_verifier_entry_point__";
 
 pub const CONTRACTS_MOD_NAME: &str = "foreign_contracts";
+
+/// Kind of pallet `fn`.
+#[derive(Debug, Clone, Copy)]
+pub enum CallKind {
+    Dispatchable,
+    PubAssocFn,
+}
+
+impl std::fmt::Display for CallKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                CallKind::Dispatchable => "dispatchable",
+                CallKind::PubAssocFn => "pub assoc fn",
+            }
+        )
+    }
+}

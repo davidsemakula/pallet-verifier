@@ -2,11 +2,12 @@
 //!
 //! See [`EntryPointsCallbacks`] doc.
 
+use rustc_ast::BindingAnnotation;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{
     def::{DefKind, Res},
     intravisit::Visitor as _,
-    HirId,
+    HirId, PatKind,
 };
 use rustc_middle::{
     mir::{
@@ -23,7 +24,7 @@ use rustc_span::{
 use itertools::Itertools;
 
 use super::utils;
-use crate::ENTRY_POINT_FN_PREFIX;
+use crate::{CallKind, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions.
 ///
@@ -32,9 +33,9 @@ use crate::ENTRY_POINT_FN_PREFIX;
 /// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#entry-points>
 #[derive(Default)]
 pub struct EntryPointsCallbacks {
-    /// Map from generated entry point `fn` names and their definitions and stable `DefPathHash`
-    /// of the target dispatchable `fn`.
-    entry_points: FxHashMap<String, (String, DefPathHash)>,
+    /// Map from generated entry point `fn` names and their definitions, a stable `DefPathHash`
+    /// of the target pallet `fn` and it's [`CallKind`].
+    entry_points: FxHashMap<String, (String, DefPathHash, CallKind)>,
     /// Use declarations and item definitions for generated entry points.
     use_decls: FxHashSet<String>,
     item_defs: FxHashSet<String>,
@@ -61,34 +62,40 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             let dispatchable_names = dispatchable_calls(pallet_mod_local_def_id, tcx);
 
             // Finds `DefId`s of dispatchable functions.
-            phase = Phase::AssocFns;
-            println!("Searching for dispatchable function definitions ...");
-            let dispatchable_local_def_ids =
-                dispatchable_ids(&dispatchable_names, pallet_mod_local_def_id, tcx);
-            if dispatchable_local_def_ids.is_empty() {
-                return;
-            }
-
-            // Adds warnings for `Call` variants whose dispatchable function wasn't found.
-            if dispatchable_names.len() != dispatchable_local_def_ids.len() {
-                let id_names: Vec<_> = dispatchable_local_def_ids
-                    .iter()
-                    .filter_map(|local_def_id| utils::def_name(*local_def_id, tcx))
-                    .collect();
-                for name in dispatchable_names {
-                    let symbol = Symbol::intern(name);
-                    if !id_names.contains(&symbol) {
-                        let mut warning = compiler.sess.dcx().struct_warn(format!(
-                            "Couldn't find definition for dispatchable: `{name}`"
-                        ));
-                        warning.note("This is most likely a bug in pallet-verifier.");
-                        warning.help(
-                            "Please consider filling a bug report at \
+            let mut dispatchable_local_def_ids = FxHashSet::default();
+            if !dispatchable_names.is_empty() {
+                phase = Phase::AssocFns;
+                println!("Searching for dispatchable function definitions ...");
+                dispatchable_local_def_ids =
+                    dispatchable_ids(&dispatchable_names, pallet_mod_local_def_id, tcx);
+                // Adds warnings for `Call` variants whose dispatchable function wasn't found.
+                if dispatchable_names.len() != dispatchable_local_def_ids.len() {
+                    let id_names: Vec<_> = dispatchable_local_def_ids
+                        .iter()
+                        .filter_map(|local_def_id| utils::def_name(*local_def_id, tcx))
+                        .collect();
+                    for name in dispatchable_names {
+                        let symbol = Symbol::intern(name);
+                        if !id_names.contains(&symbol) {
+                            let mut warning = compiler.sess.dcx().struct_warn(format!(
+                                "Couldn't find definition for dispatchable: `{name}`"
+                            ));
+                            warning.note("This is most likely a bug in pallet-verifier.");
+                            warning.help(
+                                "Please consider filling a bug report at \
                             https://github.com/davidsemakula/pallet-verifier/issues",
-                        );
-                        warning.emit();
+                            );
+                            warning.emit();
+                        }
                     }
                 }
+            }
+
+            // Finds pallet associated function calls.
+            println!("Searching for public associated function definitions ...");
+            let pub_fn_local_def_ids = pallet_pub_fn_ids(pallet_struct_local_def_id, tcx);
+            if dispatchable_local_def_ids.is_empty() && pub_fn_local_def_ids.is_empty() {
+                return;
             }
 
             // Finds pallet associated function calls.
@@ -115,7 +122,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                 return;
             }
 
-            // Composes entry points module content and add warnings for missing dispatchable calls.
+            // Generates entry points for dispatchables and pub assoc fns.
             println!("Generating tractable entry points for FRAME pallet ...");
             let mut used_items = FxHashSet::default();
             phase = Phase::EntryPoints;
@@ -125,8 +132,10 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                 .sorted_by_key(|(local_def_id, _)| {
                     if dispatchable_local_def_ids.contains(local_def_id) {
                         0
-                    } else {
+                    } else if pub_fn_local_def_ids.contains(local_def_id) {
                         1
+                    } else {
+                        2
                     }
                 })
                 .find_map(|(local_def_id, (terminator, _))| {
@@ -194,39 +203,48 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             else {
                 return;
             };
-            for local_def_id in dispatchable_local_def_ids {
+            for local_def_id in dispatchable_local_def_ids
+                .iter()
+                .chain(&pub_fn_local_def_ids)
+            {
                 let call_info = calls
-                    .get(&local_def_id)
+                    .get(local_def_id)
                     .map(|(terminator, body)| (terminator, *body));
-                let entry_point_result =
-                    compose_entry_point(local_def_id, &generics, tcx, call_info);
-                if let Some((name, content, local_used_items)) = entry_point_result {
-                    let def_path_hash = hir.def_path_hash(local_def_id);
-                    entry_points.insert(name, (content, def_path_hash));
-                    used_items.extend(local_used_items);
+                let entry_point_result = compose_entry_point(
+                    *local_def_id,
+                    &generics,
+                    pallet_struct_local_def_id,
+                    tcx,
+                    call_info,
+                );
+                let call_kind = if dispatchable_local_def_ids.contains(local_def_id) {
+                    CallKind::Dispatchable
                 } else {
-                    let name = utils::def_name(local_def_id, tcx)
-                        .expect("Expected a name for dispatchable");
-                    let (msg, note, help) = if call_info.is_some() {
-                        ("Failed to generate tractable entry point", None, None)
-                    } else {
-                        (
-                            "Couldn't find a call",
-                            Some(format!(
-                                "pallet-verifier couldn't find a unit test for: `{name}`."
-                            )),
-                            Some(format!("Add a unit test that calls: `{name}`.")),
-                        )
-                    };
-                    let mut warning = compiler
-                        .sess
-                        .dcx()
-                        .struct_warn(format!("{msg} for dispatchable: `{name}`"));
-                    if let Some(note) = note {
-                        warning.note(note);
+                    CallKind::PubAssocFn
+                };
+                if let Some((name, content, local_used_items)) = entry_point_result {
+                    let def_path_hash = hir.def_path_hash(*local_def_id);
+                    entry_points.insert(name, (content, def_path_hash, call_kind));
+                    used_items.extend(local_used_items);
+                    if pub_fn_local_def_ids.contains(local_def_id) {
+                        let trait_def_id = impl_for_assoc_item(local_def_id.to_def_id(), tcx)
+                            .and_then(|(_, impl_)| impl_.of_trait)
+                            .and_then(|trait_ref| trait_ref.trait_def_id());
+                        if let Some(trait_def_id) = trait_def_id {
+                            used_items.insert(trait_def_id);
+                        }
                     }
-                    if let Some(help) = help {
-                        warning.help(help);
+                } else {
+                    let name = utils::def_name(*local_def_id, tcx)
+                        .expect("Expected a name for {call_kind}");
+                    let mut warning = compiler.sess.dcx().struct_warn(format!(
+                        "Failed to generate tractable entry point for {call_kind}: `{name}`"
+                    ));
+                    if call_info.is_none() {
+                        warning.note(format!(
+                            "pallet-verifier couldn't find a unit test for: `{name}`."
+                        ));
+                        warning.help(format!("Add a unit test that calls: `{name}`."));
                     }
                     warning.emit();
                 }
@@ -292,7 +310,7 @@ impl EntryPointsCallbacks {
             let entry_points = self
                 .entry_points
                 .values()
-                .map(|(content, _)| content)
+                .map(|(content, ..)| content)
                 .join("\n\n");
             format!(
                 r"
@@ -315,11 +333,11 @@ impl EntryPointsCallbacks {
     }
 
     /// Returns a map from generated entry point `fn` names to a stable `DefPathHash` of the
-    /// target dispatchable `fn`.
-    pub fn entry_points_map(&self) -> FxHashMap<&str, DefPathHash> {
+    /// target pallet `fn` and it's [`CallKind`].
+    pub fn entry_points_info(&self) -> FxHashMap<&str, (DefPathHash, CallKind)> {
         self.entry_points
             .iter()
-            .map(|(name, (_, hash))| (name.as_str(), *hash))
+            .map(|(name, (_, hash, call_kind))| (name.as_str(), (*hash, *call_kind)))
             .collect()
     }
 }
@@ -477,6 +495,81 @@ fn dispatchable_ids(
         .collect()
 }
 
+/// Finds definitions of a pallet's public functions.
+fn pallet_pub_fn_ids(
+    pallet_struct_local_def_id: LocalDefId,
+    tcx: TyCtxt<'_>,
+) -> FxHashSet<LocalDefId> {
+    let mut results = FxHashSet::default();
+    let hir = tcx.hir();
+    let source_map = tcx.sess.source_map();
+    let pallet_impls = hir.items().filter_map(|item_id| {
+        if is_test_only_item(item_id.hir_id(), tcx)
+            && is_visible_from_crate_root(item_id.owner_id.to_def_id(), tcx)
+        {
+            return None;
+        }
+        let item = hir.item(item_id);
+        if let rustc_hir::ItemKind::Impl(impl_) = item.kind {
+            let is_pallet_impl = adt_for_impl(impl_)
+                .is_some_and(|adt_def_id| adt_def_id == pallet_struct_local_def_id.to_def_id());
+            is_pallet_impl.then_some(impl_)
+        } else {
+            None
+        }
+    });
+    for impl_ in pallet_impls {
+        let is_inherent_or_local_trait_impl = impl_.of_trait.is_none()
+            || impl_
+                .of_trait
+                .and_then(|trait_ref| trait_ref.trait_def_id())
+                .is_some_and(|trait_def_id| trait_def_id.is_local());
+        if is_inherent_or_local_trait_impl {
+            let is_pub_trait = impl_
+                .of_trait
+                .and_then(|trait_ref| trait_ref.trait_def_id())
+                .is_some_and(|trait_def_id| tcx.visibility(trait_def_id) == Visibility::Public);
+            let pub_assoc_fns = impl_.items.iter().filter_map(|impl_item| {
+                let is_assoc_fn = matches!(impl_item.kind, rustc_hir::AssocItemKind::Fn { .. });
+                if is_assoc_fn {
+                    let fn_local_def_id = impl_item.id.owner_id.def_id;
+                    if !is_test_only_item(impl_item.id.hir_id(), tcx)
+                        && (is_pub_trait
+                            || (impl_.of_trait.is_none()
+                                && tcx.visibility(fn_local_def_id.to_def_id())
+                                    == Visibility::Public))
+                    {
+                        return Some((fn_local_def_id, impl_item));
+                    }
+                }
+                None
+            });
+            for (fn_local_def_id, impl_item) in pub_assoc_fns {
+                let span = impl_item.span;
+                let is_from_pallet_attribute = || {
+                    source_map
+                        .span_to_snippet(source_map.span_extend_to_line(span))
+                        .is_ok_and(|mut line_snippet| {
+                            line_snippet.retain(|c| !c.is_whitespace());
+                            line_snippet.contains("#[pallet::")
+                        })
+                };
+                let is_local_defn = (!span.from_expansion()
+                    || span
+                        .ctxt()
+                        .outer_expn_data()
+                        .macro_def_id
+                        .is_some_and(|macro_def_id| macro_def_id.is_local()))
+                    && !is_from_pallet_attribute();
+                if is_local_defn {
+                    results.insert(fn_local_def_id);
+                }
+            }
+        }
+    }
+    results
+}
+
 // Verifies that the definition is a local `struct` named `Pallet`.
 fn is_pallet_struct(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
     tcx.def_kind(def_id) == DefKind::Struct
@@ -512,6 +605,7 @@ fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
 fn compose_entry_point<'tcx>(
     fn_local_def_id: LocalDefId,
     generics: &Generics,
+    pallet_struct_local_def_id: LocalDefId,
     tcx: TyCtxt<'tcx>,
     call_info: Option<(&Terminator<'tcx>, &Body<'tcx>)>,
 ) -> Option<(String, String, FxHashSet<DefId>)> {
@@ -561,21 +655,36 @@ fn compose_entry_point<'tcx>(
     for (idx, fn_param) in fn_params.iter().enumerate() {
         // Creates a unique param name.
         let pat = fn_param.pat;
-        let param_name = source_map
+        let param_pat = source_map
             .span_to_snippet(pat.span)
             .expect("Expected snippet for span");
-        let unique_name = format!("{param_name}__{fn_name}");
+        let unique_pat = format!("{param_pat}__{fn_name}");
+        let unique_param_name = || {
+            let mut param_name_only = None;
+            if let PatKind::Binding(annotation, _, ident, _) = fn_param.pat.kind {
+                if annotation != BindingAnnotation::NONE {
+                    param_name_only = Some(ident);
+                }
+            }
+            format!(
+                "{}__{fn_name}",
+                param_name_only
+                    .as_ref()
+                    .map(|ident| ident.as_str())
+                    .unwrap_or_else(|| param_pat.as_str())
+            )
+        };
 
         // Composes entry point param and/or dispatchable call arg.
         let param_ty = fn_params_ty.get(idx).expect("Expected param type");
         let specialized_user_ty =
-            tractable_param_hir_type(fn_param, param_ty, generics, &mut used_items, tcx);
+            tractable_param_hir_type(param_ty, generics, &mut used_items, tcx);
         if let Some(specialized_user_ty) = specialized_user_ty {
             // Composes entry point param, and corresponding dispatchable call arg vars,
             // by replacing `T: Config` param types with concrete `Config` type,
             // and integer const generic params with an arbitrary large value.
-            params.push(format!("{unique_name}: {specialized_user_ty}"));
-            args.push(unique_name);
+            params.push(format!("{unique_pat}: {specialized_user_ty}"));
+            args.push(unique_param_name());
         } else {
             // Composes entry point param and/or dispatchable call args based on
             // dispatchable call arg type or value.
@@ -596,8 +705,8 @@ fn compose_entry_point<'tcx>(
                     if let Some(arg_ty_str) = tractable_param_type(&arg_ty, &mut used_items, tcx) {
                         // Adds entry point param and dispatchable call arg var,
                         // based on dispatchable call arg type.
-                        params.push(format!("{unique_name}: {arg_ty_str}"));
-                        args.push(unique_name);
+                        params.push(format!("{unique_pat}: {arg_ty_str}"));
+                        args.push(unique_param_name());
                     } else {
                         // Adds dispatchable call arg value based on user input.
                         let mut span = call_arg.span;
@@ -634,8 +743,8 @@ fn compose_entry_point<'tcx>(
                     if let Some(arg_ty_str) = tractable_param_type(&arg_ty, &mut used_items, tcx) {
                         // Adds entry point param and dispatchable call arg var,
                         // based on dispatchable call arg type.
-                        params.push(format!("{unique_name}: {arg_ty_str}"));
-                        args.push(unique_name);
+                        params.push(format!("{unique_pat}: {arg_ty_str}"));
+                        args.push(unique_pat);
                     } else {
                         // Adds dispatchable call arg value based on user input.
                         let value = source_map
@@ -774,18 +883,15 @@ fn compose_entry_point<'tcx>(
         .sorted_by_key(|(_, span)| *span)
         .map(|(snippet, _)| snippet)
         .join("\n    ");
-    let pallet_mod = tcx.parent_module_from_def_id(fn_local_def_id);
-    let pallet_mod_path = tcx.def_path_str(pallet_mod);
+    let pallet_struct_path = tcx.def_path_str(pallet_struct_local_def_id);
     let generic_args = generics.turbofish_args(&mut used_items, tcx);
     let content = format!(
         r"
 pub fn {name}({params_list}) {{
     {assign_decls}
 
-    crate::{}{}Pallet{generic_args}::{fn_name}({args_list});
-}}",
-        pallet_mod_path,
-        if pallet_mod_path.is_empty() { "" } else { "::" }
+    crate::{pallet_struct_path}{generic_args}::{fn_name}({args_list});
+}}"
     );
     Some((name, content, used_items))
 }
@@ -1571,7 +1677,6 @@ fn tractable_param_type(
 ///
 /// NOTE: A tractable type must *NOT* include any generics and/or raw indirection.
 fn tractable_param_hir_type<'tcx>(
-    fn_param: &'tcx rustc_hir::Param,
     ty: &'tcx rustc_hir::Ty<'tcx>,
     generics: &Generics,
     used_items: &mut FxHashSet<DefId>,
@@ -1619,6 +1724,33 @@ fn tractable_param_hir_type<'tcx>(
                     });
             if is_config_param {
                 config_related_types.insert(rel_ty.span, segment);
+            } else if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = rel_ty.kind
+            {
+                if let Res::SelfTyAlias {
+                    alias_to: impl_def_id,
+                    is_trait_impl: true,
+                    ..
+                } = path.res
+                {
+                    let specialized_user_ty = tcx
+                        .associated_items(impl_def_id)
+                        .find_by_name_and_kind(
+                            tcx,
+                            segment.ident,
+                            rustc_middle::ty::AssocKind::Type,
+                            impl_def_id,
+                        )
+                        .and_then(|assoc_item| assoc_item.def_id.as_local())
+                        .and_then(|assoc_ty_local_def_id| {
+                            tcx.hir_node_by_def_id(assoc_ty_local_def_id).ty()
+                        })
+                        .and_then(|assoc_ty| {
+                            tractable_param_hir_type(assoc_ty, generics, used_items, tcx)
+                        });
+                    if let Some(specialized_user_ty) = specialized_user_ty {
+                        fq_item_paths.push((specialized_user_ty, gen_ty.span));
+                    }
+                }
             }
         } else if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = gen_ty.kind {
             match path.res {
@@ -1648,7 +1780,7 @@ fn tractable_param_hir_type<'tcx>(
                             }
                             None => path.span,
                         };
-                        fq_item_paths.push((path, def_id, def_path, def_span));
+                        fq_item_paths.push((def_path, def_span));
                     } else {
                         used_items.insert(def_id);
                     }
@@ -1690,13 +1822,13 @@ fn tractable_param_hir_type<'tcx>(
     // and integer const generic params with an arbitrary large value.
     let source_map = tcx.sess.source_map();
     let mut user_ty = source_map
-        .span_to_snippet(fn_param.ty_span)
+        .span_to_snippet(ty.span)
         .expect("Expected snippet for span");
     if !ty_generic_params.is_empty()
         || !int_const_generic_params.is_empty()
         || !fq_item_paths.is_empty()
     {
-        let offset = fn_param.ty_span.lo().to_usize();
+        let offset = ty.span.lo().to_usize();
         let mut offset_shift = 0;
         let config_trait_item_names =
             trait_assoc_item_names(generics.config_trait_local_def_id, tcx);
@@ -1723,11 +1855,7 @@ fn tractable_param_hir_type<'tcx>(
                 }
                 (param_ty.span, arg_ty_path)
             })
-            .chain(
-                fq_item_paths
-                    .into_iter()
-                    .map(|(_, _, name, span)| (span, name)),
-            )
+            .chain(fq_item_paths.into_iter().map(|(path, span)| (span, path)))
             .chain(
                 // We use 1000 arbitrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
                 // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#k-limits>

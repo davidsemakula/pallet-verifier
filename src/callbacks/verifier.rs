@@ -8,7 +8,7 @@ use rustc_interface::interface::Compiler;
 use rustc_middle::ty::{AssocKind, TyCtxt};
 use rustc_span::{
     def_id::{CrateNum, DefId, DefPathHash, LocalDefId},
-    Span,
+    Span, Symbol,
 };
 
 use std::{cell::RefCell, collections::HashMap, process, rc::Rc};
@@ -21,16 +21,18 @@ use mirai::{
 use tempfile::TempDir;
 
 use super::utils;
-use crate::{CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX};
+use crate::{CallKind, CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks for analyzing FRAME pallet with MIRAI.
 pub struct VerifierCallbacks<'compilation> {
-    entry_points: &'compilation FxHashMap<&'compilation str, DefPathHash>,
+    entry_points: &'compilation FxHashMap<&'compilation str, (DefPathHash, CallKind)>,
     mirai_config: Option<MiraiConfig>,
 }
 
 impl<'compilation> VerifierCallbacks<'compilation> {
-    pub fn new(entry_points: &'compilation FxHashMap<&'compilation str, DefPathHash>) -> Self {
+    pub fn new(
+        entry_points: &'compilation FxHashMap<&'compilation str, (DefPathHash, CallKind)>,
+    ) -> Self {
         Self {
             entry_points,
             mirai_config: None,
@@ -161,46 +163,80 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             }
 
             // Finds and analyzes the generated entry points.
+            let mut dispatchable_entry_points = Vec::new();
+            let mut pub_assoc_fn_entry_points = Vec::new();
+            let mut analyze_entry_points =
+                |mut entry_points_info: Vec<(LocalDefId, LocalDefId, Symbol)>,
+                 call_kind: CallKind| {
+                    if entry_points_info.len() > 1 {
+                        entry_points_info.sort_by_key(|(.., name)| name.to_ident_string());
+                    }
+                    for (local_def_id, _, name) in entry_points_info {
+                        println!("Analyzing {call_kind}: `{name}` ...",);
+
+                        // Analyzes entry point with MIRAI and collects diagnostics.
+                        let mut diagnostics = Vec::new();
+                        let def_id = local_def_id.to_def_id();
+                        analyze(def_id, &mut crate_visitor, &mut diagnostics, false);
+
+                        // Emit diagnostics for generated entry point (if necessary).
+                        emit_diagnostics(diagnostics, local_def_id, tcx, &test_mod_spans);
+                    }
+                };
             for local_def_id in hir.body_owners() {
                 let entry_point_info = utils::def_name(local_def_id, tcx).and_then(|def_name| {
-                    self.entry_points.iter().find_map(|(name, target_hash)| {
-                        if *name == def_name.as_str() {
-                            let mut dispatchable_def_id_error = || {
-                                let mut error = compiler.sess.dcx().struct_err(format!(
-                                    "Couldn't find definition for dispatchable: `{}`",
-                                    def_name.as_str().replace(ENTRY_POINT_FN_PREFIX, "")
-                                ));
-                                error.note("This is most likely a bug in pallet-verifier.");
-                                error.help(
-                                    "Please consider filling a bug report at \
+                    self.entry_points
+                        .iter()
+                        .find_map(|(name, (target_hash, call_kind))| {
+                            if *name == def_name.as_str() {
+                                let mut dispatchable_def_id_error = || {
+                                    let mut error = compiler.sess.dcx().struct_err(format!(
+                                        "Couldn't find definition for {call_kind}: `{}`",
+                                        def_name.as_str().replace(ENTRY_POINT_FN_PREFIX, "")
+                                    ));
+                                    error.note("This is most likely a bug in pallet-verifier.");
+                                    error.help(
+                                        "Please consider filling a bug report at \
                                         https://github.com/davidsemakula/pallet-verifier/issues",
+                                    );
+                                    error.emit();
+                                    process::exit(rustc_driver::EXIT_FAILURE)
+                                };
+                                let dispatchable_def_id = tcx.def_path_hash_to_def_id(
+                                    *target_hash,
+                                    &mut dispatchable_def_id_error,
                                 );
-                                error.emit();
-                                process::exit(rustc_driver::EXIT_FAILURE)
-                            };
-                            let dispatchable_def_id = tcx.def_path_hash_to_def_id(
-                                *target_hash,
-                                &mut dispatchable_def_id_error,
-                            );
-                            dispatchable_def_id.as_local()
-                        } else {
-                            None
-                        }
-                    })
+                                dispatchable_def_id
+                                    .as_local()
+                                    .map(|dispatchable_local_def_id| {
+                                        (dispatchable_local_def_id, call_kind)
+                                    })
+                            } else {
+                                None
+                            }
+                        })
                 });
-                if let Some(dispatchable_local_def_id) = entry_point_info {
-                    let dispatchable_name = utils::def_name(dispatchable_local_def_id, tcx)
+                if let Some((dispatcable_local_def_id, call_kind)) = entry_point_info {
+                    let dispatchable_name = utils::def_name(dispatcable_local_def_id, tcx)
                         .expect("Expected a name for dispatchable");
-                    println!("Analyzing dispatchable: `{dispatchable_name}` ...",);
-
-                    // Analyzes entry point with MIRAI and collects diagnostics.
-                    let mut diagnostics = Vec::new();
-                    let def_id = local_def_id.to_def_id();
-                    analyze(def_id, &mut crate_visitor, &mut diagnostics, false);
-
-                    // Emit diagnostics for generated entry point (if necessary).
-                    emit_diagnostics(diagnostics, local_def_id, tcx, &test_mod_spans);
+                    let info = (local_def_id, dispatcable_local_def_id, dispatchable_name);
+                    match call_kind {
+                        CallKind::Dispatchable => dispatchable_entry_points.push(info),
+                        CallKind::PubAssocFn => pub_assoc_fn_entry_points.push(info),
+                    }
                 }
+            }
+
+            // Analyze dispatchables.
+            if !dispatchable_entry_points.is_empty() {
+                println!("Analyzing dispatchables ...");
+                analyze_entry_points(dispatchable_entry_points, CallKind::Dispatchable);
+            }
+
+            // Analyze pub assoc `fn`s.
+            if !pub_assoc_fn_entry_points.is_empty() {
+                println!("Analyzing pub assoc fns ...");
+                analyze_entry_points(pub_assoc_fn_entry_points, CallKind::PubAssocFn);
             }
 
             // Outputs call graph.

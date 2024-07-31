@@ -176,8 +176,8 @@ fn main() {
     // Analyzes FRAME pallet with MIRAI.
     // Enables compilation of MIRAI only code.
     cli_args.push("--cfg=mirai".to_owned());
-    let entry_points_map = entry_point_callbacks.entry_points_map();
-    let mut verifier_callbacks = VerifierCallbacks::new(&entry_points_map);
+    let entry_points_info = entry_point_callbacks.entry_points_info();
+    let mut verifier_callbacks = VerifierCallbacks::new(&entry_points_info);
     let mut verifier_compiler = rustc_driver::RunCompiler::new(&cli_args, &mut verifier_callbacks);
     verifier_compiler.set_file_loader(Some(Box::new(verifier_file_loader)));
     let verifier_result = verifier_compiler.run();
