@@ -14,7 +14,10 @@ use rustc_middle::{
         visit::Visitor, AggregateKind, Body, HasLocalDecls, Local, LocalDecl, Location, Operand,
         Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
     },
-    ty::{AssocItemContainer, GenericArg, ImplSubject, Ty, TyCtxt, TyKind, Visibility},
+    ty::{
+        AssocItemContainer, GenericArg, GenericParamDefKind, ImplSubject, Ty, TyCtxt, TyKind,
+        Visibility,
+    },
 };
 use rustc_span::{
     def_id::{DefId, DefPathHash, LocalDefId, LocalModDefId, CRATE_DEF_ID},
@@ -101,7 +104,9 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             // Finds pallet associated function calls.
             phase = Phase::Calls;
             println!("Searching for pallet associated function calls ...");
-            let mut calls = FxHashMap::default();
+            let mut concrete_calls = FxHashMap::default();
+            let mut intra_calls: FxHashMap<LocalDefId, FxHashSet<LocalDefId>> =
+                FxHashMap::default();
             let hir = tcx.hir();
             for local_def_id in hir.body_owners() {
                 let body_owner_kind = hir.body_owner_kind(local_def_id);
@@ -113,20 +118,33 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                     let mut visitor = PalletCallVisitor::new(pallet_struct_local_def_id, tcx);
                     visitor.visit_body(body);
 
-                    for (callee_local_def_id, terminator) in visitor.calls {
-                        calls.insert(callee_local_def_id, (terminator, body));
+                    for (callee_local_def_id, terminator) in visitor.concrete_calls {
+                        concrete_calls.insert(callee_local_def_id, (terminator, body));
+                    }
+                    for callee_local_def_id in visitor.generic_calls {
+                        match intra_calls.get_mut(&callee_local_def_id) {
+                            Some(callers) => {
+                                callers.insert(local_def_id);
+                            }
+                            None => {
+                                let mut callers = FxHashSet::default();
+                                callers.insert(local_def_id);
+                                intra_calls.insert(callee_local_def_id, callers);
+                            }
+                        }
                     }
                 }
             }
-            if calls.is_empty() {
+            if concrete_calls.is_empty() {
                 return;
             }
 
             // Generates entry points for dispatchables and pub assoc fns.
             println!("Generating tractable entry points for FRAME pallet ...");
             let mut used_items = FxHashSet::default();
+            let mut param_ty_subs = FxHashMap::default();
             phase = Phase::EntryPoints;
-            let Some(generics) = calls
+            let Some(generics) = concrete_calls
                 .iter()
                 // Prefer generics from dispatchable function calls.
                 .sorted_by_key(|(local_def_id, _)| {
@@ -141,7 +159,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                 .find_map(|(local_def_id, (terminator, _))| {
                     if let TerminatorKind::Call { func, .. } = &terminator.kind {
                         let (_, fn_generic_args) = func.const_fn_def()?;
-                        let ty_args: Vec<_> = fn_generic_args
+                        let fn_ty_args: Vec<_> = fn_generic_args
                             .iter()
                             .filter_map(GenericArg::as_type)
                             .collect();
@@ -173,28 +191,37 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                                 })
                             })?;
 
-                        let ty_params: Vec<_> = impl_generics
+                        let impl_ty_params: Vec<_> = impl_generics
                             .params
                             .iter()
                             .filter(|param| {
-                                matches!(param.kind, rustc_hir::GenericParamKind::Type { .. })
+                                matches!(
+                                    param.kind,
+                                    rustc_hir::GenericParamKind::Type {
+                                        synthetic: false,
+                                        ..
+                                    }
+                                )
                             })
                             .collect();
-                        let mut ty_param_impls = FxHashMap::default();
-                        if ty_params.len() == ty_args.len() {
-                            for (idx, param) in ty_params.iter().enumerate() {
-                                let param_name = param.name.ident().name;
-                                let arg_ty = ty_args
-                                    .get(idx)
-                                    .expect("Expected a generic arg at index {idx}");
-                                ty_param_impls.insert(param_name, *arg_ty);
-                            }
+                        if fn_ty_args.len() < impl_ty_params.len() {
+                            return None;
+                        }
+                        let mut impl_ty_param_to_arg_map = FxHashMap::default();
+                        let mut impl_ty_args = Vec::new();
+                        for (idx, param) in impl_ty_params.iter().enumerate() {
+                            let param_name = param.name.ident().name;
+                            let arg_ty = fn_ty_args
+                                .get(idx)
+                                .expect("Expected a generic arg at index {idx}");
+                            impl_ty_args.push(*arg_ty);
+                            impl_ty_param_to_arg_map.insert(param_name, *arg_ty);
                         }
 
                         Some(Generics::new(
                             config_trait_local_def_id,
-                            ty_args,
-                            ty_param_impls,
+                            impl_ty_args,
+                            impl_ty_param_to_arg_map,
                         ))
                     } else {
                         None
@@ -206,16 +233,26 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             for local_def_id in dispatchable_local_def_ids
                 .iter()
                 .chain(&pub_fn_local_def_ids)
+                // Process functions with calls first, so that we can collect type substitutions
+                // for opaque, dynamic and indirect types.
+                .sorted_by_key(|local_def_id| {
+                    if concrete_calls.contains_key(local_def_id) {
+                        0
+                    } else {
+                        1
+                    }
+                })
             {
-                let call_info = calls
+                let call_info = concrete_calls
                     .get(local_def_id)
                     .map(|(terminator, body)| (terminator, *body));
                 let entry_point_result = compose_entry_point(
                     *local_def_id,
                     &generics,
                     pallet_struct_local_def_id,
-                    tcx,
                     call_info,
+                    &mut param_ty_subs,
+                    tcx,
                 );
                 let call_kind = if dispatchable_local_def_ids.contains(local_def_id) {
                     CallKind::Dispatchable
@@ -234,7 +271,9 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                             used_items.insert(trait_def_id);
                         }
                     }
-                } else {
+                } else if call_kind == CallKind::Dispatchable
+                    || !intra_calls.contains_key(local_def_id)
+                {
                     let name = utils::def_name(*local_def_id, tcx)
                         .expect("Expected a name for {call_kind}");
                     let mut warning = compiler.sess.dcx().struct_warn(format!(
@@ -373,20 +412,6 @@ impl<'tcx> Generics<'tcx> {
             ty_args,
             ty_param_impls,
         }
-    }
-
-    /// Creates turbofish arguments from generics info.
-    pub fn turbofish_args(&self, used_items: &mut FxHashSet<DefId>, tcx: TyCtxt<'_>) -> String {
-        format!(
-            "::<{}>",
-            self.ty_args
-                .iter()
-                .map(|ty| {
-                    tractable_param_type(ty, used_items, tcx)
-                        .expect("Expected tractable generic args")
-                })
-                .join(", ")
-        )
     }
 }
 
@@ -570,7 +595,7 @@ fn pallet_pub_fn_ids(
     results
 }
 
-// Verifies that the definition is a local `struct` named `Pallet`.
+/// Verifies that the definition is a local `struct` named `Pallet`.
 fn is_pallet_struct(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
     tcx.def_kind(def_id) == DefKind::Struct
         && def_id.as_local().is_some_and(|local_def_id| {
@@ -604,18 +629,20 @@ fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
 /// NOTE: This function assumes the terminator wraps a call to a dispatchable function, but doesn't verify it.
 fn compose_entry_point<'tcx>(
     fn_local_def_id: LocalDefId,
-    generics: &Generics,
+    pallet_generics: &Generics<'tcx>,
     pallet_struct_local_def_id: LocalDefId,
-    tcx: TyCtxt<'tcx>,
     call_info: Option<(&Terminator<'tcx>, &Body<'tcx>)>,
+    param_ty_subs: &mut FxHashMap<String, String>,
+    tcx: TyCtxt<'tcx>,
 ) -> Option<(String, String, FxHashSet<DefId>)> {
-    // Dispatchable name.
+    // `fn` name.
     let fn_name = utils::def_name(fn_local_def_id, tcx)?;
 
-    // owner body (if any), call args (if any) and call span (if any).
+    // owner body, call span, call args and call generic args (if any).
     let mut owner_body_opt = None;
-    let mut call_args_opt = None;
     let mut fn_span_opt = None;
+    let mut call_args_opt = None;
+    let mut call_generic_args_opt = None;
     if let Some((
         TerminatorKind::Call {
             func,
@@ -626,20 +653,54 @@ fn compose_entry_point<'tcx>(
         body,
     )) = call_info.map(|(terminator, body)| (&terminator.kind, body))
     {
-        let (fn_def_id, _) = func.const_fn_def()?;
+        let (fn_def_id, call_generic_args) = func.const_fn_def()?;
         if fn_def_id != fn_local_def_id.to_def_id() {
             return None;
         }
         owner_body_opt = Some(body);
-        call_args_opt = Some(args);
         fn_span_opt = Some(fn_span);
+        call_args_opt = Some(args);
+        call_generic_args_opt = Some(call_generic_args);
+    }
+
+    // Extracts fn type args, if it has any non-synthetic generic type params.
+    let fn_generics = tcx.generics_of(fn_local_def_id);
+    let fn_ty_params: Vec<_> = fn_generics
+        .params
+        .iter()
+        .filter(|param| {
+            matches!(
+                param.kind,
+                GenericParamDefKind::Type {
+                    synthetic: false,
+                    ..
+                }
+            )
+        })
+        .collect();
+    let mut fn_ty_args = Vec::new();
+    if !fn_ty_params.is_empty() {
+        // Bail if the function has non-sythentic generics, but no concrete call info was provided.
+        let call_generic_args = call_generic_args_opt?;
+        let call_ty_args: Vec<_> = call_generic_args
+            .into_iter()
+            .filter_map(GenericArg::as_type)
+            .collect();
+        if call_ty_args.len() < pallet_generics.ty_args.len() + fn_ty_params.len() {
+            return None;
+        }
+        fn_ty_args = call_ty_args
+            .into_iter()
+            .skip(pallet_generics.ty_args.len())
+            .take(fn_ty_params.len())
+            .collect();
     }
 
     // Item imports and definitions.
     let mut used_items = FxHashSet::default();
     let mut item_defs = FxHashSet::default();
 
-    // Compose entry point params, and corresponding dispatchable call args.
+    // Composes entry point params, and corresponding `fn` call args.
     let mut params = Vec::new();
     let mut args = Vec::new();
     let mut locals = FxHashSet::default();
@@ -678,7 +739,7 @@ fn compose_entry_point<'tcx>(
         // Composes entry point param and/or dispatchable call arg.
         let param_ty = fn_params_ty.get(idx).expect("Expected param type");
         let specialized_user_ty =
-            tractable_param_hir_type(param_ty, generics, &mut used_items, tcx);
+            tractable_param_hir_type(param_ty, pallet_generics, &mut used_items, tcx);
         if let Some(specialized_user_ty) = specialized_user_ty {
             // Composes entry point param, and corresponding dispatchable call arg vars,
             // by replacing `T: Config` param types with concrete `Config` type,
@@ -688,8 +749,23 @@ fn compose_entry_point<'tcx>(
         } else {
             // Composes entry point param and/or dispatchable call args based on
             // dispatchable call arg type or value.
+            let user_param_ty_str = source_map
+                .span_to_snippet(param_ty.span)
+                .expect("Expected snippet for span");
+            let mut add_param = |arg_ty_str: &str| {
+                // Adds entry point param and dispatchable call arg var,
+                // based on dispatchable call arg type.
+                params.push(format!("{unique_pat}: {arg_ty_str}"));
+                args.push(unique_param_name());
+            };
             let Some(call_args) = call_args_opt else {
-                // Bails if call args aren't available.
+                // Tries to use already collected param type substitutions.
+                if let Some(arg_ty_str) = param_ty_subs.get(&user_param_ty_str) {
+                    add_param(arg_ty_str);
+                    continue;
+                }
+
+                // Bails if neither call args nor a param type substitution is available.
                 return None;
             };
             let call_arg = call_args
@@ -703,10 +779,8 @@ fn compose_entry_point<'tcx>(
                         .expect("Expected local declaration");
                     let arg_ty = local_decl.ty;
                     if let Some(arg_ty_str) = tractable_param_type(&arg_ty, &mut used_items, tcx) {
-                        // Adds entry point param and dispatchable call arg var,
-                        // based on dispatchable call arg type.
-                        params.push(format!("{unique_pat}: {arg_ty_str}"));
-                        args.push(unique_param_name());
+                        add_param(&arg_ty_str);
+                        param_ty_subs.insert(user_param_ty_str, arg_ty_str);
                     } else {
                         // Adds dispatchable call arg value based on user input.
                         let mut span = call_arg.span;
@@ -741,10 +815,8 @@ fn compose_entry_point<'tcx>(
                     // Adds entry point param and/or dispatchable call arg.
                     let arg_ty = constant.ty();
                     if let Some(arg_ty_str) = tractable_param_type(&arg_ty, &mut used_items, tcx) {
-                        // Adds entry point param and dispatchable call arg var,
-                        // based on dispatchable call arg type.
-                        params.push(format!("{unique_pat}: {arg_ty_str}"));
-                        args.push(unique_pat);
+                        add_param(&arg_ty_str);
+                        param_ty_subs.insert(user_param_ty_str, arg_ty_str);
                     } else {
                         // Adds dispatchable call arg value based on user input.
                         let value = source_map
@@ -884,13 +956,22 @@ fn compose_entry_point<'tcx>(
         .map(|(snippet, _)| snippet)
         .join("\n    ");
     let pallet_struct_path = tcx.def_path_str(pallet_struct_local_def_id);
-    let generic_args = generics.turbofish_args(&mut used_items, tcx);
+    let pallet_turbofish_args = turbofish_args(
+        pallet_generics.ty_args.clone().into_iter(),
+        &mut used_items,
+        tcx,
+    );
+    let fn_turbofish_args = if fn_ty_args.is_empty() {
+        String::new()
+    } else {
+        turbofish_args(fn_ty_args.into_iter(), &mut used_items, tcx)
+    };
     let content = format!(
         r"
 pub fn {name}({params_list}) {{
     {assign_decls}
 
-    crate::{pallet_struct_path}{generic_args}::{fn_name}({args_list});
+    crate::{pallet_struct_path}{pallet_turbofish_args}::{fn_name}{fn_turbofish_args}({args_list});
 }}"
     );
     Some((name, content, used_items))
@@ -1297,11 +1378,12 @@ fn process_used_items(
     }
 }
 
-/// MIR visitor that collects "specialized" calls to the pallet struct associated functions.
+/// MIR visitor that collects calls to the pallet struct associated functions.
 struct PalletCallVisitor<'tcx> {
     pallet_struct_local_def_id: LocalDefId,
     tcx: TyCtxt<'tcx>,
-    calls: FxHashMap<LocalDefId, Terminator<'tcx>>,
+    concrete_calls: FxHashMap<LocalDefId, Terminator<'tcx>>,
+    generic_calls: FxHashSet<LocalDefId>,
 }
 
 impl<'tcx> PalletCallVisitor<'tcx> {
@@ -1309,7 +1391,8 @@ impl<'tcx> PalletCallVisitor<'tcx> {
         Self {
             pallet_struct_local_def_id,
             tcx,
-            calls: FxHashMap::default(),
+            concrete_calls: FxHashMap::default(),
+            generic_calls: FxHashSet::default(),
         }
     }
 }
@@ -1344,11 +1427,14 @@ impl<'tcx> Visitor<'tcx> for PalletCallVisitor<'tcx> {
                         },
                     )
                 };
-                if !self.calls.contains_key(&local_def_id)
-                    && !contains_type_params()
-                    && is_pallet_assoc_item()
-                {
-                    self.calls.insert(local_def_id, terminator.clone());
+                if is_pallet_assoc_item() {
+                    if !contains_type_params() {
+                        self.concrete_calls
+                            .entry(local_def_id)
+                            .or_insert_with(|| terminator.clone());
+                    } else {
+                        self.generic_calls.insert(local_def_id);
+                    }
                 }
             }
         }
@@ -2057,4 +2143,19 @@ fn is_test_only_item(hir_id: HirId, tcx: TyCtxt<'_>) -> bool {
         return false;
     }
     is_test_only_item(mod_hir_id, tcx)
+}
+
+/// Creates turbofish args from a list of type args.
+fn turbofish_args<'tcx>(
+    args: impl Iterator<Item = Ty<'tcx>>,
+    used_items: &mut FxHashSet<DefId>,
+    tcx: TyCtxt<'tcx>,
+) -> String {
+    format!(
+        "::<{}>",
+        args.map(|ty| {
+            tractable_param_type(&ty, used_items, tcx).unwrap_or_else(|| "_".to_owned())
+        })
+        .join(", ")
+    )
 }

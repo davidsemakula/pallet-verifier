@@ -40,7 +40,7 @@ pub const ENTRY_POINT_FN_PREFIX: &str = "__pallet_verifier_entry_point__";
 pub const CONTRACTS_MOD_NAME: &str = "foreign_contracts";
 
 /// Kind of pallet `fn`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallKind {
     Dispatchable,
     PubAssocFn,
