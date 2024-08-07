@@ -357,6 +357,7 @@ impl EntryPointsCallbacks {
 #![allow(nonstandard_style)]
 #![allow(private_interfaces)]
 
+use crate::*;
 {use_decls}
 
 {item_defs}
@@ -1029,10 +1030,9 @@ fn process_used_items(
                             ""
                         },
                         tcx.def_path_str(item_def_id),
-                        if let Some(item_alias) = item_alias {
-                            format!(" as {item_alias}")
-                        } else {
-                            String::new()
+                        match item_alias {
+                            Some(name) => format!(" as {name}"),
+                            None => String::new(),
                         }
                     ));
                 } else {
