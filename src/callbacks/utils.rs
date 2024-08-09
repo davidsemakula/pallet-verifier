@@ -5,14 +5,13 @@ use rustc_hir::{
     definitions::{DefPathData, DisambiguatedDefPathData},
     HirId,
 };
-use rustc_middle::ty::TyCtxt;
-use rustc_span::{def_id::LocalDefId, Symbol};
+use rustc_middle::{query::IntoQueryParam, ty::TyCtxt};
+use rustc_span::{def_id::DefId, Symbol};
 
-/// Returns the name of the `LocalDefId` as a `Symbol` (if any).
-pub fn def_name(local_def_id: LocalDefId, tcx: TyCtxt<'_>) -> Option<Symbol> {
-    let def_path = tcx.hir().def_path(local_def_id);
-    let def_path_data = def_path.data.last()?;
-    match def_path_data {
+/// Returns the name of the definition as a `Symbol` (if any).
+pub fn def_name(def_id: impl IntoQueryParam<DefId>, tcx: TyCtxt<'_>) -> Option<Symbol> {
+    let def_key = tcx.def_key(def_id);
+    match def_key.disambiguated_data {
         DisambiguatedDefPathData {
             data:
                 DefPathData::MacroNs(name)
@@ -20,7 +19,7 @@ pub fn def_name(local_def_id: LocalDefId, tcx: TyCtxt<'_>) -> Option<Symbol> {
                 | DefPathData::TypeNs(name)
                 | DefPathData::ValueNs(name),
             ..
-        } => Some(*name),
+        } => Some(name),
         _ => None,
     }
 }

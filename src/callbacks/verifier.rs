@@ -125,8 +125,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             let mut contracts_mod_def_id = None;
             let mut test_mod_spans = FxHashSet::default();
             hir.for_each_module(|mod_def_id| {
-                let mod_local_def_id = mod_def_id.to_local_def_id();
-                let is_contracts_mod = utils::def_name(mod_local_def_id, tcx)
+                let is_contracts_mod = utils::def_name(mod_def_id.to_def_id(), tcx)
                     .is_some_and(|name| name.as_str() == CONTRACTS_MOD_NAME);
                 if is_contracts_mod {
                     contracts_mod_def_id = Some(mod_def_id);

@@ -182,10 +182,10 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                                     if let Res::Def(DefKind::Trait, trait_def_id) =
                                         trait_ref.path.res
                                     {
-                                        let trait_local_def_id = trait_def_id.as_local()?;
-                                        let trait_name = utils::def_name(trait_local_def_id, tcx)?;
-                                        return (trait_name.as_str() == "Config")
-                                            .then_some(trait_local_def_id);
+                                        let trait_name = utils::def_name(trait_def_id, tcx)?;
+                                        if trait_name.as_str() == "Config" {
+                                            return trait_def_id.as_local();
+                                        }
                                     }
                                     None
                                 })
@@ -246,11 +246,18 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                 let call_info = concrete_calls
                     .get(local_def_id)
                     .map(|(terminator, body)| (terminator, *body));
+                let mut trait_def_id_opt = None;
+                if pub_fn_local_def_ids.contains(local_def_id) {
+                    trait_def_id_opt = impl_for_assoc_item(local_def_id.to_def_id(), tcx)
+                        .and_then(|(_, impl_)| impl_.of_trait)
+                        .and_then(|trait_ref| trait_ref.trait_def_id());
+                }
                 let entry_point_result = compose_entry_point(
                     *local_def_id,
                     &generics,
                     pallet_struct_local_def_id,
                     call_info,
+                    trait_def_id_opt,
                     &mut param_ty_subs,
                     tcx,
                 );
@@ -263,13 +270,8 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
                     let def_path_hash = hir.def_path_hash(*local_def_id);
                     entry_points.insert(name, (content, def_path_hash, call_kind));
                     used_items.extend(local_used_items);
-                    if pub_fn_local_def_ids.contains(local_def_id) {
-                        let trait_def_id = impl_for_assoc_item(local_def_id.to_def_id(), tcx)
-                            .and_then(|(_, impl_)| impl_.of_trait)
-                            .and_then(|trait_ref| trait_ref.trait_def_id());
-                        if let Some(trait_def_id) = trait_def_id {
-                            used_items.insert(trait_def_id);
-                        }
+                    if let Some(trait_def_id) = trait_def_id_opt {
+                        used_items.insert(trait_def_id);
                     }
                 } else if call_kind == CallKind::Dispatchable
                     || !intra_calls.contains_key(local_def_id)
@@ -596,13 +598,10 @@ fn pallet_pub_fn_ids(
     results
 }
 
-/// Verifies that the definition is a local `struct` named `Pallet`.
+/// Verifies that the definition is a `struct` named `Pallet`.
 fn is_pallet_struct(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
     tcx.def_kind(def_id) == DefKind::Struct
-        && def_id.as_local().is_some_and(|local_def_id| {
-            return utils::def_name(local_def_id, tcx)
-                .is_some_and(|name| name.as_str() == "Pallet");
-        })
+        && utils::def_name(def_id, tcx).is_some_and(|name| name.as_str() == "Pallet")
 }
 
 /// Verifies that the generics include a `T: Config` bound.
@@ -613,12 +612,11 @@ fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
             bound_info.bounds.iter().any(|bound| {
                 bound.trait_ref().is_some_and(|trait_ref| {
                     if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
-                        return trait_def_id.as_local().is_some_and(|trait_local_def_id| {
-                            utils::def_name(trait_local_def_id, tcx)
-                                .is_some_and(|trait_name| trait_name.as_str() == "Config")
-                        });
+                        utils::def_name(trait_def_id, tcx)
+                            .is_some_and(|trait_name| trait_name.as_str() == "Config")
+                    } else {
+                        false
                     }
-                    false
                 })
             })
         })
@@ -633,6 +631,7 @@ fn compose_entry_point<'tcx>(
     pallet_generics: &Generics<'tcx>,
     pallet_struct_local_def_id: LocalDefId,
     call_info: Option<(&Terminator<'tcx>, &Body<'tcx>)>,
+    trait_def_id: Option<DefId>,
     param_ty_subs: &mut FxHashMap<String, String>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<(String, String, FxHashSet<DefId>)> {
@@ -701,12 +700,49 @@ fn compose_entry_point<'tcx>(
     let mut used_items = FxHashSet::default();
     let mut item_defs = FxHashSet::default();
 
+    // Extracts trait name, path and ty args (if any).
+    let trait_name = trait_def_id.and_then(|trait_def_id| utils::def_name(trait_def_id, tcx));
+    let trait_path = trait_def_id.map(|trait_def_id| tcx.def_path_str(trait_def_id));
+    let hir = tcx.hir();
+    let trait_impl = trait_def_id.and_then(|trait_def_id| {
+        hir.trait_impls(trait_def_id)
+            .iter()
+            .find_map(|impl_local_def_id| {
+                let node = tcx.hir_node_by_def_id(*impl_local_def_id);
+                if let rustc_hir::Node::Item(item) = node {
+                    if let rustc_hir::ItemKind::Impl(impl_) = item.kind {
+                        let is_pallet_impl = adt_for_impl(impl_).is_some_and(|adt_def_id| {
+                            adt_def_id == pallet_struct_local_def_id.to_def_id()
+                        });
+                        return is_pallet_impl.then_some(impl_);
+                    }
+                }
+                None
+            })
+    });
+    let trait_gen_args = trait_impl
+        .and_then(|trait_impl| trait_impl.of_trait)
+        .and_then(|trait_ref| trait_ref.path.segments.last())
+        .map(|segment| segment.args().args);
+    let specialized_trait_args = trait_gen_args.map(|trait_gen_args| {
+        let specialized_trait_args = trait_gen_args
+            .iter()
+            .filter_map(|arg| match arg {
+                rustc_hir::GenericArg::Type(ty) => Some(
+                    tractable_param_hir_type(ty, pallet_generics, &mut used_items, tcx)
+                        .unwrap_or_else(|| "_".to_owned()),
+                ),
+                _ => None,
+            })
+            .join(", ");
+        format!("<{specialized_trait_args}>")
+    });
+
     // Composes entry point params, and corresponding `fn` call args.
     let mut params = Vec::new();
     let mut args = Vec::new();
     let mut locals = FxHashSet::default();
     let hir_id = tcx.local_def_id_to_hir_id(fn_local_def_id);
-    let hir = tcx.hir();
     let hir_body_id = hir.body_owned_by(fn_local_def_id);
     let hir_body = hir.body(hir_body_id);
     let fn_params = hir_body.params;
@@ -948,7 +984,13 @@ fn compose_entry_point<'tcx>(
     }
 
     // Composes entry point.
-    let name = format!("{ENTRY_POINT_FN_PREFIX}{fn_name}");
+    let name = format!(
+        "{ENTRY_POINT_FN_PREFIX}{}{fn_name}",
+        trait_name
+            .map(|name| format!("{name}__"))
+            .as_deref()
+            .unwrap_or("")
+    );
     let params_list = params.join(", ");
     let args_list = args.join(", ");
     let assign_decls = stmts
@@ -972,8 +1014,19 @@ fn compose_entry_point<'tcx>(
 pub fn {name}({params_list}) {{
     {assign_decls}
 
-    crate::{pallet_struct_path}{pallet_turbofish_args}::{fn_name}{fn_turbofish_args}({args_list});
-}}"
+    {}crate::{pallet_struct_path}{pallet_turbofish_args}{}::{fn_name}{fn_turbofish_args}({args_list});
+}}",
+        match trait_path {
+            Some(_) => "<",
+            None => "",
+        },
+        trait_path
+            .map(|trait_path| format!(
+                " as {trait_path}{}>",
+                specialized_trait_args.as_deref().unwrap_or("")
+            ))
+            .as_deref()
+            .unwrap_or(""),
     );
     Some((name, content, used_items))
 }
@@ -1740,13 +1793,13 @@ fn tractable_param_type(
     for gen_ty in ty.walk().filter_map(GenericArg::as_type) {
         if let TyKind::Adt(def, _) = gen_ty.peel_refs().kind() {
             let def_id = def.did();
-            if let Some(local_def_id) = def_id.as_local() {
+            if def_id.is_local() {
                 let gen_ty_path = tcx.def_path_str(def_id);
                 let resolvable_ty_path = if is_visible_from_crate_root(def_id, tcx) {
                     format!("crate::{gen_ty_path}")
                 } else {
                     used_items.insert(def_id);
-                    utils::def_name(local_def_id, tcx)
+                    utils::def_name(def_id, tcx)
                         .expect("Expected local definition name")
                         .to_string()
                 };
