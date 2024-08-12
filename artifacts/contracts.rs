@@ -88,3 +88,20 @@ pub mod log {
         noop!(log);
     }
 }
+
+pub mod trie_db {
+    pub mod triedbmut {
+        pub mod implement_trie_db_triedbmut_TrieDBMut_generic_par_L {
+            noop_result_custom_ty!(db);
+            noop_result_custom_ty!(db_mut);
+            noop!(commit);
+            noop!(drop);
+            noop_result_custom_ty!(root);
+            noop_result!(is_empty, bool);
+            noop_result_custom_ty!(get);
+            noop_result_custom_ty!(insert);
+            noop_result_custom_ty!(remove);
+            noop_result_custom_ty!(contains);
+        }
+    }
+}
