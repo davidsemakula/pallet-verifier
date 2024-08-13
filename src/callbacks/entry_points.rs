@@ -999,15 +999,11 @@ fn compose_entry_point<'tcx>(
         .map(|(snippet, _)| snippet)
         .join("\n    ");
     let pallet_struct_path = tcx.def_path_str(pallet_struct_local_def_id);
-    let pallet_turbofish_args = turbofish_args(
-        pallet_generics.ty_args.clone().into_iter(),
-        &mut used_items,
-        tcx,
-    );
+    let pallet_turbofish_args = turbofish_args(&pallet_generics.ty_args, &mut used_items, tcx);
     let fn_turbofish_args = if fn_ty_args.is_empty() {
         String::new()
     } else {
-        turbofish_args(fn_ty_args.into_iter(), &mut used_items, tcx)
+        turbofish_args(&fn_ty_args, &mut used_items, tcx)
     };
     let content = format!(
         r"
@@ -2200,15 +2196,16 @@ fn is_test_only_item(hir_id: HirId, tcx: TyCtxt<'_>) -> bool {
 
 /// Creates turbofish args from a list of type args.
 fn turbofish_args<'tcx>(
-    args: impl Iterator<Item = Ty<'tcx>>,
+    args: &[Ty<'tcx>],
     used_items: &mut FxHashSet<DefId>,
     tcx: TyCtxt<'tcx>,
 ) -> String {
     format!(
         "::<{}>",
-        args.map(|ty| {
-            tractable_param_type(&ty, used_items, tcx).unwrap_or_else(|| "_".to_owned())
-        })
-        .join(", ")
+        args.iter()
+            .map(|ty| {
+                tractable_param_type(ty, used_items, tcx).unwrap_or_else(|| "_".to_owned())
+            })
+            .join(", ")
     )
 }

@@ -42,6 +42,10 @@ Run the following command from the crate root of a FRAME pallet
 cargo verify-pallet
 ```
 
+**NOTE:** `pallet-verifier` compiles the target FRAME pallet code in "test mode" (i.e. the equivalent of running 
+`cargo test` or `rustc --test`), so you'll need to ensure that all prerequisites for test compilation 
+are installed and/or configured properly, otherwise compilation will fail.
+
 ## License
 
 Licensed under either [MIT](/LICENSE-MIT) or [Apache-2.0](/LICENSE-APACHE) license at your option.
