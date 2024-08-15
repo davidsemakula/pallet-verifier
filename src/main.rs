@@ -9,6 +9,7 @@ use std::{
 };
 
 const COMMAND: &str = "cargo verify-pallet";
+const ENV_PKG_NAME: &str = "PALLET_VERIFIER_PKG_NAME";
 
 fn main() {
     // Shows help and version messages (and exits, if necessary).
@@ -27,6 +28,13 @@ fn main() {
         // Ref: <https://doc.rust-lang.org/cargo/reference/build-scripts.html>
         command if cli_utils::is_rustc_path(command) => {
             let is_primary_package = env::var("CARGO_PRIMARY_PACKAGE").is_ok();
+            let is_analysis_target = || {
+                let target_pkg_name = env::var(ENV_PKG_NAME);
+                target_pkg_name.is_err()
+                    || target_pkg_name.is_ok_and(|target_pkg| {
+                        env::var("CARGO_PKG_NAME").is_ok_and(|cargo_pkg| target_pkg == cargo_pkg)
+                    })
+            };
             // Checks whether the current target is a build script.
             let is_build_script = || {
                 // First `*.rs` CLI argument should be a `build.rs` file.
@@ -44,7 +52,7 @@ fn main() {
                             .is_some_and(|arg| arg.ends_with("crate-name"))
                 })
             };
-            if is_primary_package && !is_build_script() {
+            if is_primary_package && is_analysis_target() && !is_build_script() {
                 // Analyzes "primary" package with `pallet-verifier`.
                 call_pallet_verifier();
             } else {
@@ -67,6 +75,14 @@ fn call_cargo() {
     cmd.arg("test");
     cmd.arg("--lib");
     cmd.arg("--no-run");
+
+    let metadata = cargo_metadata::MetadataCommand::new().exec();
+    if let Ok(metadata) = metadata {
+        if let Some(root_package) = metadata.root_package() {
+            cmd.args(["-p", &root_package.name]);
+            cmd.env(ENV_PKG_NAME, &root_package.name);
+        }
+    }
 
     // Sets `RUSTC_WRAPPER` to `pallet-verifier` (specifically this cargo subcommand).
     // Ref: <https://doc.rust-lang.org/cargo/reference/config.html#buildrustc-wrapper>
