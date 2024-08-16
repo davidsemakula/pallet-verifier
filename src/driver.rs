@@ -10,6 +10,7 @@ mod cli_utils;
 
 use std::{env, path::Path, process};
 
+use cli_utils::ENV_DEP_RENAMES;
 use pallet_verifier::{
     DefaultCallbacks, EntryPointsCallbacks, VerifierCallbacks, VirtualFileLoader,
     CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
@@ -74,7 +75,13 @@ fn main() {
     }
 
     // Generates tractable entry points for FRAME pallet.
-    let mut entry_point_callbacks = EntryPointsCallbacks::default();
+    let dep_renames = env::var(ENV_DEP_RENAMES)
+        .ok()
+        .and_then(|dep_renames_json| {
+            serde_json::from_str::<rustc_hash::FxHashMap<String, String>>(&dep_renames_json).ok()
+        })
+        .unwrap_or_default();
+    let mut entry_point_callbacks = EntryPointsCallbacks::new(&dep_renames);
     let entry_point_compiler =
         rustc_driver::RunCompiler::new(&cli_args, &mut entry_point_callbacks);
     let entry_point_result = entry_point_compiler.run();

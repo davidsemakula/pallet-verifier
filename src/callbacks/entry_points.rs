@@ -34,17 +34,29 @@ use crate::{CallKind, ENTRY_POINT_FN_PREFIX};
 /// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.call.html>
 ///
 /// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#entry-points>
-#[derive(Default)]
-pub struct EntryPointsCallbacks {
+pub struct EntryPointsCallbacks<'compilation> {
     /// Map from generated entry point `fn` names and their definitions, a stable `DefPathHash`
     /// of the target pallet `fn` and it's [`CallKind`].
     entry_points: FxHashMap<String, (String, DefPathHash, CallKind)>,
     /// Use declarations and item definitions for generated entry points.
     use_decls: FxHashSet<String>,
     item_defs: FxHashSet<String>,
+    // Map from crate name to it's rename (e.g. as defined in `Cargo.toml` or via `--extern` rustc flag).
+    dep_renames: &'compilation FxHashMap<String, String>,
 }
 
-impl rustc_driver::Callbacks for EntryPointsCallbacks {
+impl<'compilation> EntryPointsCallbacks<'compilation> {
+    pub fn new(dep_renames: &'compilation FxHashMap<String, String>) -> Self {
+        Self {
+            entry_points: FxHashMap::default(),
+            use_decls: FxHashSet::default(),
+            item_defs: FxHashSet::default(),
+            dep_renames,
+        }
+    }
+}
+
+impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation> {
     fn after_analysis<'tcx>(
         &mut self,
         compiler: &rustc_interface::interface::Compiler,
@@ -295,7 +307,13 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
             }
 
             // Collects use declarations or copies/re-defines used items.
-            process_used_items(used_items, &mut use_decls, &mut item_defs, tcx);
+            process_used_items(
+                used_items,
+                &mut use_decls,
+                &mut item_defs,
+                self.dep_renames,
+                tcx,
+            );
         });
 
         if entry_points.is_empty() {
@@ -342,7 +360,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks {
     }
 }
 
-impl EntryPointsCallbacks {
+impl<'compilation> EntryPointsCallbacks<'compilation> {
     /// Returns module content for all generated tractable entry points (if any).
     pub fn entry_points_content(&self) -> Option<String> {
         (!self.entry_points.is_empty()).then(|| {
@@ -358,6 +376,7 @@ impl EntryPointsCallbacks {
 #![allow(unused)]
 #![allow(nonstandard_style)]
 #![allow(private_interfaces)]
+#![allow(deprecated)]
 
 use crate::*;
 {use_decls}
@@ -1035,6 +1054,7 @@ fn process_used_items(
     used_items: FxHashSet<DefId>,
     use_decls: &mut FxHashSet<String>,
     item_defs: &mut FxHashSet<String>,
+    dep_renames: &FxHashMap<String, String>,
     tcx: TyCtxt<'_>,
 ) {
     let hir = tcx.hir();
@@ -1071,6 +1091,17 @@ fn process_used_items(
             if is_importable && is_stable_or_enabled {
                 if !item_def_id.is_local() || is_visible_from_crate_root(item_def_id, tcx) {
                     // Add use declaration for foreign items, and local items that are visible from the crate root.
+                    let mut def_path = tcx.def_path_str(item_def_id);
+                    if !item_def_id.is_local() {
+                        let crate_def_id = item_def_id.krate.as_def_id();
+                        let crate_name = tcx.def_path_str(crate_def_id);
+                        if let Some(rename) = dep_renames.get(&crate_name) {
+                            if def_path.starts_with(&crate_name) {
+                                def_path =
+                                    format!("{rename}{}", def_path.trim_start_matches(&crate_name));
+                            }
+                        }
+                    }
                     use_decls.insert(format!(
                         "use {}{}{};",
                         if item_def_id.is_local() {
@@ -1078,7 +1109,7 @@ fn process_used_items(
                         } else {
                             ""
                         },
-                        tcx.def_path_str(item_def_id),
+                        def_path,
                         match item_alias {
                             Some(name) => format!(" as {name}"),
                             None => String::new(),

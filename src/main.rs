@@ -8,6 +8,8 @@ use std::{
     process::{self, Command},
 };
 
+use cli_utils::ENV_DEP_RENAMES;
+
 const COMMAND: &str = "cargo verify-pallet";
 const ENV_PKG_NAME: &str = "PALLET_VERIFIER_PKG_NAME";
 
@@ -76,11 +78,25 @@ fn call_cargo() {
     cmd.arg("--lib");
     cmd.arg("--no-run");
 
+    // Persists some crate metadata.
     let metadata = cargo_metadata::MetadataCommand::new().exec();
     if let Ok(metadata) = metadata {
         if let Some(root_package) = metadata.root_package() {
             cmd.args(["-p", &root_package.name]);
             cmd.env(ENV_PKG_NAME, &root_package.name);
+
+            let dep_renames: std::collections::HashMap<_, _> = root_package
+                .dependencies
+                .iter()
+                .filter_map(|dep| {
+                    dep.rename
+                        .as_deref()
+                        .map(|rename| (dep.name.replace('-', "_"), rename.replace('-', "_")))
+                })
+                .collect();
+            if let Ok(dep_renames_json) = serde_json::to_string(&dep_renames) {
+                cmd.env(ENV_DEP_RENAMES, dep_renames_json);
+            }
         }
     }
 

@@ -5,6 +5,8 @@ use std::{
     process::{self, Command},
 };
 
+pub const ENV_DEP_RENAMES: &str = "PALLET_VERIFIER_DEP_RENAMES";
+
 /// Shows help and version messages (and exits, if necessary).
 ///
 /// **NOTE:** We let `rustc` handle help and version messages
