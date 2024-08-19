@@ -42,11 +42,11 @@ pub struct EntryPointsCallbacks<'compilation> {
     use_decls: FxHashSet<String>,
     item_defs: FxHashSet<String>,
     // Map from crate name to it's rename (e.g. as defined in `Cargo.toml` or via `--extern` rustc flag).
-    dep_renames: &'compilation FxHashMap<String, String>,
+    dep_renames: &'compilation Option<FxHashMap<String, String>>,
 }
 
 impl<'compilation> EntryPointsCallbacks<'compilation> {
-    pub fn new(dep_renames: &'compilation FxHashMap<String, String>) -> Self {
+    pub fn new(dep_renames: &'compilation Option<FxHashMap<String, String>>) -> Self {
         Self {
             entry_points: FxHashMap::default(),
             use_decls: FxHashSet::default(),
@@ -311,7 +311,7 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                 used_items,
                 &mut use_decls,
                 &mut item_defs,
-                self.dep_renames,
+                self.dep_renames.as_ref(),
                 tcx,
             );
         });
@@ -1054,7 +1054,7 @@ fn process_used_items(
     used_items: FxHashSet<DefId>,
     use_decls: &mut FxHashSet<String>,
     item_defs: &mut FxHashSet<String>,
-    dep_renames: &FxHashMap<String, String>,
+    dep_renames: Option<&FxHashMap<String, String>>,
     tcx: TyCtxt<'_>,
 ) {
     let hir = tcx.hir();
@@ -1095,7 +1095,8 @@ fn process_used_items(
                     if !item_def_id.is_local() {
                         let crate_def_id = item_def_id.krate.as_def_id();
                         let crate_name = tcx.def_path_str(crate_def_id);
-                        if let Some(rename) = dep_renames.get(&crate_name) {
+                        let crate_rename = dep_renames.and_then(|renames| renames.get(&crate_name));
+                        if let Some(rename) = crate_rename {
                             if def_path.starts_with(&crate_name) {
                                 def_path =
                                     format!("{rename}{}", def_path.trim_start_matches(&crate_name));
