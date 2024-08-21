@@ -8,13 +8,19 @@
 
 macro_rules! noop {
     ($name:ident) => {
-        pub fn $name() {}
+        noop!(pub, $name);
+    };
+    ($vis: vis, $name:ident) => {
+        $vis fn $name() {}
     };
 }
 
 macro_rules! noop_result {
     ($name:ident, $res: ty) => {
-        pub fn $name() -> $res {
+        noop_result!(pub, $name, $res);
+    };
+    ($vis: vis, $name:ident, $res: ty) => {
+        $vis fn $name() -> $res {
             mirai_annotations::result!()
         }
     };
@@ -22,10 +28,107 @@ macro_rules! noop_result {
 
 macro_rules! noop_result_custom_ty {
     ($name:ident) => {
-        pub fn $name<T>() -> T {
+        noop_result_custom_ty!(pub, $name);
+    };
+    ($vis: vis, $name:ident) => {
+        $vis fn $name<T>() -> T {
             mirai_annotations::result!()
         }
     };
+}
+
+/* Rust standard library */
+pub mod alloc {
+    pub mod alloc {
+        noop_result!(exchange_malloc, *mut u8);
+    }
+}
+
+pub mod std {
+    pub mod thread {
+        pub mod local {
+            pub mod implement_std_thread_local_LocalKey_generic_par_T {
+                noop_result_custom_ty!(try_with);
+            }
+        }
+    }
+}
+
+/* Substrate and FRAME primitives */
+pub mod sp_arithmetic {
+    pub mod biguint {
+        noop_result!(add_single, (u32, u32));
+        noop_result!(mul_single, u64);
+        noop_result!(split, (u32, u32));
+    }
+
+    pub mod helpers_128bit {
+        noop_result!(gcd, u128);
+        noop_result!(multiply_by_rational_with_rounding, Option<u128>);
+        noop_result!(split, (u64, u64));
+        noop_result!(sqrt, u128);
+        noop_result_custom_ty!(to_big_uint);
+    }
+
+    pub mod per_things {
+        pub trait PerThing {
+            noop_result_custom_ty!(, square);
+
+            noop_result_custom_ty!(, mul_floor);
+            noop_result_custom_ty!(, mul_ceil);
+
+            noop_result_custom_ty!(, saturating_reciprocal_mul);
+            noop_result_custom_ty!(, saturating_reciprocal_mul_floor);
+            noop_result_custom_ty!(, saturating_reciprocal_mul_ceil);
+
+            noop_result_custom_ty!(, from_rational);
+            noop_result_custom_ty!(, from_rational_approximation);
+        }
+
+        macro_rules! per_thing {
+            ($name:ident, $ty: ty) => {
+                pub mod $name {
+                    noop_result_custom_ty!(from_parts);
+                    noop_result_custom_ty!(from_percent);
+                    noop_result_custom_ty!(from_float);
+                    noop_result_custom_ty!(from_rational);
+                    noop_result_custom_ty!(from_rational_approximation);
+                    noop_result_custom_ty!(from_perthousand);
+
+                    noop_result!(deconstruct, $ty);
+
+                    noop_result_custom_ty!(mul);
+                    noop_result_custom_ty!(div);
+                    noop_result_custom_ty!(pow);
+                    noop_result_custom_ty!(square);
+
+                    noop_result_custom_ty!(int_mul);
+                    noop_result!(int_div, $ty);
+
+                    noop_result_custom_ty!(mul_floor);
+                    noop_result_custom_ty!(mul_ceil);
+
+                    noop_result_custom_ty!(saturating_reciprocal_mul);
+                    noop_result_custom_ty!(saturating_reciprocal_mul_floor);
+                    noop_result_custom_ty!(saturating_reciprocal_mul_ceil);
+                    noop_result_custom_ty!(saturating_div);
+                }
+            };
+        }
+
+        per_thing!(implement_sp_arithmetic_per_things_Percent, u8);
+        per_thing!(implement_sp_arithmetic_per_things_PerU16, u16);
+        per_thing!(implement_sp_arithmetic_per_things_Permill, u32);
+        per_thing!(implement_sp_arithmetic_per_things_Perbill, u32);
+        per_thing!(implement_sp_arithmetic_per_things_Perquintill, u64);
+    }
+
+    pub mod traits {
+        pub mod implement_generic_par_T {
+            noop_result_custom_ty!(saturating_mul);
+            noop_result_custom_ty!(saturating_pow);
+        }
+    }
 }
 
 pub mod sp_io {
@@ -67,26 +170,48 @@ pub mod sp_io {
     }
 }
 
-pub mod alloc {
-    pub mod alloc {
-        noop_result!(exchange_malloc, *mut u8);
+pub mod sp_npos_elections {
+    pub mod reduce {
+        noop_result!(reduce, u32);
     }
 }
 
-pub mod std {
-    pub mod thread {
-        pub mod local {
-            pub mod implement_std_thread_local_LocalKey_generic_par_T {
-                noop_result_custom_ty!(try_with);
-            }
-        }
-    }
-}
-
+/* Common crates in Substrate and FRAME primitives */
 pub mod log {
     pub mod __private_api {
         noop!(log);
     }
+}
+
+pub mod primitive_types {
+    macro_rules! primitive_type {
+        ($name:ident) => {
+            pub mod $name {
+                noop_result_custom_ty!(div_mod);
+                noop_result_custom_ty!(integer_sqrt);
+                noop_result_custom_ty!(pow);
+                noop_result_custom_ty!(overflowing_pow);
+                noop_result_custom_ty!(checked_pow);
+
+                noop_result_custom_ty!(overflowing_mul);
+                noop_result_custom_ty!(saturating_mul);
+                noop_result_custom_ty!(checked_mul);
+                noop_result_custom_ty!(checked_div);
+                noop_result_custom_ty!(checked_rem);
+                noop_result_custom_ty!(full_mul);
+
+                noop_result_custom_ty!(div);
+                noop!(div_assign);
+
+                noop_result_custom_ty!(mul);
+                noop!(mul_assign);
+            }
+        };
+    }
+
+    primitive_type!(implement_primitive_types_U128);
+    primitive_type!(implement_primitive_types_U256);
+    primitive_type!(implement_primitive_types_U512);
 }
 
 pub mod trie_db {
