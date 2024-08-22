@@ -230,3 +230,138 @@ pub mod trie_db {
         }
     }
 }
+
+pub mod wasmi {
+    pub mod engine {
+        mod config {
+            pub mod implement_wasmi_engine_config_Config {
+                noop_result_custom_ty!(set_stack_limits);
+                noop_result_custom_ty!(set_cached_stacks);
+                noop_result_custom_ty!(wasm_mutable_global);
+                noop_result_custom_ty!(wasm_sign_extension);
+                noop_result_custom_ty!(wasm_saturating_float_to_int);
+                noop_result_custom_ty!(wasm_multi_value);
+                noop_result_custom_ty!(wasm_bulk_memory);
+                noop_result_custom_ty!(wasm_reference_types);
+                noop_result_custom_ty!(wasm_tail_call);
+                noop_result_custom_ty!(wasm_extended_const);
+                noop_result_custom_ty!(floats);
+                noop_result_custom_ty!(consume_fuel);
+                noop_result_custom_ty!(ignore_custom_sections);
+                noop_result_custom_ty!(compilation_mode);
+                noop_result_custom_ty!(enforced_limits);
+
+                noop_result_custom_ty!(stack_limits);
+                noop_result_custom_ty!(cached_stacks);
+
+                noop_result_custom_ty!(get_consume_fuel);
+                noop_result_custom_ty!(get_ignore_custom_sections);
+                noop_result_custom_ty!(fuel_costs);
+                noop_result_custom_ty!(get_compilation_mode);
+                noop_result_custom_ty!(get_enforced_limits);
+                noop_result_custom_ty!(wasm_features);
+            }
+        }
+
+        pub mod implement_wasmi_engine_Engine {
+            noop_result_custom_ty!(new);
+            noop_result_custom_ty!(weak);
+            noop_result_custom_ty!(config);
+            noop_result_custom_ty!(same);
+
+            noop_result_custom_ty!(alloc_func_type);
+            noop_result_custom_ty!(resolve_func_type);
+            noop_result_custom_ty!(alloc_funcs);
+
+            noop_result_custom_ty!(translate_func);
+            noop_result_custom_ty!(get_translation_allocs);
+            noop_result_custom_ty!(get_allocs);
+            noop_result_custom_ty!(recycle_translation_allocs);
+            noop_result_custom_ty!(recycle_allocs);
+            noop_result_custom_ty!(resolve_instr);
+            noop_result_custom_ty!(execute_func);
+            noop_result_custom_ty!(execute_func_resumable);
+            noop_result_custom_ty!(resume_func);
+            noop_result_custom_ty!(recycle_stack);
+        }
+    }
+
+    pub mod linker {
+        pub mod implement_wasmi_linker_Linker_generic_par_T {
+            noop_result_custom_ty!(new);
+            noop_result_custom_ty!(build);
+            noop_result_custom_ty!(engine);
+            noop_result_custom_ty!(define);
+            noop_result_custom_ty!(func_new);
+            noop_result_custom_ty!(func_wrap);
+            noop_result_custom_ty!(get);
+            noop_result_custom_ty!(instantiate);
+        }
+    }
+
+    pub mod memory {
+        pub mod implement_wasmi_memory_Memory {
+            noop_result_custom_ty!(new);
+            noop_result_custom_ty!(new_static);
+            noop_result_custom_ty!(ty);
+            noop_result!(size, u32);
+            noop_result_custom_ty!(grow);
+            noop_result_custom_ty!(data);
+            noop_result_custom_ty!(data_mut);
+            noop_result_custom_ty!(data_and_store_mut);
+            noop_result!(data_ptr, *mut u8);
+            noop_result!(data_size, usize);
+            noop_result_custom_ty!(read);
+            noop_result_custom_ty!(write);
+
+            noop_result_custom_ty!(from_inner);
+            noop_result_custom_ty!(as_inner);
+
+            noop_result_custom_ty!(dynamic_ty);
+        }
+    }
+
+    pub mod module {
+        pub mod implement_wasmi_module_Module {
+            noop_result_custom_ty!(new);
+            noop_result_custom_ty!(new_streaming);
+            noop_result_custom_ty!(new_unchecked);
+            noop_result_custom_ty!(new_streaming_unchecked);
+            noop_result_custom_ty!(engine);
+            noop_result_custom_ty!(validate);
+            noop_result_custom_ty!(imports);
+            noop_result_custom_ty!(exports);
+            noop_result_custom_ty!(get_export);
+            noop_result_custom_ty!(custom_sections);
+
+            noop_result!(len_funcs, usize);
+            noop_result!(len_tables, usize);
+            noop_result!(len_memories, usize);
+            noop_result!(len_globals, usize);
+            noop_result_custom_ty!(func_types_cloned);
+            noop_result_custom_ty!(internal_funcs);
+        }
+    }
+
+    pub mod store {
+        pub mod implement_wasmi_store_Store_generic_par_T {
+            noop_result_custom_ty!(new);
+            noop_result_custom_ty!(engine);
+            noop_result_custom_ty!(data);
+            noop_result_custom_ty!(data_mut);
+            noop_result_custom_ty!(into_data);
+            noop!(limiter);
+            noop_result_custom_ty!(get_fuel);
+            noop_result_custom_ty!(set_fuel);
+
+            noop_result_custom_ty!(check_new_instances_limit);
+            noop_result_custom_ty!(check_new_memories_limit);
+            noop_result_custom_ty!(check_new_tables_limit);
+            noop_result_custom_ty!(store_inner_and_resource_limiter_ref);
+
+            noop_result_custom_ty!(alloc_trampoline);
+            noop_result_custom_ty!(resolve_memory_and_state_mut);
+            noop_result_custom_ty!(resolve_trampoline);
+        }
+    }
+}

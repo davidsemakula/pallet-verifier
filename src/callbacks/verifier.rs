@@ -317,9 +317,9 @@ fn emit_diagnostics(
                 .any(|mod_span| mod_span.contains(span.source_callsite()))
         })
     };
-    // Checks if diagnostic arises from FRAME and substrate "core" crates
-    // (i.e. substrate primitive/`sp_*` libraries, `frame_support` and `frame_system` pallets,
-    // and SCALE codec libraries.
+    // Checks if diagnostic arises from FRAME, substrate and other "core" crates
+    // (i.e. substrate primitive/`sp_*` libraries, `frame_support`, `frame_system`,
+    // SCALE codec libraries e.t.c).
     let is_span_in_frame_substrate_core = |mspan: &MultiSpan| {
         let is_core_crate = |crate_num: CrateNum| {
             let source_def_id = crate_num.as_def_id();
@@ -328,13 +328,16 @@ fn emit_diagnostics(
                 || matches!(
                     name.as_str(),
                     "frame_support"
-                        | "frame_support_procedural"
                         | "frame_system"
                         | "parity_scale_codec"
-                        | "parity_scale_codec_derive"
                         | "scale_info"
-                        | "scale_info_derive"
+                        | "wasmi"
                 )
+                || name.starts_with("frame_support_")
+                || name.starts_with("frame_system_")
+                || name.starts_with("parity_scale_codec_")
+                || name.starts_with("scale_info_")
+                || name.starts_with("wasmi_")
         };
         mspan.primary_span().is_some_and(|span| {
             if let (Some(source_file), ..) = source_map.span_to_location_info(span) {
