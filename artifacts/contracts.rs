@@ -131,6 +131,39 @@ pub mod sp_arithmetic {
     }
 }
 
+pub mod sp_core {
+    pub mod bandersnatch {
+        pub mod ring_vrf {
+            pub mod implement_sp_core_bandersnatch_ring_vrf_RingVerifierData {
+                noop_result_custom_ty!(decode);
+            }
+
+            pub mod implement_sp_core_bandersnatch_ring_vrf_RingVrfSignature {
+                noop_result_custom_ty!(ring_vrf_verify);
+            }
+        }
+
+        pub mod vrf {
+            pub mod implement_sp_core_bandersnatch_vrf_VrfInput {
+                noop_result_custom_ty!(new);
+            }
+
+            pub mod implement_sp_core_bandersnatch_vrf_VrfPreOutput {
+                noop_result_custom_ty!(make_bytes);
+            }
+        }
+    }
+
+    pub mod sr25519 {
+        pub mod vrf {
+            pub mod implement_sp_core_sr25519_vrf_VrfProof {
+                noop_result!(encode, Vec<u8>);
+                noop_result_custom_ty!(decode);
+            }
+        }
+    }
+}
+
 pub mod sp_io {
     pub mod storage {
         noop!(start_transaction);
@@ -177,9 +210,29 @@ pub mod sp_npos_elections {
 }
 
 /* Common crates in Substrate and FRAME primitives */
+pub mod bandersnatch_vrfs {
+    pub mod ring {
+        noop_result_custom_ty!(make_ring_verifier);
+    }
+
+    pub mod implement_bandersnatch_vrfs_Message {
+        noop_result_custom_ty!(into_vrf_input);
+    }
+}
+
 pub mod log {
     pub mod __private_api {
         noop!(log);
+    }
+}
+
+pub mod memory_db {
+    pub mod implement_memory_db_MemoryDB_generic_par_H_generic_par_KF_generic_par_T {
+        noop_result_custom_ty!(get);
+        noop_result!(contains, bool);
+        noop!(emplace);
+        noop_result_custom_ty!(insert);
+        noop!(remove);
     }
 }
 
@@ -214,7 +267,24 @@ pub mod primitive_types {
     primitive_type!(implement_primitive_types_U512);
 }
 
+pub mod schnorrkel {
+    pub mod vrf {
+        pub mod implement_schnorrkel_vrf_VRFProof {
+            noop_result!(to_bytes, [u8; 64]);
+            noop_result_custom_ty!(from_bytes);
+        }
+    }
+}
+
 pub mod trie_db {
+    pub mod lookup {
+        pub mod implement_trie_db_lookup_Lookup_generic_par_L_generic_par_Q {
+            noop_result_custom_ty!(lookup_first_descendant);
+            noop_result_custom_ty!(look_up);
+            noop_result_custom_ty!(look_up_hash);
+        }
+    }
+
     pub mod triedbmut {
         pub mod implement_trie_db_triedbmut_TrieDBMut_generic_par_L {
             noop_result_custom_ty!(db);
