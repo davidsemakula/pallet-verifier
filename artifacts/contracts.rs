@@ -44,6 +44,41 @@ pub mod alloc {
     }
 }
 
+pub mod core {
+    pub mod fmt {
+        pub mod rt {
+            pub mod implement_core_fmt_rt_Argument {
+                noop_result_custom_ty!(new);
+            }
+        }
+    }
+
+    pub mod ops {
+        pub mod arith {
+            macro_rules! div {
+                ($name:ident, $ty: ty) => {
+                    pub mod $name {
+                        pub fn div(x: $ty, y: $ty) -> $ty {
+                            mirai_annotations::precondition!(y != 0);
+                            mirai_annotations::result!()
+                        }
+                        pub fn div_assign(x: $ty, y: $ty) {
+                            mirai_annotations::precondition!(y != 0);
+                        }
+                    }
+                };
+            }
+
+            div!(implement_usize, usize);
+            div!(implement_u8, u8);
+            div!(implement_u16, u16);
+            div!(implement_u32, u32);
+            div!(implement_u64, u64);
+            div!(implement_u128, u128);
+        }
+    }
+}
+
 pub mod std {
     pub mod thread {
         pub mod local {
