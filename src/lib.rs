@@ -17,7 +17,9 @@
 #![feature(rustc_private)]
 #![feature(new_uninit)]
 
+extern crate rustc_abi;
 extern crate rustc_ast;
+extern crate rustc_const_eval;
 extern crate rustc_data_structures;
 extern crate rustc_driver;
 extern crate rustc_errors;
@@ -25,11 +27,14 @@ extern crate rustc_hash;
 extern crate rustc_hir;
 extern crate rustc_interface;
 extern crate rustc_middle;
+extern crate rustc_mir_transform;
 extern crate rustc_session;
 extern crate rustc_span;
+extern crate rustc_type_ir;
 
 mod callbacks;
 mod file_loader;
+mod providers;
 
 pub use callbacks::{DefaultCallbacks, EntryPointsCallbacks, VerifierCallbacks};
 pub use file_loader::VirtualFileLoader;

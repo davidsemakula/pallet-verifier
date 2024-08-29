@@ -5,7 +5,10 @@ use rustc_errors::{DiagnosticBuilder, Level, MultiSpan, Style, SubDiagnostic};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_interface::interface::Compiler;
-use rustc_middle::ty::{AssocKind, TyCtxt};
+use rustc_middle::{
+    query,
+    ty::{AssocKind, TyCtxt},
+};
 use rustc_span::{
     def_id::{CrateNum, DefId, DefPathHash, LocalDefId},
     Span, Symbol,
@@ -21,7 +24,7 @@ use mirai::{
 use tempfile::TempDir;
 
 use super::utils;
-use crate::{CallKind, CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX};
+use crate::{providers, CallKind, CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks for analyzing FRAME pallet with MIRAI.
 pub struct VerifierCallbacks<'compilation> {
@@ -42,6 +45,14 @@ impl<'compilation> VerifierCallbacks<'compilation> {
 
 impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        // Overrides `optimized_mir` query.
+        config.override_queries = Some(|_, providers| {
+            providers.queries = query::Providers {
+                optimized_mir: providers::optimized_mir,
+                ..providers.queries
+            };
+        });
+
         // Initializes MIRAI config.
         // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L75-L92>
         // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L143-L149>
