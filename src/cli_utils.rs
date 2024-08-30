@@ -1,3 +1,5 @@
+//! Common CLI utilities.
+
 use std::{
     env,
     ffi::OsStr,
@@ -5,6 +7,7 @@ use std::{
     process::{self, Command},
 };
 
+/// Env var for tracking dependency renames from `Cargo.toml`.
 pub const ENV_DEP_RENAMES: &str = "PALLET_VERIFIER_DEP_RENAMES";
 
 /// Shows help and version messages (and exits, if necessary).

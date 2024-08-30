@@ -39,9 +39,12 @@ mod providers;
 pub use callbacks::{DefaultCallbacks, EntryPointsCallbacks, VerifierCallbacks};
 pub use file_loader::VirtualFileLoader;
 
+/// Name of generated `mod` for entry points.
 pub const ENTRY_POINTS_MOD_NAME: &str = "__pallet_verifier_entry_points";
+/// Prefix of generated `fn`s for entry points.
 pub const ENTRY_POINT_FN_PREFIX: &str = "__pallet_verifier_entry_point__";
 
+/// Name of generated `mod` for MIRAI contracts.
 pub const CONTRACTS_MOD_NAME: &str = "foreign_contracts";
 
 /// Kind of pallet `fn`.

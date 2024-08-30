@@ -32,8 +32,7 @@ struct IntCastOverflowChecks;
 
 impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        let local_decls = body.local_decls();
-        let mut visitor = LossyIntCastVisitor::new(tcx, local_decls);
+        let mut visitor = LossyIntCastVisitor::new(tcx, body.local_decls());
         visitor.visit_body(body);
 
         let mut checks = visitor.checks;
@@ -47,7 +46,7 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
         let panic_def_id = tcx
             .lang_items()
             .get(LangItem::Panic)
-            .expect("Missing panic lang item");
+            .expect("Expected panic lang item");
         let panic_msg = "attempt to cast with overflow".as_bytes();
         let panic_msg_const = ConstValue::Slice {
             data: tcx.mk_const_alloc(Allocation::from_bytes(
@@ -96,8 +95,7 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
             let cond_local_decl = LocalDecl::with_source_info(cond_ty, source_info);
             let cond_local = body.local_decls.push(cond_local_decl);
             let cond_place = Place::from(cond_local);
-            let cond_rvalue =
-                Rvalue::BinaryOp(assert_cond, Box::new((val_operand, bound_operand.clone())));
+            let cond_rvalue = Rvalue::BinaryOp(assert_cond, Box::new((val_operand, bound_operand)));
             let cond_stmt = Statement {
                 source_info,
                 kind: StatementKind::Assign(Box::new((cond_place, cond_rvalue))),
@@ -154,7 +152,7 @@ struct LossyIntCastVisitor<'tcx, 'pass> {
     tcx: TyCtxt<'tcx>,
     local_decls: &'pass LocalDecls<'tcx>,
     /// A list of location, assert condition/comparison operation, value and bound operand tuples
-    /// for the overflow/underflow check.
+    /// for overflow/underflow checks.
     checks: Vec<(Location, BinOp, Operand<'tcx>, Operand<'tcx>)>,
 }
 
