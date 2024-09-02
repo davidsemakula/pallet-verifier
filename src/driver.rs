@@ -8,7 +8,7 @@ extern crate rustc_session;
 
 mod cli_utils;
 
-use std::{env, path::Path, process};
+use std::{env, fs, path::Path, process};
 
 use cli_utils::ENV_DEP_RENAMES;
 use pallet_verifier::{
@@ -57,21 +57,24 @@ fn main() {
         // Presumably, this is some kind of direct call to the `pallet-verifier` binary,
         // instead of via `cargo verify-pallet`, so we need to set some extra flags.
         // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
-        cli_args.extend([
-            // Enables compilation of unit tests and test harness generation.
-            // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--test-build-a-test-harness>
-            "--test".to_owned(),
-            // Enables dumping MIR for all functions.
-            // Ref: <https://github.com/rust-lang/rust/blob/master/compiler/rustc_session/src/options.rs#L1632>
-            // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
-            "-Zalways-encode-mir=yes".to_owned(),
-            // Disables debug assertions.
-            // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#debug-assertions>
-            "-Cdebug-assertions=no".to_owned(),
-            // Enables overflow checks.
-            // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#overflow-checks>
-            "-Coverflow-checks=yes".to_owned(),
-        ]);
+        cli_args.extend(
+            [
+                // Enables compilation of unit tests and test harness generation.
+                // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--test-build-a-test-harness>
+                "--test",
+                // Enables dumping MIR for all functions.
+                // Ref: <https://github.com/rust-lang/rust/blob/master/compiler/rustc_session/src/options.rs#L1632>
+                // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
+                "-Zalways-encode-mir=yes",
+                // Disables debug assertions.
+                // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#debug-assertions>
+                "-Cdebug-assertions=no",
+                // Enables overflow checks.
+                // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#overflow-checks>
+                "-Coverflow-checks=yes",
+            ]
+            .map(ToOwned::to_owned),
+        );
     }
 
     // Generates tractable entry points for FRAME pallet.
@@ -98,7 +101,7 @@ fn main() {
     if !has_mirai_annotations_dep {
         let mut annotations_path = env::current_dir().expect("Expected valid current dir");
         annotations_path.push("__pallet_verifier_artifacts/mirai_annotations/src/lib.rs");
-        let out_dir = cli_args
+        let mut out_dir = cli_args
             .iter()
             .enumerate()
             .find_map(|(idx, arg)| {
@@ -115,22 +118,30 @@ fn main() {
                 target_dir.push("target/debug/deps");
                 target_dir
             });
-        let mut annotations_out_file = Path::new(&out_dir).to_path_buf();
-        annotations_out_file.push("libmirai_annotations.rlib");
-        let annotations_out_file_str = annotations_out_file.to_string_lossy();
+        if !out_dir.ends_with("deps") {
+            out_dir.push("deps");
+            fs::create_dir_all(&out_dir).expect("Failed to create `deps` directory");
+        }
+        let mut annotations_out_file = out_dir.clone();
+        let suffix = "pallet-verifier";
+        annotations_out_file.push(format!("libmirai_annotations-{suffix}.rlib"));
         let annotations_args = [
             // NOTE: `rustc` ignores the first argument, so we set that to "pallet-verifier".
-            "pallet-verifier".to_owned(),
-            "--crate-name=mirai_annotations".to_owned(),
-            "--edition=2021".to_owned(),
-            annotations_path.to_string_lossy().to_string(),
-            "--crate-type=lib".to_owned(),
-            "--emit=link".to_owned(),
-            "-o".to_owned(),
-            annotations_out_file_str.to_string(),
-            "--cfg=mirai".to_owned(),
-            "-Zalways_encode_mir=yes".to_owned(),
-        ];
+            "pallet-verifier",
+            "--crate-name=mirai_annotations",
+            "--edition=2021",
+            &format!("{}", annotations_path.display()),
+            "--crate-type=lib",
+            "--emit=dep-info,metadata,link,obj",
+            "-Cembed-bitcode=no",
+            &format!("-Cmetadata={suffix}"),
+            &format!("-Cextra-filename=-{suffix}"),
+            "--out-dir",
+            &format!("{}", out_dir.display()),
+            "--cfg=mirai",
+            "-Zalways_encode_mir=yes",
+        ]
+        .map(ToString::to_string);
         let mut rustc_callbacks = DefaultCallbacks;
         let annotations_file_loader = VirtualFileLoader::new(
             annotations_path,
@@ -148,7 +159,7 @@ fn main() {
             // Add `mirai-annotations` crate as a dependency.
             // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--extern-specify-where-an-external-library-is-located>
             "--extern".to_owned(),
-            format!("mirai_annotations={annotations_out_file_str}"),
+            format!("mirai_annotations={}", annotations_out_file.display()),
         ]);
     }
 
