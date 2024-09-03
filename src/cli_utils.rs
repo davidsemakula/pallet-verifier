@@ -7,6 +7,8 @@ use std::{
     process::{self, Command},
 };
 
+use itertools::Itertools;
+
 /// Env var for tracking dependency renames from `Cargo.toml`.
 pub const ENV_DEP_RENAMES: &str = "PALLET_VERIFIER_DEP_RENAMES";
 
@@ -71,6 +73,21 @@ pub fn is_rustc_path(arg: &str) -> bool {
     Path::new(arg)
         .file_stem()
         .is_some_and(|name| name == "rustc")
+}
+
+/// Returns a command line argument value (if any).
+/// i.e. `value` in `--name value` or `--name=value`.
+pub fn arg_value(name: &str) -> Option<String> {
+    let mut args =
+        env::args().skip_while(|arg| arg != name && !arg.starts_with(&format!("{name}=")));
+    if let Some((_, value)) = args
+        .next()
+        .as_ref()
+        .and_then(|arg| arg.splitn(2, '=').collect_tuple())
+    {
+        return Some(value.to_string());
+    }
+    args.next()
 }
 
 /// Checks if a `rustc` path is the first CLI argument.

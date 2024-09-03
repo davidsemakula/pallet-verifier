@@ -1,0 +1,3 @@
+[net]
+# solve issues with installing vcpkg git submodule
+git-fetch-with-cli = true

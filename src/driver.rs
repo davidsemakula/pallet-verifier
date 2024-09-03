@@ -101,18 +101,8 @@ fn main() {
     if !has_mirai_annotations_dep {
         let mut annotations_path = env::current_dir().expect("Expected valid current dir");
         annotations_path.push("__pallet_verifier_artifacts/mirai_annotations/src/lib.rs");
-        let mut out_dir = cli_args
-            .iter()
-            .enumerate()
-            .find_map(|(idx, arg)| {
-                if arg == "--out-dir" {
-                    cli_args
-                        .get(idx + 1)
-                        .map(|arg| Path::new(arg).to_path_buf())
-                } else {
-                    None
-                }
-            })
+        let mut out_dir = cli_utils::arg_value("--out-dir")
+            .map(|arg| Path::new(&arg).to_path_buf())
             .unwrap_or_else(|| {
                 let mut target_dir = env::current_dir().expect("Expected valid current dir");
                 target_dir.push("target/debug/deps");
@@ -132,7 +122,7 @@ fn main() {
             "--edition=2021",
             &format!("{}", annotations_path.display()),
             "--crate-type=lib",
-            "--emit=dep-info,metadata,link,obj",
+            "--emit=dep-info,metadata,link",
             "-Cembed-bitcode=no",
             &format!("-Cmetadata={suffix}"),
             &format!("-Cextra-filename=-{suffix}"),

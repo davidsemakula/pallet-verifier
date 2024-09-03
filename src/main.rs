@@ -39,20 +39,14 @@ fn main() {
             };
             // Checks whether the current target is a build script.
             let is_build_script = || {
-                // First `*.rs` CLI argument should be a `build.rs` file.
+                // First `*.rs` CLI argument should be a `build.rs` file
+                // and `--crate-name` arg should be `build_script_build`.
                 env::args().any(|arg| {
                     Path::new(&arg)
                         .file_name()
                         .is_some_and(|ext| ext == "build.rs")
-                }) &&
-                // `--crate-name` arg should be `build_script_build`.
-                env::args().enumerate().any(|(idx, arg)| {
-                    arg == "build_script_build"
-                        && idx > 0
-                        && env::args()
-                            .nth(idx - 1)
-                            .is_some_and(|arg| arg.ends_with("crate-name"))
-                })
+                }) && cli_utils::arg_value("--crate-name")
+                    .is_some_and(|crate_name| crate_name == "build_script_build")
             };
             if is_primary_package && is_analysis_target() && !is_build_script() {
                 // Analyzes "primary" package with `pallet-verifier`.
@@ -79,8 +73,11 @@ fn call_cargo() {
     cmd.arg("--no-run");
 
     // Persists some crate metadata.
-    let metadata = cargo_metadata::MetadataCommand::new().exec();
-    if let Ok(metadata) = metadata {
+    let mut metadata_cmd = cargo_metadata::MetadataCommand::new();
+    if let Some(manifest_path) = cli_utils::arg_value("--manifest-path") {
+        metadata_cmd.manifest_path(manifest_path);
+    }
+    if let Ok(metadata) = metadata_cmd.exec() {
         if let Some(root_package) = metadata.root_package() {
             cmd.args(["-p", &root_package.name]);
             cmd.env(ENV_PKG_NAME, &root_package.name);
@@ -112,9 +109,13 @@ fn call_cargo() {
     // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
     // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#debug-assertions>
     // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#overflow-checks>
+    let flags = "-Zalways-encode-mir=yes -Cdebug-assertions=no -Coverflow-checks=yes";
     cmd.env(
         "RUSTFLAGS",
-        "-Zalways-encode-mir=yes -Cdebug-assertions=no -Coverflow-checks=yes",
+        env::var("RUSTFLAGS")
+            .map(|var| format!("{var} {flags}"))
+            .as_deref()
+            .unwrap_or(flags),
     );
 
     // Explicitly set toolchain to match `pallet-verifier`.
