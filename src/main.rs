@@ -53,7 +53,19 @@ fn main() {
                 call_pallet_verifier();
             } else {
                 // Compiles dependencies and build scripts with `rustc`.
-                cli_utils::call_rustc(env::args().skip(2));
+                let args = env::args().skip(2);
+                if cli_utils::arg_value("--crate-name")
+                    .is_some_and(|crate_name| crate_name.starts_with("serde"))
+                {
+                    // TODO: Remove `--cfg no_diagnostic_namespace` when compiler is updated to >= nightly-2024-05-03
+                    // Ref: <https://blog.rust-lang.org/2024/05/02/Rust-1.78.0.html#diagnostic-attributes>
+                    // Ref: <https://github.com/serde-rs/serde/commit/694fe0595358aa0857120a99041d99975b1a8a70#diff-be34659e38d3b07b2dad53cae7b6a6a00860685171d703b524deb72c10d3f4e7R92>
+                    cli_utils::call_rustc(
+                        args.chain(["--cfg", "no_diagnostic_namespace"].map(ToString::to_string)),
+                    );
+                } else {
+                    cli_utils::call_rustc(args);
+                }
             }
         }
         _ => {

@@ -77,9 +77,9 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
             let dispatchable_names = dispatchable_calls(pallet_mod_local_def_id, tcx);
 
             // Finds `DefId`s of dispatchable functions.
+            phase = Phase::FnDefs;
             let mut dispatchable_local_def_ids = FxHashSet::default();
             if !dispatchable_names.is_empty() {
-                phase = Phase::FnDefs;
                 println!("Searching for dispatchable function definitions ...");
                 dispatchable_local_def_ids =
                     dispatchable_ids(&dispatchable_names, pallet_mod_local_def_id, tcx);
@@ -106,7 +106,7 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                 }
             }
 
-            // Finds pallet associated function calls.
+            // Finds pallet associated function definitions.
             println!("Searching for public associated function definitions ...");
             let pub_fn_local_def_ids = pallet_pub_fn_ids(pallet_struct_local_def_id, tcx);
             if dispatchable_local_def_ids.is_empty() && pub_fn_local_def_ids.is_empty() {
@@ -328,11 +328,8 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                 Phase::FnDefs => (
                     "Failed to find definitions for any dispatchable function \
                     in public interface",
-                    Some("This is most likely a bug in pallet-verifier."),
-                    Some(
-                        "Please consider filling a bug report at \
-                        https://github.com/davidsemakula/pallet-verifier/issues",
-                    ),
+                    Some("pallet-verifier can only analyze FRAME dispatchable functions"),
+                    Some("Learn more at https://github.com/davidsemakula/pallet-verifier"),
                 ),
                 _ => (
                     "Failed to generate tractable entry points for any dispatchable function \
