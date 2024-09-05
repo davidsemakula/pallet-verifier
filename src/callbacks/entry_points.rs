@@ -14,6 +14,7 @@ use rustc_middle::{
         visit::Visitor, AggregateKind, Body, HasLocalDecls, Local, LocalDecl, Location, Operand,
         Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
     },
+    query,
     ty::{
         AssocItemContainer, GenericArg, GenericParamDefKind, ImplSubject, Ty, TyCtxt, TyKind,
         Visibility,
@@ -27,7 +28,7 @@ use rustc_span::{
 use itertools::Itertools;
 
 use super::utils;
-use crate::{CallKind, ENTRY_POINT_FN_PREFIX};
+use crate::{providers, CallKind, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions.
 ///
@@ -57,6 +58,16 @@ impl<'compilation> EntryPointsCallbacks<'compilation> {
 }
 
 impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation> {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        // Overrides `optimized_mir` query.
+        config.override_queries = Some(|_, providers| {
+            providers.queries = query::Providers {
+                optimized_mir: providers::optimized_mir,
+                ..providers.queries
+            };
+        });
+    }
+
     fn after_analysis<'tcx>(
         &mut self,
         compiler: &rustc_interface::interface::Compiler,

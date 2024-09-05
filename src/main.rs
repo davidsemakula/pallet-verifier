@@ -4,7 +4,7 @@ mod cli_utils;
 
 use std::{
     env,
-    path::Path,
+    path::{Path, PathBuf},
     process::{self, Command},
 };
 
@@ -44,7 +44,7 @@ fn main() {
                 env::args().any(|arg| {
                     Path::new(&arg)
                         .file_name()
-                        .is_some_and(|ext| ext == "build.rs")
+                        .is_some_and(|name| name == "build.rs")
                 }) && cli_utils::arg_value("--crate-name")
                     .is_some_and(|crate_name| crate_name == "build_script_build")
             };
@@ -107,6 +107,12 @@ fn call_cargo() {
                 cmd.env(ENV_DEP_RENAMES, dep_renames_json);
             }
         }
+    }
+
+    // Sets cargo `--target-dir` arg if it's not already set.
+    if cli_utils::arg_value("--target-dir").is_none() && env::var("CARGO_TARGET_DIR").is_err() {
+        cmd.arg("--target-dir");
+        cmd.arg("target/pallet_verifier");
     }
 
     // Sets `RUSTC_WRAPPER` to `pallet-verifier` (specifically this cargo subcommand).
@@ -174,8 +180,7 @@ fn call_pallet_verifier() {
             .ok()
             .filter(|out| out.status.success())
         {
-            let mut sys_root_path =
-                Path::new(String::from_utf8_lossy(&out.stdout).trim()).to_path_buf();
+            let mut sys_root_path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
             sys_root_path.push("lib");
             add_dy_lib_path(&sys_root_path.to_string_lossy());
         }

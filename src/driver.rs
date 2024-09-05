@@ -8,7 +8,11 @@ extern crate rustc_session;
 
 mod cli_utils;
 
-use std::{env, fs, path::Path, process};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process,
+};
 
 use cli_utils::ENV_DEP_RENAMES;
 use pallet_verifier::{
@@ -102,7 +106,7 @@ fn main() {
         let mut annotations_path = env::current_dir().expect("Expected valid current dir");
         annotations_path.push("__pallet_verifier_artifacts/mirai_annotations/src/lib.rs");
         let mut out_dir = cli_utils::arg_value("--out-dir")
-            .map(|arg| Path::new(&arg).to_path_buf())
+            .map(PathBuf::from)
             .unwrap_or_else(|| {
                 let mut target_dir = env::current_dir().expect("Expected valid current dir");
                 target_dir.push("target/debug/deps");
@@ -159,7 +163,7 @@ fn main() {
         .iter()
         .find(|arg| Path::new(arg).extension().is_some_and(|ext| ext == "rs"))
         .expect("Expected target path as the first `*.rs` argument");
-    let target_path = Path::new(&target_path_str).to_path_buf();
+    let target_path = PathBuf::from(target_path_str);
     let verifier_file_loader = VirtualFileLoader::new(
         target_path,
         None,
