@@ -77,6 +77,14 @@ pub mod core {
             div!(implement_u128, u128);
         }
     }
+
+    pub mod slice {
+        pub mod iter {
+            pub mod implement_core_slice_iter_Iter_generic_par_T {
+                noop_result_custom_ty!(next);
+            }
+        }
+    }
 }
 
 pub mod std {
@@ -90,6 +98,18 @@ pub mod std {
 }
 
 /* Substrate and FRAME primitives */
+pub mod frame_support {
+    pub mod storage {
+        pub mod unhashed {
+            noop_result_custom_ty!(get);
+        }
+
+        pub mod child {
+            noop_result_custom_ty!(get);
+        }
+    }
+}
+
 pub mod sp_arithmetic {
     pub mod biguint {
         noop_result!(add_single, (u32, u32));
