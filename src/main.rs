@@ -61,10 +61,11 @@ fn main() {
                     // Ref: <https://blog.rust-lang.org/2024/05/02/Rust-1.78.0.html#diagnostic-attributes>
                     // Ref: <https://github.com/serde-rs/serde/commit/694fe0595358aa0857120a99041d99975b1a8a70#diff-be34659e38d3b07b2dad53cae7b6a6a00860685171d703b524deb72c10d3f4e7R92>
                     cli_utils::call_rustc(
+                        Some(sub_command),
                         args.chain(["--cfg", "no_diagnostic_namespace"].map(ToString::to_string)),
                     );
                 } else {
-                    cli_utils::call_rustc(args);
+                    cli_utils::call_rustc(Some(sub_command), args);
                 }
             }
         }
@@ -79,46 +80,20 @@ fn main() {
 fn call_cargo() {
     // Builds cargo command.
     // Ref: <https://doc.rust-lang.org/cargo/commands/cargo-test.html>
-    let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    let mut cmd = Command::new("cargo");
     cmd.arg("test");
     cmd.arg("--lib");
     cmd.arg("--no-run");
-
-    // Persists some crate metadata.
-    let mut metadata_cmd = cargo_metadata::MetadataCommand::new();
-    if let Some(manifest_path) = cli_utils::arg_value("--manifest-path") {
-        metadata_cmd.manifest_path(manifest_path);
-    }
-    if let Ok(metadata) = metadata_cmd.exec() {
-        if let Some(root_package) = metadata.root_package() {
-            cmd.args(["-p", &root_package.name]);
-            cmd.env(ENV_PKG_NAME, &root_package.name);
-
-            let dep_renames: std::collections::HashMap<_, _> = root_package
-                .dependencies
-                .iter()
-                .filter_map(|dep| {
-                    dep.rename
-                        .as_deref()
-                        .map(|rename| (dep.name.replace('-', "_"), rename.replace('-', "_")))
-                })
-                .collect();
-            if let Ok(dep_renames_json) = serde_json::to_string(&dep_renames) {
-                cmd.env(ENV_DEP_RENAMES, dep_renames_json);
-            }
-        }
-    }
-
-    // Sets cargo `--target-dir` arg if it's not already set.
-    if cli_utils::arg_value("--target-dir").is_none() && env::var("CARGO_TARGET_DIR").is_err() {
-        cmd.arg("--target-dir");
-        cmd.arg("target/pallet_verifier");
-    }
 
     // Sets `RUSTC_WRAPPER` to `pallet-verifier` (specifically this cargo subcommand).
     // Ref: <https://doc.rust-lang.org/cargo/reference/config.html#buildrustc-wrapper>
     let path = env::current_exe().expect("Expected valid executable path");
     cmd.env("RUSTC_WRAPPER", path);
+
+    // Sets toolchain to match the compile time value (if any).
+    if let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") {
+        cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
 
     // Enables dumping MIR for all functions, and disables debug assertions, and enables overflow checks.
     // Ref: <https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags>
@@ -136,9 +111,46 @@ fn call_cargo() {
             .unwrap_or(flags),
     );
 
-    // Explicitly set toolchain to match `pallet-verifier`.
-    if let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") {
-        cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+    // Retrieves package metadata.
+    let mut metadata_cmd = cargo_metadata::MetadataCommand::new();
+    if let Some(manifest_path) = cli_utils::arg_value("--manifest-path") {
+        metadata_cmd.manifest_path(manifest_path);
+    }
+    let metadata = metadata_cmd.exec();
+
+    // Sets cargo `--target-dir` arg if it's not already set.
+    if cli_utils::arg_value("--target-dir").is_none()
+        && env::var("CARGO_TARGET_DIR").is_err()
+        && env::var("CARGO_BUILD_TARGET_DIR").is_err()
+    {
+        let target_dir = metadata
+            .as_ref()
+            .map(|metadata| metadata.target_directory.as_str())
+            .unwrap_or("target");
+        cmd.arg(format!("--target-dir={target_dir}/pallet_verifier"));
+    }
+
+    // Persists some package metadata.
+    let root_package = metadata
+        .as_ref()
+        .ok()
+        .and_then(|metadata| metadata.root_package());
+    if let Some(root_package) = root_package {
+        cmd.args(["-p", &root_package.name]);
+        cmd.env(ENV_PKG_NAME, &root_package.name);
+
+        let dep_renames: std::collections::HashMap<_, _> = root_package
+            .dependencies
+            .iter()
+            .filter_map(|dep| {
+                dep.rename
+                    .as_deref()
+                    .map(|rename| (dep.name.replace('-', "_"), rename.replace('-', "_")))
+            })
+            .collect();
+        if let Ok(dep_renames_json) = serde_json::to_string(&dep_renames) {
+            cmd.env(ENV_DEP_RENAMES, dep_renames_json);
+        }
     }
 
     // Forwards relevant CLI args (skips cargo and subcommand args).
@@ -174,7 +186,7 @@ fn call_pallet_verifier() {
         add_dy_lib_path(dl_path);
     } else {
         // Composes path from sysroot.
-        let mut sys_root_cmd = cli_utils::rustc(["--print", "sysroot"]);
+        let mut sys_root_cmd = cli_utils::rustc(env::args().nth(1), ["--print", "sysroot"]);
         if let Some(out) = sys_root_cmd
             .output()
             .ok()

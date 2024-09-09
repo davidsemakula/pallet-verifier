@@ -17,16 +17,20 @@ pub const ENV_DEP_RENAMES: &str = "PALLET_VERIFIER_DEP_RENAMES";
 /// **NOTE:** We let `rustc` handle help and version messages
 /// if `pallet-verifier` was called as `RUSTC_WRAPPER`.
 pub fn handle_meta_args(command: &str) {
+    let call_wrapped_rustc = || {
+        // Setting `RUSTC_WRAPPER` causes cargo to pass 'rustc' as the first argument.
+        call_rustc(env::args().nth(1), env::args().skip(2));
+    };
     if env::args().any(|arg| arg == "--help" || arg == "-h") {
         if is_rustc_wrapper_mode() {
-            call_rustc(env::args().skip(2));
+            call_wrapped_rustc();
         } else {
             help(command);
         }
         process::exit(0);
     } else if env::args().any(|arg| arg == "--version" || arg == "-V") {
         if is_rustc_wrapper_mode() {
-            call_rustc(env::args().skip(2));
+            call_wrapped_rustc();
         } else {
             let version_info = rustc_tools_util::get_version_info!();
             println!("{version_info}");
@@ -36,22 +40,25 @@ pub fn handle_meta_args(command: &str) {
 }
 
 /// Calls `rustc` (exits on failure).
-pub fn call_rustc<I, S>(args: I)
+pub fn call_rustc<I, S>(path: Option<String>, args: I)
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut cmd = rustc(args);
+    let mut cmd = rustc(path, args);
     exec_cmd(&mut cmd);
 }
 
 /// Builds `rustc` command.
-pub fn rustc<I, S>(args: I) -> Command
+pub fn rustc<I, S>(path: Option<String>, args: I) -> Command
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut cmd = Command::new(env::var("RUSTC").unwrap_or_else(|_| "rustc".into()));
+    let mut cmd = Command::new(
+        path.or_else(|| env::var("RUSTC").ok())
+            .unwrap_or_else(|| "rustc".to_string()),
+    );
     cmd.args(args);
     cmd
 }

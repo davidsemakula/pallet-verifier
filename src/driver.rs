@@ -46,7 +46,7 @@ fn main() {
 
     // Retrieve command line arguments.
     let mut cli_args: Vec<_> = env::args().collect();
-    // Setting `RUSTC_WRAPPER` causes Cargo to pass 'rustc' as the first argument.
+    // Setting `RUSTC_WRAPPER` causes `cargo` to pass 'rustc' as the first argument.
     // We're invoking the compiler programmatically, so we remove it (if present).
     // Ref: <https://doc.rust-lang.org/cargo/reference/config.html#buildrustc-wrapper>
     // Ref: <https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-reads>
@@ -130,10 +130,10 @@ fn main() {
             "-Cembed-bitcode=no",
             &format!("-Cmetadata={suffix}"),
             &format!("-Cextra-filename=-{suffix}"),
-            "--out-dir",
-            &format!("{}", out_dir.display()),
+            &format!("--out-dir={}", out_dir.display()),
             "--cfg=mirai",
             "-Zalways_encode_mir=yes",
+            "--cap-lints=allow",
         ]
         .map(ToString::to_string);
         let mut rustc_callbacks = DefaultCallbacks;
