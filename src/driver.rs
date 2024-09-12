@@ -119,7 +119,7 @@ fn main() {
         let mut annotations_out_file = out_dir.clone();
         let suffix = "pallet-verifier";
         annotations_out_file.push(format!("libmirai_annotations-{suffix}.rlib"));
-        let annotations_args = [
+        let mut annotations_args = [
             // NOTE: `rustc` ignores the first argument, so we set that to "pallet-verifier".
             "pallet-verifier",
             "--crate-name=mirai_annotations",
@@ -135,7 +135,11 @@ fn main() {
             "-Zalways_encode_mir=yes",
             "--cap-lints=allow",
         ]
-        .map(ToString::to_string);
+        .map(ToString::to_string)
+        .to_vec();
+        if let Some(target) = cli_utils::arg_value("--target") {
+            annotations_args.push(format!("--target={target}"));
+        }
         let mut rustc_callbacks = DefaultCallbacks;
         let annotations_file_loader = VirtualFileLoader::new(
             annotations_path,

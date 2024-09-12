@@ -1,5 +1,7 @@
 //! `rustc` providers for overriding queries.
 
+use std::env;
+
 use rustc_abi::{Align, Size};
 use rustc_const_eval::interpret::{Allocation, Scalar};
 use rustc_hir::LangItem;
@@ -14,6 +16,8 @@ use rustc_middle::{
 };
 use rustc_span::{def_id::LocalDefId, source_map::dummy_spanned, Span};
 use rustc_type_ir::{IntTy, UintTy};
+
+use crate::ENV_TARGET_POINTER_WIDTH;
 
 /// Overrides the `optimized_mir` query.
 pub fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
@@ -145,7 +149,7 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
     }
 }
 
-pub const TARGET_POINTER_WIDTH: usize = std::mem::size_of::<usize>() * 8;
+pub const HOST_POINTER_WIDTH: usize = std::mem::size_of::<usize>() * 8;
 
 /// Collects locations and operands for lossy integer cast operations.
 struct LossyIntCastVisitor<'tcx, 'pass> {
@@ -170,13 +174,19 @@ impl<'tcx, 'pass> Visitor<'tcx> for LossyIntCastVisitor<'tcx, 'pass> {
     fn visit_rvalue(&mut self, rvalue: &Rvalue<'tcx>, location: Location) {
         if let Rvalue::Cast(CastKind::IntToInt, operand, ty) = rvalue {
             let op_ty = operand.ty(self.local_decls, self.tcx);
+            let target_pointer_width = match env::var(ENV_TARGET_POINTER_WIDTH).as_deref() {
+                Ok("16") => 16,
+                Ok("32") => 32,
+                Ok("64") => 64,
+                _ => HOST_POINTER_WIDTH,
+            };
             let bit_width = match op_ty.kind() {
-                TyKind::Uint(uint_ty) => uint_ty.normalize(TARGET_POINTER_WIDTH as u32).bit_width(),
-                TyKind::Int(int_ty) => int_ty.normalize(TARGET_POINTER_WIDTH as u32).bit_width(),
+                TyKind::Uint(uint_ty) => uint_ty.normalize(target_pointer_width as u32).bit_width(),
+                TyKind::Int(int_ty) => int_ty.normalize(target_pointer_width as u32).bit_width(),
                 _ => None,
             };
             if let Some(bit_width) = bit_width {
-                let size = Size::from_bits(bit_width);
+                let host_size = Size::from_bits(bit_width);
                 let max_scalar = match (ty.kind(), op_ty.kind()) {
                     // i8
                     (
@@ -192,7 +202,7 @@ impl<'tcx, 'pass> Visitor<'tcx> for LossyIntCastVisitor<'tcx, 'pass> {
                             | UintTy::U128
                             | UintTy::Usize,
                         ),
-                    ) => ScalarInt::try_from_int(i8::MAX, size),
+                    ) => ScalarInt::try_from_int(i8::MAX, host_size),
                     // u8
                     (
                         TyKind::Uint(UintTy::U8),
@@ -202,148 +212,147 @@ impl<'tcx, 'pass> Visitor<'tcx> for LossyIntCastVisitor<'tcx, 'pass> {
                         | TyKind::Int(
                             IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::I128 | IntTy::Isize,
                         ),
-                    ) => ScalarInt::try_from_uint(u8::MAX, size),
+                    ) => ScalarInt::try_from_uint(u8::MAX, host_size),
                     // i16
-                    #[cfg(target_pointer_width = "16")]
                     (
                         TyKind::Int(IntTy::I16 | IntTy::Isize),
                         TyKind::Int(IntTy::I32 | IntTy::I64 | IntTy::I128)
                         | TyKind::Uint(
                             UintTy::U16 | UintTy::U32 | UintTy::U64 | UintTy::U128 | UintTy::Usize,
                         ),
-                    ) => ScalarInt::try_from_int(i16::MAX, size),
-                    #[cfg(not(target_pointer_width = "16"))]
+                    ) if target_pointer_width == 16 => ScalarInt::try_from_int(i16::MAX, host_size),
                     (
                         TyKind::Int(IntTy::I16),
                         TyKind::Int(IntTy::I32 | IntTy::I64 | IntTy::I128 | IntTy::Isize)
                         | TyKind::Uint(
                             UintTy::U16 | UintTy::U32 | UintTy::U64 | UintTy::U128 | UintTy::Usize,
                         ),
-                    ) => ScalarInt::try_from_int(i16::MAX, size),
+                    ) if target_pointer_width != 16 => ScalarInt::try_from_int(i16::MAX, host_size),
                     // u16
-                    #[cfg(target_pointer_width = "16")]
                     (
                         TyKind::Uint(UintTy::U16 | UintTy::Usize),
                         TyKind::Uint(UintTy::U32 | UintTy::U64 | UintTy::U128)
                         | TyKind::Int(IntTy::I32 | IntTy::I64 | IntTy::I128),
-                    ) => ScalarInt::try_from_uint(u16::MAX, size),
-                    #[cfg(not(target_pointer_width = "16"))]
+                    ) if target_pointer_width == 16 => {
+                        ScalarInt::try_from_uint(u16::MAX, host_size)
+                    }
                     (
                         TyKind::Uint(UintTy::U16),
                         TyKind::Uint(UintTy::U32 | UintTy::U64 | UintTy::U128 | UintTy::Usize)
                         | TyKind::Int(IntTy::I32 | IntTy::I64 | IntTy::I128 | IntTy::Isize),
-                    ) => ScalarInt::try_from_uint(u16::MAX, size),
+                    ) if target_pointer_width != 16 => {
+                        ScalarInt::try_from_uint(u16::MAX, host_size)
+                    }
                     // i32
-                    #[cfg(target_pointer_width = "32")]
                     (
                         TyKind::Int(IntTy::I32 | IntTy::Isize),
                         TyKind::Int(IntTy::I64 | IntTy::I128)
                         | TyKind::Uint(UintTy::U32 | UintTy::U64 | UintTy::U128 | UintTy::Usize),
-                    ) => ScalarInt::try_from_int(i32::MAX, size),
-                    #[cfg(target_pointer_width = "16")]
+                    ) if target_pointer_width == 32 => ScalarInt::try_from_int(i32::MAX, host_size),
                     (
                         TyKind::Int(IntTy::I32),
                         TyKind::Int(IntTy::I64 | IntTy::I128)
                         | TyKind::Uint(UintTy::U32 | UintTy::U64 | UintTy::U128),
-                    ) => ScalarInt::try_from_int(i32::MAX, size),
-                    #[cfg(target_pointer_width = "64")]
+                    ) if target_pointer_width == 16 => ScalarInt::try_from_int(i32::MAX, host_size),
                     (
                         TyKind::Int(IntTy::I32),
                         TyKind::Int(IntTy::I64 | IntTy::I128 | IntTy::Isize)
                         | TyKind::Uint(UintTy::U32 | UintTy::U64 | UintTy::U128 | UintTy::Usize),
-                    ) => ScalarInt::try_from_int(i32::MAX, size),
+                    ) if target_pointer_width == 64 => ScalarInt::try_from_int(i32::MAX, host_size),
                     // u32
-                    #[cfg(target_pointer_width = "32")]
                     (
                         TyKind::Uint(UintTy::U32 | UintTy::Usize),
                         TyKind::Uint(UintTy::U64 | UintTy::U128)
                         | TyKind::Int(IntTy::I64 | IntTy::I128),
-                    ) => ScalarInt::try_from_uint(u32::MAX, size),
-                    #[cfg(target_pointer_width = "16")]
+                    ) if target_pointer_width == 32 => {
+                        ScalarInt::try_from_uint(u32::MAX, host_size)
+                    }
                     (
                         TyKind::Uint(UintTy::U32),
                         TyKind::Uint(UintTy::U64 | UintTy::U128)
                         | TyKind::Int(IntTy::I64 | IntTy::I128),
-                    ) => ScalarInt::try_from_uint(u32::MAX, size),
-                    #[cfg(target_pointer_width = "64")]
+                    ) if target_pointer_width == 16 => {
+                        ScalarInt::try_from_uint(u32::MAX, host_size)
+                    }
                     (
                         TyKind::Uint(UintTy::U32),
                         TyKind::Uint(UintTy::U64 | UintTy::U128 | UintTy::Usize)
                         | TyKind::Int(IntTy::I64 | IntTy::I128 | IntTy::Isize),
-                    ) => ScalarInt::try_from_uint(u32::MAX, size),
+                    ) if target_pointer_width == 64 => {
+                        ScalarInt::try_from_uint(u32::MAX, host_size)
+                    }
                     // i64
-                    #[cfg(target_pointer_width = "64")]
                     (
                         TyKind::Int(IntTy::I64 | IntTy::Isize),
                         TyKind::Int(IntTy::I128)
                         | TyKind::Uint(UintTy::U64 | UintTy::U128 | UintTy::Usize),
-                    ) => ScalarInt::try_from_int(i64::MAX, size),
-                    #[cfg(not(target_pointer_width = "64"))]
+                    ) if target_pointer_width == 64 => ScalarInt::try_from_int(i64::MAX, host_size),
                     (
                         TyKind::Int(IntTy::I64),
                         TyKind::Int(IntTy::I128) | TyKind::Uint(UintTy::U64 | UintTy::U128),
-                    ) => ScalarInt::try_from_int(i64::MAX, size),
+                    ) if target_pointer_width != 64 => ScalarInt::try_from_int(i64::MAX, host_size),
                     // u64
-                    #[cfg(target_pointer_width = "64")]
                     (
                         TyKind::Uint(UintTy::U64 | UintTy::Usize),
                         TyKind::Uint(UintTy::U128) | TyKind::Int(IntTy::I128),
-                    ) => ScalarInt::try_from_uint(u64::MAX, size),
-                    #[cfg(not(target_pointer_width = "64"))]
+                    ) if target_pointer_width == 64 => {
+                        ScalarInt::try_from_uint(u64::MAX, host_size)
+                    }
                     (
                         TyKind::Uint(UintTy::U64),
                         TyKind::Uint(UintTy::U128) | TyKind::Int(IntTy::I128),
-                    ) => ScalarInt::try_from_uint(u64::MAX, size),
+                    ) if target_pointer_width != 64 => {
+                        ScalarInt::try_from_uint(u64::MAX, host_size)
+                    }
                     // i128
                     (TyKind::Int(IntTy::I128), TyKind::Uint(UintTy::U128)) => {
-                        ScalarInt::try_from_int(i64::MAX, size)
+                        ScalarInt::try_from_int(i64::MAX, host_size)
                     }
                     _ => None,
                 };
                 let min_scalar = match (ty.kind(), op_ty.kind()) {
                     // uint from int
-                    (TyKind::Uint(_), TyKind::Int(_)) => ScalarInt::try_from_uint(0u8, size),
+                    (TyKind::Uint(_), TyKind::Int(_)) => ScalarInt::try_from_uint(0u8, host_size),
                     // i8
                     (
                         TyKind::Int(IntTy::I8),
                         TyKind::Int(
                             IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::I128 | IntTy::Isize,
                         ),
-                    ) => ScalarInt::try_from_int(i8::MIN, size),
+                    ) => ScalarInt::try_from_int(i8::MIN, host_size),
                     // i16
-                    #[cfg(target_pointer_width = "16")]
                     (
                         TyKind::Int(IntTy::I16 | IntTy::Isize),
                         TyKind::Int(IntTy::I32 | IntTy::I64 | IntTy::I128),
-                    ) => ScalarInt::try_from_int(i16::MIN, size),
-                    #[cfg(not(target_pointer_width = "16"))]
+                    ) if target_pointer_width == 16 => ScalarInt::try_from_int(i16::MIN, host_size),
                     (
                         TyKind::Int(IntTy::I16),
                         TyKind::Int(IntTy::I32 | IntTy::I64 | IntTy::I128 | IntTy::Isize),
-                    ) => ScalarInt::try_from_int(i16::MIN, size),
+                    ) if target_pointer_width != 16 => ScalarInt::try_from_int(i16::MIN, host_size),
                     // i32
-                    #[cfg(target_pointer_width = "32")]
                     (
                         TyKind::Int(IntTy::I32 | IntTy::Isize),
                         TyKind::Int(IntTy::I64 | IntTy::I128),
-                    ) => ScalarInt::try_from_int(i32::MIN, size),
-                    #[cfg(target_pointer_width = "16")]
-                    (TyKind::Int(IntTy::I32), TyKind::Int(IntTy::I64 | IntTy::I128)) => {
-                        ScalarInt::try_from_int(i32::MIN, size)
+                    ) if target_pointer_width == 32 => ScalarInt::try_from_int(i32::MIN, host_size),
+                    (TyKind::Int(IntTy::I32), TyKind::Int(IntTy::I64 | IntTy::I128))
+                        if target_pointer_width == 16 =>
+                    {
+                        ScalarInt::try_from_int(i32::MIN, host_size)
                     }
-                    #[cfg(target_pointer_width = "64")]
                     (
                         TyKind::Int(IntTy::I32),
                         TyKind::Int(IntTy::I64 | IntTy::I128 | IntTy::Isize),
-                    ) => ScalarInt::try_from_int(i32::MIN, size),
+                    ) if target_pointer_width == 64 => ScalarInt::try_from_int(i32::MIN, host_size),
                     // i64
-                    #[cfg(target_pointer_width = "64")]
-                    (TyKind::Int(IntTy::I64 | IntTy::Isize), TyKind::Int(IntTy::I128)) => {
-                        ScalarInt::try_from_int(i64::MIN, size)
+                    (TyKind::Int(IntTy::I64 | IntTy::Isize), TyKind::Int(IntTy::I128))
+                        if target_pointer_width == 64 =>
+                    {
+                        ScalarInt::try_from_int(i64::MIN, host_size)
                     }
-                    #[cfg(not(target_pointer_width = "64"))]
-                    (TyKind::Int(IntTy::I64), TyKind::Int(IntTy::I128)) => {
-                        ScalarInt::try_from_int(i64::MIN, size)
+                    (TyKind::Int(IntTy::I64), TyKind::Int(IntTy::I128))
+                        if target_pointer_width != 64 =>
+                    {
+                        ScalarInt::try_from_int(i64::MIN, host_size)
                     }
                     _ => None,
                 };

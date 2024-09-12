@@ -47,6 +47,9 @@ pub const ENTRY_POINT_FN_PREFIX: &str = "__pallet_verifier_entry_point__";
 /// Name of generated `mod` for MIRAI contracts.
 pub const CONTRACTS_MOD_NAME: &str = "foreign_contracts";
 
+/// Tracks pointer width for target execution environment.
+pub const ENV_TARGET_POINTER_WIDTH: &str = "PALLET_VERIFIER_TARGET_POINTER_WIDTH";
+
 /// Kind of pallet `fn`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallKind {

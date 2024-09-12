@@ -12,6 +12,8 @@ use cli_utils::ENV_DEP_RENAMES;
 
 const COMMAND: &str = "cargo verify-pallet";
 const ENV_PKG_NAME: &str = "PALLET_VERIFIER_PKG_NAME";
+const ENV_TARGET: &str = "PALLET_VERIFIER_TARGET";
+const ARG_POINTER_WIDTH: &str = "--pointer-width";
 
 fn main() {
     // Shows help and version messages (and exits, if necessary).
@@ -54,7 +56,83 @@ fn main() {
             } else {
                 // Compiles dependencies and build scripts with `rustc`.
                 let args = env::args().skip(2);
-                if cli_utils::arg_value("--crate-name")
+                let is_wasm_target = cli_utils::arg_value("--target")
+                    .or(env::var(ENV_TARGET).ok())
+                    .is_some_and(|target| target.starts_with("wasm"));
+                if is_wasm_target
+                    && env::var("CARGO_PKG_NAME").is_ok_and(|name| name.starts_with("wasmtime"))
+                {
+                    // Don't compile `wasmtime` (and related `wasmtime-*`packages) for `wasm` targets.
+                    if is_build_script() {
+                        // Compiles build scripts as no-op binaries.
+                        let out_dir = cli_utils::arg_value("--out-dir")
+                            .expect("Expected an output directory arg");
+                        let dummy_build_file = Path::new(&out_dir).join("build.rs");
+                        std::fs::write(&dummy_build_file, "fn main() {}")
+                            .expect("Failed to create dummy build file");
+                        cli_utils::call_rustc(
+                            Some(sub_command),
+                            args.map(|arg| {
+                                if arg.ends_with("/build.rs") {
+                                    dummy_build_file.to_string_lossy().to_string()
+                                } else {
+                                    arg
+                                }
+                            }),
+                        );
+                    } else {
+                        process::exit(0);
+                    }
+                } else if is_wasm_target
+                    && cli_utils::arg_value("--crate-name")
+                        .is_some_and(|crate_name| crate_name.starts_with("sp_wasm_interface"))
+                {
+                    // Removes `wasmtime` depencency and feature from `sp-wasm-interface` package.
+                    let mut skip_next = false;
+                    let args = args.enumerate().filter_map(|(idx, arg)| {
+                        if skip_next {
+                            skip_next = false;
+                            return None;
+                        }
+
+                        // +3 because `args` iterator skipped 2 args and we're using the original `env::args`.
+                        let next_arg = || env::args().nth(idx + 3);
+
+                        // Removes `wasmtime` feature flag.
+                        if arg == "--cfg" || arg.starts_with("--cfg=") {
+                            let is_wasmtime_feature_flag =
+                                |val: &str| val.contains("feature=") && val.contains("wasmtime");
+                            if arg
+                                .strip_prefix("--cfg=")
+                                .is_some_and(is_wasmtime_feature_flag)
+                            {
+                                return None;
+                            }
+                            if next_arg().as_deref().is_some_and(is_wasmtime_feature_flag) {
+                                skip_next = true;
+                                return None;
+                            }
+                        }
+
+                        // Removes `wasmtime` dependency arg.
+                        if arg == "--extern" || arg.starts_with("--extern=") {
+                            let is_wasmtime_extern_flag = |val: &str| val.contains("wasmtime=");
+                            if arg
+                                .strip_prefix("--extern=")
+                                .is_some_and(is_wasmtime_extern_flag)
+                            {
+                                return None;
+                            }
+                            if next_arg().as_deref().is_some_and(is_wasmtime_extern_flag) {
+                                skip_next = true;
+                                return None;
+                            }
+                        }
+
+                        Some(arg)
+                    });
+                    cli_utils::call_rustc(Some(sub_command), args);
+                } else if cli_utils::arg_value("--crate-name")
                     .is_some_and(|crate_name| crate_name.starts_with("serde"))
                 {
                     // TODO: Remove `--cfg no_diagnostic_namespace` when compiler is updated to >= nightly-2024-05-03
@@ -111,6 +189,29 @@ fn call_cargo() {
             .unwrap_or(flags),
     );
 
+    // Sets an appropriate rustc `target` based on the passed `--pointer-width` arg value
+    // (should be set as either 32 or 64, or skipped altogether).
+    // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--target-select-a-target-triple-to-build>
+    // Ref: <https://doc.rust-lang.org/cargo/commands/cargo-test.html#compilation-options>
+    let pointer_width = match cli_utils::arg_value(ARG_POINTER_WIDTH).as_deref() {
+        Some("32") | None => 32,
+        Some("64") => 64,
+        _ => {
+            eprintln!("Expected a valid `--pointer-width=32|64`");
+            process::exit(1);
+        }
+    };
+    if pointer_width == 32 && cfg!(not(target_pointer_width = "32")) {
+        cmd.arg("--target=wasm32-wasi");
+        cmd.env(ENV_TARGET, "wasm32-wasi");
+    } else if pointer_width == 64 && cfg!(not(target_pointer_width = "64")) {
+        eprintln!("Unsupported host for 64-bit analysis");
+        process::exit(1);
+    }
+    let pointer_width_str = pointer_width.to_string();
+    cmd.env("PALLET_VERIFIER_TARGET_POINTER_WIDTH", &pointer_width_str);
+    cmd.env("MIRAI_TARGET_POINTER_WIDTH", &pointer_width_str);
+
     // Retrieves package metadata.
     let mut metadata_cmd = cargo_metadata::MetadataCommand::new();
     if let Some(manifest_path) = cli_utils::arg_value("--manifest-path") {
@@ -153,8 +254,13 @@ fn call_cargo() {
         }
     }
 
-    // Forwards relevant CLI args (skips cargo and subcommand args).
-    cmd.args(env::args().skip(2));
+    // Forwards relevant CLI args (skips cargo, subcommand and pallet-verifier specific args).
+    let mut skip_next = false;
+    cmd.args(env::args().skip(2).filter(|arg| {
+        let can_skip = skip_next || arg == ARG_POINTER_WIDTH || arg.starts_with(ARG_POINTER_WIDTH);
+        skip_next = arg == ARG_POINTER_WIDTH;
+        !can_skip
+    }));
 
     // Executes command (exits on failure).
     cli_utils::exec_cmd(&mut cmd);
