@@ -25,6 +25,10 @@ pallet-verifier is a tool for detecting [common security vulnerabilities][vulner
 - [Clang](https://clang.llvm.org/get_started.html)
 - [Cmake](https://cmake.org/download/)
 
+**NOTE:** `pallet-verifier` requires a `Clang` binary that supports [`WebAssembly`](https://webassembly.org/).
+On `macOS`, the `Clang` binary from `Xcode` doesn't support `WebAssembly`, so you'll need to install 
+[`clang/llvm` via `homebrew`](https://formulae.brew.sh/formula/llvm) and add it to your `PATH`.
+
 ### Installing `pallet-verifier`
 
 ```shell
@@ -45,6 +49,31 @@ cargo verify-pallet
 **NOTE:** `pallet-verifier` compiles the target FRAME pallet code in "test mode" (i.e. the equivalent of running 
 `cargo test` or `rustc --test`), so you'll need to ensure that all prerequisites for test compilation 
 are installed and/or configured properly, otherwise compilation will fail.
+
+## Documentation
+
+### Binary Documentation
+
+`cargo verfiy-pallet` subcommand help text.
+
+```console
+A tool for detecting common security vulnerabilities and insecure patterns in FRAME pallets using static program analysis techniques.
+
+Usage: cargo verify-pallet
+
+Options:
+    -h, --help               Print help
+    -V, --version            Print version
+    --pointer-width <32|64>  The pointer width for the target execution environment
+```
+
+### Library Documentation
+
+You can access library documentation locally by running the following command from the project root
+
+```shell
+cargo doc --no-deps --open
+```
 
 ## License
 

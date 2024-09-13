@@ -110,8 +110,9 @@ fn help(command: &str) {
 Usage: {command}
 
 Options:
-    -h, --help     Print help
-    -V, --version  Print version
+    -h, --help               Print help
+    -V, --version            Print version
+    --pointer-width <32|64>  The pointer width for the target execution environment
 "#
     );
 }
