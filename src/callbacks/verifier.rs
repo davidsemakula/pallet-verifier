@@ -23,8 +23,7 @@ use mirai::{
 };
 use tempfile::TempDir;
 
-use super::utils;
-use crate::{providers, CallKind, CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX};
+use crate::{providers, utils, CallKind, CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks for analyzing FRAME pallet with MIRAI.
 pub struct VerifierCallbacks<'compilation> {
@@ -136,9 +135,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             let mut contracts_mod_def_id = None;
             let mut test_mod_spans = FxHashSet::default();
             hir.for_each_module(|mod_def_id| {
-                let is_contracts_mod = utils::def_name(mod_def_id.to_def_id(), tcx)
-                    .is_some_and(|name| name.as_str() == CONTRACTS_MOD_NAME);
-                if is_contracts_mod {
+                if tcx.item_name(mod_def_id.to_def_id()).as_str() == CONTRACTS_MOD_NAME {
                     contracts_mod_def_id = Some(mod_def_id);
                 } else {
                     let (mod_data, mod_decl_span, mod_hir_id) = hir.get_module(mod_def_id);
@@ -194,41 +191,45 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                     }
                 };
             for local_def_id in hir.body_owners() {
-                let entry_point_info = utils::def_name(local_def_id, tcx).and_then(|def_name| {
-                    self.entry_points
-                        .iter()
-                        .find_map(|(name, (target_hash, call_kind))| {
-                            if *name == def_name.as_str() {
-                                let mut dispatchable_def_id_error = || {
-                                    let mut error = compiler.sess.dcx().struct_err(format!(
+                let entry_point_info =
+                    tcx.opt_item_name(local_def_id.to_def_id())
+                        .and_then(|def_name| {
+                            self.entry_points
+                                .iter()
+                                .find_map(|(name, (target_hash, call_kind))| {
+                                    if *name == def_name.as_str() {
+                                        let mut dispatchable_def_id_error = || {
+                                            let mut error =
+                                                compiler.sess.dcx().struct_err(format!(
                                         "Couldn't find definition for {call_kind}: `{}`",
                                         def_name.as_str().replace(ENTRY_POINT_FN_PREFIX, "")
                                     ));
-                                    error.note("This is most likely a bug in pallet-verifier.");
-                                    error.help(
-                                        "Please consider filling a bug report at \
+                                            error.note(
+                                                "This is most likely a bug in pallet-verifier.",
+                                            );
+                                            error.help(
+                                                "Please consider filling a bug report at \
                                         https://github.com/davidsemakula/pallet-verifier/issues",
-                                    );
-                                    error.emit();
-                                    process::exit(rustc_driver::EXIT_FAILURE)
-                                };
-                                let dispatchable_def_id = tcx.def_path_hash_to_def_id(
-                                    *target_hash,
-                                    &mut dispatchable_def_id_error,
-                                );
-                                dispatchable_def_id
-                                    .as_local()
-                                    .map(|dispatchable_local_def_id| {
-                                        (dispatchable_local_def_id, call_kind)
-                                    })
-                            } else {
-                                None
-                            }
-                        })
-                });
+                                            );
+                                            error.emit();
+                                            process::exit(rustc_driver::EXIT_FAILURE)
+                                        };
+                                        let dispatchable_def_id = tcx.def_path_hash_to_def_id(
+                                            *target_hash,
+                                            &mut dispatchable_def_id_error,
+                                        );
+                                        dispatchable_def_id.as_local().map(
+                                            |dispatchable_local_def_id| {
+                                                (dispatchable_local_def_id, call_kind)
+                                            },
+                                        )
+                                    } else {
+                                        None
+                                    }
+                                })
+                        });
                 if let Some((dispatcable_local_def_id, call_kind)) = entry_point_info {
-                    let dispatchable_name = utils::def_name(dispatcable_local_def_id, tcx)
-                        .expect("Expected a name for dispatchable");
+                    let dispatchable_name = tcx.item_name(dispatcable_local_def_id.to_def_id());
                     let info = (local_def_id, dispatcable_local_def_id, dispatchable_name);
                     match call_kind {
                         CallKind::Dispatchable => dispatchable_entry_points.push(info),
@@ -333,22 +334,22 @@ fn emit_diagnostics(
     // SCALE codec libraries e.t.c).
     let is_span_in_frame_substrate_core = |mspan: &MultiSpan| {
         let is_core_crate = |crate_num: CrateNum| {
-            let source_def_id = crate_num.as_def_id();
-            let name = tcx.def_path_str(source_def_id);
-            name.starts_with("sp_")
+            let crate_symbol = tcx.crate_name(crate_num);
+            let crate_name = crate_symbol.as_str();
+            crate_name.starts_with("sp_")
                 || matches!(
-                    name.as_str(),
+                    crate_name,
                     "frame_support"
                         | "frame_system"
                         | "parity_scale_codec"
                         | "scale_info"
                         | "wasmi"
                 )
-                || name.starts_with("frame_support_")
-                || name.starts_with("frame_system_")
-                || name.starts_with("parity_scale_codec_")
-                || name.starts_with("scale_info_")
-                || name.starts_with("wasmi_")
+                || crate_name.starts_with("frame_support_")
+                || crate_name.starts_with("frame_system_")
+                || crate_name.starts_with("parity_scale_codec_")
+                || crate_name.starts_with("scale_info_")
+                || crate_name.starts_with("wasmi_")
         };
         mspan.primary_span().is_some_and(|span| {
             if let (Some(source_file), ..) = source_map.span_to_location_info(span) {

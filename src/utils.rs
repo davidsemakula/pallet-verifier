@@ -1,31 +1,12 @@
 //! Common analysis utilities.
 
 use rustc_ast::NestedMetaItem;
-use rustc_hir::{
-    definitions::{DefPathData, DisambiguatedDefPathData},
-    HirId,
-};
-use rustc_middle::{query::IntoQueryParam, ty::TyCtxt};
-use rustc_span::{def_id::DefId, Symbol};
-
-/// Returns the name of the definition as a `Symbol` (if any).
-pub fn def_name(def_id: impl IntoQueryParam<DefId>, tcx: TyCtxt<'_>) -> Option<Symbol> {
-    let def_key = tcx.def_key(def_id);
-    match def_key.disambiguated_data {
-        DisambiguatedDefPathData {
-            data:
-                DefPathData::MacroNs(name)
-                | DefPathData::LifetimeNs(name)
-                | DefPathData::TypeNs(name)
-                | DefPathData::ValueNs(name),
-            ..
-        } => Some(name),
-        _ => None,
-    }
-}
+use rustc_hir::HirId;
+use rustc_middle::ty::TyCtxt;
+use rustc_span::Symbol;
 
 /// Checks if an item (given it's `HirId`) "effectively" has a `#[cfg(test)]` attribute.
-pub fn has_cfg_test_attr(hir_id: HirId, tcx: TyCtxt<'_>) -> bool {
+pub fn has_cfg_test_attr(hir_id: HirId, tcx: TyCtxt) -> bool {
     let attrs = tcx.hir().attrs(hir_id);
     attrs.iter().any(|attr| {
         let is_cfg_path = attr.has_name(Symbol::intern("cfg"));

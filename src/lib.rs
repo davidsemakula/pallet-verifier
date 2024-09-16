@@ -35,6 +35,7 @@ extern crate rustc_type_ir;
 mod callbacks;
 mod file_loader;
 mod providers;
+mod utils;
 
 pub use callbacks::{DefaultCallbacks, EntryPointsCallbacks, VerifierCallbacks};
 pub use file_loader::VirtualFileLoader;

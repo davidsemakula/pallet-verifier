@@ -27,8 +27,7 @@ use rustc_span::{
 
 use itertools::Itertools;
 
-use super::utils;
-use crate::{providers, CallKind, ENTRY_POINT_FN_PREFIX};
+use crate::{providers, utils, CallKind, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions.
 ///
@@ -98,7 +97,7 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                 if dispatchable_names.len() != dispatchable_local_def_ids.len() {
                     let id_names: Vec<_> = dispatchable_local_def_ids
                         .iter()
-                        .filter_map(|local_def_id| utils::def_name(*local_def_id, tcx))
+                        .map(|local_def_id| tcx.item_name(local_def_id.to_def_id()))
                         .collect();
                     for name in dispatchable_names {
                         let symbol = Symbol::intern(name);
@@ -205,8 +204,7 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                                     if let Res::Def(DefKind::Trait, trait_def_id) =
                                         trait_ref.path.res
                                     {
-                                        let trait_name = utils::def_name(trait_def_id, tcx)?;
-                                        if trait_name.as_str() == "Config" {
+                                        if tcx.item_name(trait_def_id).as_str() == "Config" {
                                             return trait_def_id.as_local();
                                         }
                                     }
@@ -299,8 +297,7 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                 } else if call_kind == CallKind::Dispatchable
                     || !intra_calls.contains_key(local_def_id)
                 {
-                    let name = utils::def_name(*local_def_id, tcx)
-                        .expect("Expected a name for {call_kind}");
+                    let name = tcx.item_name(local_def_id.to_def_id());
                     let mut warning = compiler.sess.dcx().struct_warn(format!(
                         "Failed to generate tractable entry point for {call_kind}: `{name}`"
                     ));
@@ -531,7 +528,7 @@ fn dispatchable_ids(
             if !matches!(body_owner_kind, rustc_hir::BodyOwnerKind::Fn) {
                 return None;
             }
-            let fn_name = utils::def_name(local_def_id, tcx)?;
+            let fn_name = tcx.item_name(local_def_id.to_def_id());
             if !names.contains(&fn_name.as_str()) {
                 return None;
             }
@@ -627,8 +624,7 @@ fn pallet_pub_fn_ids(
 
 /// Verifies that the definition is a `struct` named `Pallet`.
 fn is_pallet_struct(def_id: DefId, tcx: TyCtxt<'_>) -> bool {
-    tcx.def_kind(def_id) == DefKind::Struct
-        && utils::def_name(def_id, tcx).is_some_and(|name| name.as_str() == "Pallet")
+    tcx.def_kind(def_id) == DefKind::Struct && tcx.item_name(def_id).as_str() == "Pallet"
 }
 
 /// Verifies that the generics include a `T: Config` bound.
@@ -639,8 +635,7 @@ fn is_config_bounded(generics: &rustc_hir::Generics, tcx: TyCtxt<'_>) -> bool {
             bound_info.bounds.iter().any(|bound| {
                 bound.trait_ref().is_some_and(|trait_ref| {
                     if let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res {
-                        utils::def_name(trait_def_id, tcx)
-                            .is_some_and(|trait_name| trait_name.as_str() == "Config")
+                        tcx.item_name(trait_def_id).as_str() == "Config"
                     } else {
                         false
                     }
@@ -663,7 +658,7 @@ fn compose_entry_point<'tcx>(
     tcx: TyCtxt<'tcx>,
 ) -> Option<(String, String, FxHashSet<DefId>)> {
     // `fn` name.
-    let fn_name = utils::def_name(fn_local_def_id, tcx)?;
+    let fn_name = tcx.item_name(fn_local_def_id.to_def_id());
 
     // owner body, call span, call args and call generic args (if any).
     let mut owner_body_opt = None;
@@ -728,7 +723,7 @@ fn compose_entry_point<'tcx>(
     let mut item_defs = FxHashSet::default();
 
     // Extracts trait name, path and ty args (if any).
-    let trait_name = trait_def_id.and_then(|trait_def_id| utils::def_name(trait_def_id, tcx));
+    let trait_name = trait_def_id.map(|trait_def_id| tcx.item_name(trait_def_id));
     let trait_path = trait_def_id.map(|trait_def_id| tcx.def_path_str(trait_def_id));
     let hir = tcx.hir();
     let trait_impl = trait_def_id.and_then(|trait_def_id| {
@@ -1101,13 +1096,15 @@ fn process_used_items(
                     // Add use declaration for foreign items, and local items that are visible from the crate root.
                     let mut def_path = tcx.def_path_str(item_def_id);
                     if !item_def_id.is_local() {
-                        let crate_def_id = item_def_id.krate.as_def_id();
-                        let crate_name = tcx.def_path_str(crate_def_id);
-                        let crate_rename = dep_renames.and_then(|renames| renames.get(&crate_name));
+                        let crate_name = tcx.crate_name(item_def_id.krate);
+                        let crate_rename =
+                            dep_renames.and_then(|renames| renames.get(crate_name.as_str()));
                         if let Some(rename) = crate_rename {
-                            if def_path.starts_with(&crate_name) {
-                                def_path =
-                                    format!("{rename}{}", def_path.trim_start_matches(&crate_name));
+                            if def_path.starts_with(crate_name.as_str()) {
+                                def_path = format!(
+                                    "{rename}{}",
+                                    def_path.trim_start_matches(crate_name.as_str())
+                                );
                             }
                         }
                     }
@@ -1835,9 +1832,7 @@ fn tractable_param_type(
                     format!("crate::{gen_ty_path}")
                 } else {
                     used_items.insert(def_id);
-                    utils::def_name(def_id, tcx)
-                        .expect("Expected local definition name")
-                        .to_string()
+                    tcx.item_name(def_id).to_string()
                 };
                 tractable_ty_path = tractable_ty_path.replace(&gen_ty_path, &resolvable_ty_path);
             } else {
