@@ -1,6 +1,4 @@
-//! A `FileLoader` that "virtually" adds modules to a crate.
-//!
-//! See [`crate::EntryPointsCallbacks`] doc.
+//! A `FileLoader` that "virtually" adds "analysis-only" external crates and modules to a crate.
 
 use rustc_data_structures::sync::Lrc;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -10,11 +8,12 @@ use std::path::{Path, PathBuf};
 
 use itertools::Itertools;
 
-/// A `FileLoader` that "virtually" adds modules to a crate.
+/// A `FileLoader` that "virtually" adds "analysis-only" external crates and modules to a crate.
 pub struct VirtualFileLoader {
     file_loader: RealFileLoader,
     root_path: PathBuf,
-    virtual_root_content: Option<String>,
+    root_content: Option<String>,
+    extern_crate_decls: Option<String>,
     virtual_mod_decls: Option<String>,
     // `path` -> `content` map for "virtual" modules.
     virtual_mod_contents: FxHashMap<PathBuf, String>,
@@ -24,10 +23,19 @@ impl VirtualFileLoader {
     /// Creates a "virtual" file loader.
     pub fn new(
         root_path: PathBuf,
-        virtual_root_content: Option<String>,
+        root_content: Option<String>,
+        extern_crates: Option<&FxHashSet<&str>>,
         // `name` -> `content` map for "virtual" modules.
         virtual_mods: Option<FxHashMap<&str, String>>,
     ) -> Self {
+        let extern_crate_decls = extern_crates
+            .filter(|extern_crates| !extern_crates.is_empty())
+            .map(|extern_crates| {
+                extern_crates
+                    .iter()
+                    .map(|extern_crate| format!("extern crate {extern_crate};"))
+                    .join("\n")
+            });
         let mut virtual_mod_decls = FxHashSet::default();
         let mut virtual_mod_contents = FxHashMap::default();
         if let Some(virtual_mods) = virtual_mods {
@@ -42,7 +50,8 @@ impl VirtualFileLoader {
         Self {
             file_loader: RealFileLoader,
             root_path,
-            virtual_root_content,
+            root_content,
+            extern_crate_decls,
             virtual_mod_decls: (!virtual_mod_decls.is_empty())
                 .then_some(virtual_mod_decls.into_iter().join("\n")),
             virtual_mod_contents,
@@ -52,8 +61,8 @@ impl VirtualFileLoader {
     /// Returns "virtual" content for the specified path.
     fn virtual_content(&self, path: &Path) -> Option<&String> {
         self.virtual_mod_contents.get(path).or_else(|| {
-            if path == self.root_path && self.virtual_root_content.is_some() {
-                self.virtual_root_content.as_ref()
+            if path == self.root_path && self.root_content.is_some() {
+                self.root_content.as_ref()
             } else {
                 None
             }
@@ -64,7 +73,7 @@ impl VirtualFileLoader {
 impl rustc_span::source_map::FileLoader for VirtualFileLoader {
     fn file_exists(&self, path: &Path) -> bool {
         if self.virtual_mod_contents.contains_key(path)
-            || (path == self.root_path && self.virtual_root_content.is_some())
+            || (path == self.root_path && self.root_content.is_some())
         {
             true
         } else {
@@ -79,6 +88,9 @@ impl rustc_span::source_map::FileLoader for VirtualFileLoader {
             self.file_loader.read_file(path)?
         };
         if path == self.root_path {
+            if let Some(decls) = self.extern_crate_decls.as_deref() {
+                content.push_str(decls);
+            }
             if let Some(decls) = self.virtual_mod_decls.as_deref() {
                 content.push_str(decls);
             }

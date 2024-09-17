@@ -8,6 +8,8 @@ extern crate rustc_session;
 
 mod cli_utils;
 
+use rustc_hash::FxHashSet;
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -81,21 +83,6 @@ fn main() {
         );
     }
 
-    // Generates tractable entry points for FRAME pallet.
-    let dep_renames = env::var(ENV_DEP_RENAMES).ok().and_then(|dep_renames_json| {
-        serde_json::from_str::<rustc_hash::FxHashMap<String, String>>(&dep_renames_json).ok()
-    });
-    let mut entry_point_callbacks = EntryPointsCallbacks::new(&dep_renames);
-    let entry_point_compiler =
-        rustc_driver::RunCompiler::new(&cli_args, &mut entry_point_callbacks);
-    let entry_point_result = entry_point_compiler.run();
-    if entry_point_result.is_err() {
-        process::exit(rustc_driver::EXIT_FAILURE);
-    }
-    let Some(entry_points_content) = entry_point_callbacks.entry_points_content() else {
-        process::exit(rustc_driver::EXIT_FAILURE);
-    };
-
     // Compiles `mirai-annotations` crate and adds it as a dependency (if necessary).
     // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
     let has_mirai_annotations_dep = cli_args.iter().enumerate().any(|(idx, arg)| {
@@ -145,6 +132,7 @@ fn main() {
             annotations_path,
             Some(include_str!("../artifacts/mirai_annotations.rs").to_owned()),
             None,
+            None,
         );
         let mut annotations_compiler =
             rustc_driver::RunCompiler::new(&annotations_args, &mut rustc_callbacks);
@@ -161,16 +149,47 @@ fn main() {
         ]);
     }
 
-    // Initializes "virtual" `FileLoader` for entry point and "contracts" content.
+    // Initializes "virtual" `FileLoader` for "analysis-only" external crates.
     // Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
     let target_path_str = cli_args
         .iter()
         .find(|arg| Path::new(arg).extension().is_some_and(|ext| ext == "rs"))
         .expect("Expected target path as the first `*.rs` argument");
     let target_path = PathBuf::from(target_path_str);
+    let mut extern_crates_opt = None;
+    if !has_mirai_annotations_dep
+        || fs::read_to_string(target_path.clone())
+            .is_ok_and(|content| !content.contains("mirai_annotations"))
+    {
+        let mut extern_crates = FxHashSet::default();
+        extern_crates.insert("mirai_annotations");
+        extern_crates_opt = Some(extern_crates);
+    }
+    let entry_point_file_loader =
+        VirtualFileLoader::new(target_path.clone(), None, extern_crates_opt.as_ref(), None);
+
+    // Generates tractable entry points for FRAME pallet.
+    let dep_renames = env::var(ENV_DEP_RENAMES).ok().and_then(|dep_renames_json| {
+        serde_json::from_str::<rustc_hash::FxHashMap<String, String>>(&dep_renames_json).ok()
+    });
+    let mut entry_point_callbacks = EntryPointsCallbacks::new(&dep_renames);
+    let mut entry_point_compiler =
+        rustc_driver::RunCompiler::new(&cli_args, &mut entry_point_callbacks);
+    entry_point_compiler.set_file_loader(Some(Box::new(entry_point_file_loader)));
+    let entry_point_result = entry_point_compiler.run();
+    if entry_point_result.is_err() {
+        process::exit(rustc_driver::EXIT_FAILURE);
+    }
+    let Some(entry_points_content) = entry_point_callbacks.entry_points_content() else {
+        process::exit(rustc_driver::EXIT_FAILURE);
+    };
+
+    // Initializes "virtual" `FileLoader` for "analysis-only" external crates,
+    // and entry point and "contracts" content.
     let verifier_file_loader = VirtualFileLoader::new(
         target_path,
         None,
+        extern_crates_opt.as_ref(),
         Some(
             [
                 // Adds generated entry points.
