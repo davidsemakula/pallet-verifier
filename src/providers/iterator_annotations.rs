@@ -1,0 +1,948 @@
+//! `rustc` `MirPass` for adding annotations for `Iterator` invariants.
+
+use rustc_abi::Size;
+use rustc_const_eval::interpret::Scalar;
+use rustc_data_structures::graph::dominators::Dominators;
+use rustc_hash::FxHashSet;
+use rustc_hir::{def::DefKind, LangItem};
+use rustc_middle::{
+    middle::exported_symbols::ExportedSymbol,
+    mir::{
+        visit::Visitor, BasicBlock, BasicBlockData, BasicBlocks, BinOp, Body, BorrowKind,
+        CallSource, Const, ConstValue, HasLocalDecls, LocalDecl, LocalDecls, Location, MirPass,
+        Operand, Place, Rvalue, Statement, StatementKind, Terminator, TerminatorKind, UnwindAction,
+    },
+    ty::{GenericArg, ImplSubject, List, Region, ScalarInt, Ty, TyCtxt, TyKind, TypeAndMut},
+};
+use rustc_span::{def_id::DefId, source_map::dummy_spanned, Span};
+use rustc_type_ir::UintTy;
+
+use crate::utils;
+
+/// Adds invariant annotations to iterators.
+pub struct IteratorAnnotations;
+
+impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
+    fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+        let mut visitor = IteratorVisitor::new(tcx, &body.basic_blocks, body.local_decls());
+        visitor.visit_body(body);
+
+        let mut annotations = visitor.annotations;
+        if annotations.is_empty() {
+            return;
+        }
+        // Reverse sorts annotations by location.
+        annotations.sort_by(|a, b| b.location().cmp(a.location()));
+
+        // Creates `mirai_assume` annotation handle.
+        let mirai_assume_def_id =
+            mirai_annotation_fn("mirai_assume", tcx).expect("Expected a fn def for `mirai_assume`");
+        let mirai_assume_handle =
+            Operand::function_handle(tcx, mirai_assume_def_id, [], Span::default());
+
+        // Creates `isize::MAX` operand.
+        let pointer_width = utils::target_pointer_width();
+        let isize_max_scalar = ScalarInt::try_from_uint(
+            match pointer_width {
+                16 => i16::MAX as u128,
+                32 => i32::MAX as u128,
+                64 => i64::MAX as u128,
+                _ => unreachable!("Unsupported pointer width"),
+            },
+            Size::from_bits(pointer_width),
+        )
+        .expect("Expected a valid scalar bound");
+        let usize_ty = Ty::new(tcx, TyKind::Uint(UintTy::Usize));
+        let isize_max_operand = Operand::const_from_scalar(
+            tcx,
+            usize_ty,
+            Scalar::Int(isize_max_scalar),
+            Span::default(),
+        );
+
+        // Adds iterator annotations.
+        for annotation in annotations {
+            let location = annotation.location();
+            let Some(basic_block) = body.basic_blocks.get(location.block) else {
+                continue;
+            };
+            let Some(loop_stmt) = basic_block.statements.get(match annotation {
+                Annotation::Isize(location, ..) => location.statement_index,
+                Annotation::Len(location, ..) => location.statement_index.saturating_sub(1),
+            }) else {
+                continue;
+            };
+            let source_info = loop_stmt.source_info;
+
+            // Extracts predecessors and successors.
+            let (predecessors, successors) =
+                basic_block.statements.split_at(location.statement_index);
+            let mut predecessors = predecessors.to_vec();
+            let successors = successors.to_vec();
+            let terminator = basic_block.terminator.clone();
+
+            // Adds successor block.
+            let mut successor_block_data = BasicBlockData::new(terminator);
+            successor_block_data.statements = successors;
+            let successor_block = body.basic_blocks_mut().push(successor_block_data);
+
+            // Adds annotation argument (and related) statements and/or blocks.
+            let arg_local_decl =
+                LocalDecl::with_source_info(Ty::new(tcx, TyKind::Bool), source_info);
+            let arg_local = body.local_decls.push(arg_local_decl);
+            let arg_place = Place::from(arg_local);
+            let (target_block, target_block_statements) = match annotation {
+                Annotation::Isize(_, op_place) => {
+                    // Creates `isize::MAX` bound statement.
+                    let arg_rvalue = Rvalue::BinaryOp(
+                        BinOp::Le,
+                        Box::new((Operand::Copy(op_place), isize_max_operand.clone())),
+                    );
+                    let arg_stmt = Statement {
+                        source_info,
+                        kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
+                    };
+                    predecessors.push(arg_stmt);
+
+                    // Returns target block and statements.
+                    (location.block, predecessors)
+                }
+                Annotation::Len(
+                    _,
+                    dest_place,
+                    collection_place,
+                    collection_region,
+                    collection_len_def_id,
+                    collection_len_gen_args,
+                ) => {
+                    // Creates collection ref statement.
+                    let collection_ty = collection_place.ty(body.local_decls(), tcx).ty;
+                    let collection_ref_ty = Ty::new_ref(
+                        tcx,
+                        collection_region,
+                        TypeAndMut {
+                            ty: collection_ty,
+                            mutbl: rustc_ast::Mutability::Not,
+                        },
+                    );
+                    let collection_ref_local_decl =
+                        LocalDecl::with_source_info(collection_ref_ty, source_info);
+                    let collection_ref_local = body.local_decls.push(collection_ref_local_decl);
+                    let collection_ref_place = Place::from(collection_ref_local);
+                    let collection_ref_rvalue =
+                        Rvalue::Ref(collection_region, BorrowKind::Shared, collection_place);
+                    let collection_ref_stmt = Statement {
+                        source_info,
+                        kind: StatementKind::Assign(Box::new((
+                            collection_ref_place,
+                            collection_ref_rvalue,
+                        ))),
+                    };
+                    predecessors.push(collection_ref_stmt);
+
+                    // Creates collection length/size annotation block.
+                    let annotation_block_data = BasicBlockData::new(None);
+                    let annotation_block = body.basic_blocks_mut().push(annotation_block_data);
+
+                    // Creates collection length/size call.
+                    let collection_len_local_decl =
+                        LocalDecl::with_source_info(usize_ty, source_info);
+                    let collection_len_local = body.local_decls.push(collection_len_local_decl);
+                    let collection_len_place = Place::from(collection_len_local);
+                    let collection_len_handle = Operand::function_handle(
+                        tcx,
+                        collection_len_def_id,
+                        collection_len_gen_args,
+                        Span::default(),
+                    );
+                    let collection_len_call = Terminator {
+                        source_info,
+                        kind: TerminatorKind::Call {
+                            func: collection_len_handle,
+                            args: vec![dummy_spanned(Operand::Move(collection_ref_place))],
+                            destination: collection_len_place,
+                            target: Some(annotation_block),
+                            unwind: UnwindAction::Continue,
+                            call_source: CallSource::Misc,
+                            fn_span: Span::default(),
+                        },
+                    };
+
+                    // Updates current block statements and terminator.
+                    let basic_blocks = body.basic_blocks_mut();
+                    basic_blocks[location.block].statements = predecessors;
+                    basic_blocks[location.block].terminator = Some(collection_len_call);
+
+                    // Creates collection length/size bound statement.
+                    let arg_rvalue = Rvalue::BinaryOp(
+                        BinOp::Le,
+                        Box::new((
+                            Operand::Copy(dest_place),
+                            Operand::Copy(collection_len_place),
+                        )),
+                    );
+                    let arg_stmt = Statement {
+                        source_info,
+                        kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
+                    };
+
+                    // Returns target block and statements.
+                    (annotation_block, vec![arg_stmt])
+                }
+            };
+
+            // Creates `mirai_assume` annotation call.
+            let annotation_ty = Ty::new(tcx, TyKind::Never);
+            let annotation_local_decl = LocalDecl::with_source_info(annotation_ty, source_info);
+            let annotation_local = body.local_decls.push(annotation_local_decl);
+            let annotation_place = Place::from(annotation_local);
+            let annotation_call = Terminator {
+                source_info,
+                kind: TerminatorKind::Call {
+                    func: mirai_assume_handle.clone(),
+                    args: vec![dummy_spanned(Operand::Move(arg_place))],
+                    destination: annotation_place,
+                    target: Some(successor_block),
+                    unwind: UnwindAction::Continue,
+                    call_source: CallSource::Misc,
+                    fn_span: Span::default(),
+                },
+            };
+
+            // Updates target block statements and terminator.
+            let basic_blocks = body.basic_blocks_mut();
+            basic_blocks[target_block].statements = target_block_statements;
+            basic_blocks[target_block].terminator = Some(annotation_call);
+        }
+    }
+}
+
+/// Captures the required info for adding an `Iterator` related annotation.
+#[derive(Debug)]
+enum Annotation<'tcx> {
+    Isize(Location, Place<'tcx>),
+    Len(
+        Location,
+        Place<'tcx>,
+        Place<'tcx>,
+        Region<'tcx>,
+        DefId,
+        &'tcx List<GenericArg<'tcx>>,
+    ),
+}
+
+impl<'tcx> Annotation<'tcx> {
+    fn location(&self) -> &Location {
+        match &self {
+            Annotation::Isize(location, ..) => location,
+            Annotation::Len(location, ..) => location,
+        }
+    }
+}
+
+/// Collects iterator annotations.
+struct IteratorVisitor<'tcx, 'pass> {
+    tcx: TyCtxt<'tcx>,
+    basic_blocks: &'pass BasicBlocks<'tcx>,
+    local_decls: &'pass LocalDecls<'tcx>,
+    iterator_next_def_id: DefId,
+    /// A list of `Iterator` annotation descriptions.
+    annotations: Vec<Annotation<'tcx>>,
+}
+
+impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        basic_blocks: &'pass BasicBlocks<'tcx>,
+        local_decls: &'pass LocalDecls<'tcx>,
+    ) -> Self {
+        let iterator_next_def_id = tcx
+            .lang_items()
+            .get(LangItem::IteratorNext)
+            .expect("Expected `std::iter::Iterator::next` lang item");
+        Self {
+            tcx,
+            basic_blocks,
+            local_decls,
+            iterator_next_def_id,
+            annotations: Vec::new(),
+        }
+    }
+
+    fn process_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
+        if let TerminatorKind::Call { func, args, .. } = &terminator.kind {
+            // Only analyze calls to `std::iter::Iterator::next`.
+            let Some((def_id, ..)) = func.const_fn_def() else {
+                return;
+            };
+            if def_id != self.iterator_next_def_id {
+                return;
+            }
+
+            let dominators = self.basic_blocks.dominators();
+            let place_ty = |place: Place<'tcx>| place.ty(self.local_decls, self.tcx).ty;
+            let deref_place = |place: Place<'tcx>, bb: BasicBlock| {
+                self.basic_blocks[bb].statements.iter().find_map(|stmt| {
+                    let StatementKind::Assign(assign) = &stmt.kind else {
+                        return None;
+                    };
+                    if place != assign.0 {
+                        return None;
+                    }
+                    let Rvalue::Ref(region, _, op_place) = &assign.1 else {
+                        return None;
+                    };
+                    Some((op_place, region))
+                })
+            };
+
+            // Finds place and basic block for `std::iter::Iterator::next` operand/arg.
+            let iter_next_arg = args.first().expect("Expected an arg for `Iterator::next`");
+            let iter_next_arg_place = match &iter_next_arg.node {
+                Operand::Copy(place) | Operand::Move(place) => place,
+                Operand::Constant(_) => {
+                    return;
+                }
+            };
+            let (iter_next_arg_deref_place, _) = deref_place(*iter_next_arg_place, location.block)
+                .expect("Expected a mutable ref arg for `Iterator::next`");
+            let iter_next_arg_def_call = find_pre_loop_terminator_assign(
+                *iter_next_arg_deref_place,
+                location.block,
+                self.basic_blocks,
+                dominators,
+            );
+            let into_iter_arg_place =
+                iter_next_arg_def_call.clone().and_then(|(terminator, bb)| {
+                    into_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
+                });
+            let Some((mut iter_target_place, mut iter_target_bb)) = into_iter_arg_place else {
+                return;
+            };
+
+            // Finds place and basic block for the topmost `Iterator` adapter operand/arg (if any).
+            while !is_isize_bound_collection(place_ty(iter_target_place), self.tcx)
+                && is_non_growing_iter_adapter(place_ty(iter_target_place), self.tcx)
+            {
+                let adapter_def_call = find_pre_loop_terminator_assign(
+                    iter_target_place,
+                    location.block,
+                    self.basic_blocks,
+                    dominators,
+                );
+                let Some((adapter_arg_place, bb)) =
+                    adapter_def_call.and_then(|(terminator, bb)| {
+                        iter_adapter_operand(&terminator, self.tcx).map(|place| (place, bb))
+                    })
+                else {
+                    return;
+                };
+                iter_target_place = adapter_arg_place;
+                iter_target_bb = bb;
+            }
+
+            // Finds place and basic block for a slice `Iterator` or `IntoIter` operand/arg (if any).
+            let mut iter_target_ty = place_ty(iter_target_place);
+            if !is_isize_bound_collection(iter_target_ty, self.tcx) {
+                if is_into_iter_ty(iter_target_ty, self.tcx) {
+                    let into_iter_arg_def_call = find_pre_loop_terminator_assign(
+                        iter_target_place,
+                        location.block,
+                        self.basic_blocks,
+                        dominators,
+                    );
+                    let Some((collection_place, bb)) =
+                        into_iter_arg_def_call.and_then(|(terminator, bb)| {
+                            into_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
+                        })
+                    else {
+                        return;
+                    };
+                    iter_target_place = collection_place;
+                    iter_target_bb = bb;
+                } else if is_slice_iter_ty(iter_target_ty, self.tcx) {
+                    let slice_iter_arg_def_call = find_pre_loop_terminator_assign(
+                        iter_target_place,
+                        location.block,
+                        self.basic_blocks,
+                        dominators,
+                    );
+                    let slice_place = slice_iter_arg_def_call
+                        .and_then(|(terminator, _)| slice_iter_operand(&terminator, self.tcx));
+                    let Some(slice_place) = slice_place else {
+                        return;
+                    };
+
+                    let slice_def_call = find_pre_loop_terminator_assign(
+                        slice_place,
+                        location.block,
+                        self.basic_blocks,
+                        dominators,
+                    );
+                    let Some((slice_deref_arg_place, bb)) =
+                        slice_def_call.and_then(|(terminator, bb)| {
+                            slice_deref_operand(&terminator, self.tcx).map(|place| (place, bb))
+                        })
+                    else {
+                        return;
+                    };
+                    iter_target_place = slice_deref_arg_place;
+                    iter_target_bb = bb;
+                }
+            }
+
+            // Only continues if `Iterator` target either has a length/size with `isize::MAX` maxima,
+            // or has a known length/size returning function and is passed by reference.
+            iter_target_ty = place_ty(iter_target_place);
+            let is_isize_bound = is_isize_bound_collection(iter_target_ty, self.tcx);
+            let iter_target_deref_place = deref_place(iter_target_place, iter_target_bb);
+            let len_call = collection_len_call(iter_target_ty, self.tcx);
+            let len_bound_info = iter_target_deref_place.zip(len_call);
+            if !is_isize_bound && len_bound_info.is_none() {
+                return;
+            }
+
+            // Collects all recurring/loop blocks using the block containing the `std::iter::Iterator::next` call
+            // as the anchor block.
+            let mut loop_blocks = FxHashSet::default();
+            collect_loop_blocks(
+                location.block,
+                self.basic_blocks,
+                dominators,
+                &mut loop_blocks,
+            );
+            if loop_blocks.is_empty() {
+                return;
+            }
+
+            // Composes annotations for loop invariants based on collection length/size bounds,
+            // and indice increment operations.
+            for bb in loop_blocks {
+                let bb_data = &self.basic_blocks[bb];
+                for (stmt_idx, stmt) in bb_data.statements.iter().enumerate() {
+                    let inc_invariant_places =
+                        unit_incr_assign_places(stmt).filter(|(_, op_place)| {
+                            is_zero_initialized_before_anchor(
+                                *op_place,
+                                location.block,
+                                self.basic_blocks,
+                                dominators,
+                            )
+                        });
+                    if let Some((dest_place, op_place)) = inc_invariant_places {
+                        // Describes an `isize::MAX` bound annotation.
+                        if is_isize_bound {
+                            self.annotations.push(Annotation::Isize(
+                                Location {
+                                    block: bb,
+                                    statement_index: stmt_idx,
+                                },
+                                op_place,
+                            ));
+                        }
+
+                        // Describes a collection length/size bound annotation.
+                        if let Some(((collection_place, region), (len_call_def_id, len_gen_args))) =
+                            len_bound_info
+                        {
+                            self.annotations.push(Annotation::Len(
+                                Location {
+                                    block: bb,
+                                    statement_index: stmt_idx + 1,
+                                },
+                                dest_place,
+                                *collection_place,
+                                *region,
+                                len_call_def_id,
+                                len_gen_args,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'tcx, 'pass> Visitor<'tcx> for IteratorVisitor<'tcx, 'pass> {
+    fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
+        self.process_terminator(terminator, location);
+        self.super_terminator(terminator, location);
+    }
+}
+
+/// Returns `DefId` (if known) of a mirai annotation function.
+fn mirai_annotation_fn(name: &str, tcx: TyCtxt) -> Option<DefId> {
+    let annotations_crate = tcx
+        .crates(())
+        .iter()
+        .find(|crate_num| tcx.crate_name(**crate_num).as_str() == "mirai_annotations")
+        .expect("Expected `mirai_annotations` crate as a dependency");
+    tcx.exported_symbols(*annotations_crate)
+        .iter()
+        .find_map(|(exported_sym, _)| {
+            if let ExportedSymbol::NonGeneric(def_id) = exported_sym {
+                if tcx.def_kind(def_id) == DefKind::Fn && tcx.item_name(*def_id).as_str() == name {
+                    return Some(*def_id);
+                }
+            }
+            None
+        })
+}
+
+/// Returns terminator (if any) whose destination is the specified place,
+/// and whose basic block is a predecessor of the given anchor block.
+fn find_pre_loop_terminator_assign<'tcx>(
+    place: Place<'tcx>,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    dominators: &Dominators<BasicBlock>,
+) -> Option<(Terminator<'tcx>, BasicBlock)> {
+    let mut places = FxHashSet::default();
+    places.insert(place);
+    let mut already_visited = FxHashSet::default();
+
+    return find_pre_loop_terminator_assign_inner(
+        &mut places,
+        anchor_block,
+        anchor_block,
+        basic_blocks,
+        dominators,
+        &mut already_visited,
+    );
+
+    fn find_pre_loop_terminator_assign_inner<'tcx>(
+        places: &mut FxHashSet<Place<'tcx>>,
+        current_block: BasicBlock,
+        anchor_block: BasicBlock,
+        basic_blocks: &BasicBlocks<'tcx>,
+        dominators: &Dominators<BasicBlock>,
+        already_visited: &mut FxHashSet<BasicBlock>,
+    ) -> Option<(Terminator<'tcx>, BasicBlock)> {
+        for pred_bb in &basic_blocks.predecessors()[current_block] {
+            if already_visited.contains(pred_bb) {
+                continue;
+            }
+            already_visited.insert(*pred_bb);
+
+            if pred_bb.index() != anchor_block.index()
+                && !dominators.dominates(anchor_block, *pred_bb)
+            {
+                let bb_data = &basic_blocks[*pred_bb];
+                for stmt in &bb_data.statements {
+                    add_place_copy(places, stmt);
+                }
+                if let Some(terminator) = &bb_data.terminator {
+                    if let TerminatorKind::Call { destination, .. } = &terminator.kind {
+                        if places.contains(destination) {
+                            return Some((terminator.clone(), *pred_bb));
+                        }
+                    }
+                }
+                let assign = find_pre_loop_terminator_assign_inner(
+                    places,
+                    *pred_bb,
+                    anchor_block,
+                    basic_blocks,
+                    dominators,
+                    already_visited,
+                );
+                if assign.is_some() {
+                    return assign;
+                }
+            }
+        }
+
+        None
+    }
+
+    fn add_place_copy<'tcx>(places: &mut FxHashSet<Place<'tcx>>, stmt: &Statement<'tcx>) {
+        if let StatementKind::Assign(assign) = &stmt.kind {
+            if places.contains(&assign.0) {
+                if let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) = &assign.1 {
+                    places.insert(*op_place);
+                }
+            }
+        }
+    }
+}
+
+/// Returns true if the type is a known collection whose length/size maxima is `isize::MAX`.
+fn is_isize_bound_collection(ty: Ty, tcx: TyCtxt) -> bool {
+    ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
+        let adt_def_id = adt_def.did();
+        matches!(
+            (
+                tcx.crate_name(adt_def_id.krate).as_str(),
+                tcx.item_name(adt_def_id).as_str(),
+            ),
+            ("alloc" | "std", "Vec" | "VecDeque")
+                | ("std" | "hashbrown", "HashSet" | "HashMap")
+                | ("hashbrown", "HashTable")
+                | (
+                    "bounded_collections" | "frame_support",
+                    "BoundedVec" | "WeakBoundedVec"
+                )
+        )
+    })
+}
+
+/// Returns true if the `Iterator` adapter preserves the `Iterator::count` maxima.
+fn is_non_growing_iter_adapter(ty: Ty, tcx: TyCtxt) -> bool {
+    ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
+        let adt_def_id = adt_def.did();
+        matches!(
+            tcx.item_name(adt_def_id).as_str(),
+            "Copied"
+                | "Cloned"
+                | "Enumerate"
+                | "Filter"
+                | "FilterMap"
+                | "Inspect"
+                | "Map"
+                | "MapWhile"
+                | "Peekable"
+                | "Rev"
+                | "Skip"
+                | "SkipWhile"
+                | "Take"
+                | "TakeWhile"
+        ) && matches!(tcx.crate_name(adt_def_id.krate).as_str(), "core" | "std")
+    })
+}
+
+/// Returns true if the type is a known `IntoIter` (e.g. `std::vec::IntoIter`).
+fn is_into_iter_ty(ty: Ty, tcx: TyCtxt) -> bool {
+    ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
+        let adt_def_id = adt_def.did();
+        tcx.item_name(adt_def_id).as_str() == "IntoIter"
+            && matches!(
+                tcx.crate_name(adt_def_id.krate).as_str(),
+                "alloc" | "core" | "std"
+            )
+    })
+}
+
+/// Returns true if the type is a known slice `Iterator` (e.g. `std::slice::Iter`).
+fn is_slice_iter_ty(ty: Ty, tcx: TyCtxt) -> bool {
+    ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
+        let adt_def_id = adt_def.did();
+        matches!(tcx.item_name(adt_def_id).as_str(), "Iter" | "IterMut")
+            && matches!(tcx.crate_name(adt_def_id.krate).as_str(), "core" | "std")
+    })
+}
+
+/// Returns place (if any) for the arg/operand of `std::iter::IntoIterator::into_iter`.
+fn into_iter_operand<'tcx>(
+    terminator: &Terminator<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<Place<'tcx>> {
+    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
+        return None;
+    };
+    let (def_id, ..) = func.const_fn_def()?;
+    let into_iter_def_id = tcx
+        .lang_items()
+        .get(LangItem::IntoIterIntoIter)
+        .expect("Expected `std::iter::IntoIterator::into_iter` lang item");
+    if def_id != into_iter_def_id {
+        return None;
+    }
+    match args.first()?.node {
+        Operand::Copy(place) | Operand::Move(place) => Some(place),
+        Operand::Constant(_) => None,
+    }
+}
+
+/// Returns place (if any) for the arg/operand of an iterator adapter initializer
+/// (e.g. `std::iter::Iterator::enumerate`).
+fn iter_adapter_operand<'tcx>(
+    terminator: &Terminator<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<Place<'tcx>> {
+    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
+        return None;
+    };
+    let (def_id, ..) = func.const_fn_def()?;
+    let is_into_iter_call = matches!(
+        tcx.item_name(def_id).as_str(),
+        "copied"
+            | "cloned"
+            | "enumerate"
+            | "filter"
+            | "filter_map"
+            | "inspect"
+            | "map"
+            | "map_while"
+            | "peekable"
+            | "rev"
+            | "skip"
+            | "skip_while"
+            | "take"
+            | "take_while"
+    ) && matches!(tcx.crate_name(def_id.krate).as_str(), "core" | "std")
+        && tcx
+            .opt_associated_item(def_id)
+            .and_then(|assoc_item| assoc_item.trait_container(tcx))
+            .is_some_and(|trait_def_id| tcx.item_name(trait_def_id).as_str() == "Iterator");
+    if !is_into_iter_call {
+        return None;
+    }
+    match args.first()?.node {
+        Operand::Copy(place) | Operand::Move(place) => Some(place),
+        Operand::Constant(_) => None,
+    }
+}
+
+/// Returns place (if any) for the arg/operand of `[T]::iter`.
+fn slice_iter_operand<'tcx>(
+    terminator: &Terminator<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<Place<'tcx>> {
+    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
+        return None;
+    };
+    let (def_id, ..) = func.const_fn_def()?;
+    let is_slice_iter_call = tcx.item_name(def_id).as_str() == "iter"
+        && matches!(tcx.crate_name(def_id.krate).as_str(), "core" | "std")
+        && tcx
+            .opt_associated_item(def_id)
+            .and_then(|assoc_item| assoc_item.impl_container(tcx))
+            .is_some_and(|impl_def_id| {
+                let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
+                if let ImplSubject::Inherent(ty) = impl_subject {
+                    if let TyKind::Slice(slice_ty) = ty.kind() {
+                        if let TyKind::Param(param_ty) = slice_ty.kind() {
+                            return param_ty.name.as_str() == "T";
+                        }
+                    }
+                }
+                false
+            });
+    if !is_slice_iter_call {
+        return None;
+    }
+    match args.first()?.node {
+        Operand::Copy(place) | Operand::Move(place) => Some(place),
+        Operand::Constant(_) => None,
+    }
+}
+
+/// Returns place (if any) for the arg/operand of `[T]::iter` initializer.
+fn slice_deref_operand<'tcx>(
+    terminator: &Terminator<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<Place<'tcx>> {
+    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
+        return None;
+    };
+    let (def_id, ..) = func.const_fn_def()?;
+    let is_slice_deref_call = matches!(tcx.item_name(def_id).as_str(), "deref" | "deref_mut")
+        && matches!(tcx.crate_name(def_id.krate).as_str(), "core" | "std")
+        && tcx
+            .opt_associated_item(def_id)
+            .and_then(|assoc_item| assoc_item.trait_container(tcx))
+            .is_some_and(|trait_def_id| {
+                matches!(tcx.item_name(trait_def_id).as_str(), "Deref" | "DerefMut")
+            });
+    if !is_slice_deref_call {
+        return None;
+    }
+    match args.first()?.node {
+        Operand::Copy(place) | Operand::Move(place) => Some(place),
+        Operand::Constant(_) => None,
+    }
+}
+
+/// Returns `DefId` (if known and available) for the length/size call for the given collection type.
+fn collection_len_call<'tcx>(
+    ty: Ty<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<(DefId, &'tcx List<GenericArg<'tcx>>)> {
+    match ty.peel_refs().kind() {
+        TyKind::Adt(adt_def, gen_args) => {
+            let adt_def_id = adt_def.did();
+            let assoc_fn_def = |name: &str| {
+                tcx.associated_item_def_ids(adt_def_id)
+                    .iter()
+                    .find(|assoc_item_def_id| tcx.item_name(**assoc_item_def_id).as_str() == name)
+            };
+
+            match (
+                tcx.crate_name(adt_def_id.krate).as_str(),
+                tcx.item_name(adt_def_id).as_str(),
+            ) {
+                (
+                    "std" | "alloc",
+                    "Vec" | "VecDeque" | "LinkedList" | "BTreeMap" | "BTreeSet" | "BinaryHeap",
+                )
+                | ("std" | "hashbrown", "HashSet" | "HashMap")
+                | ("hashbrown", "HashTable")
+                | (
+                    "bounded_collections" | "frame_support",
+                    "BoundedVec" | "BoundedSlice" | "WeakBoundedVec" | "BoundedBTreeSet"
+                    | "BoundedBTreeMap",
+                ) => assoc_fn_def("len")
+                    .map(|def_id| (*def_id, *gen_args))
+                    .filter(|(def_id, _)| tcx.is_mir_available(def_id)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Accumulates all recurring/loop blocks given an anchor block.
+///
+/// The anchor block is typically the block with an `std::iter::Iterator::next` terminator.
+fn collect_loop_blocks(
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks,
+    dominators: &Dominators<BasicBlock>,
+    loop_blocks: &mut FxHashSet<BasicBlock>,
+) {
+    let mut already_visited = FxHashSet::default();
+    collect_loop_blocks_inner(
+        anchor_block,
+        anchor_block,
+        basic_blocks,
+        dominators,
+        loop_blocks,
+        &mut already_visited,
+    );
+
+    fn collect_loop_blocks_inner(
+        current_block: BasicBlock,
+        anchor_block: BasicBlock,
+        basic_blocks: &BasicBlocks,
+        dominators: &Dominators<BasicBlock>,
+        loop_blocks: &mut FxHashSet<BasicBlock>,
+        already_visited: &mut FxHashSet<BasicBlock>,
+    ) {
+        for pred_bb in &basic_blocks.predecessors()[current_block] {
+            if already_visited.contains(pred_bb) {
+                continue;
+            }
+            already_visited.insert(*pred_bb);
+
+            if pred_bb.index() != anchor_block.index()
+                && dominators.dominates(anchor_block, *pred_bb)
+            {
+                loop_blocks.insert(*pred_bb);
+                collect_loop_blocks_inner(
+                    *pred_bb,
+                    anchor_block,
+                    basic_blocks,
+                    dominators,
+                    loop_blocks,
+                    already_visited,
+                );
+            }
+        }
+    }
+}
+
+/// Returns places (if any) of the destination and "other" operand for a unit increment assignment (i.e. `x += 1`).
+fn unit_incr_assign_places<'tcx>(stmt: &Statement<'tcx>) -> Option<(Place<'tcx>, Place<'tcx>)> {
+    let StatementKind::Assign(assign) = &stmt.kind else {
+        return None;
+    };
+    let Rvalue::CheckedBinaryOp(BinOp::Add, operands) = &assign.1 else {
+        return None;
+    };
+    let (const_operand, op_place) = match (&operands.0, &operands.1) {
+        (Operand::Constant(const_operand), Operand::Copy(place) | Operand::Move(place))
+        | (Operand::Copy(place) | Operand::Move(place), Operand::Constant(const_operand))
+            if *const_operand.ty().kind() == TyKind::Uint(UintTy::Usize) =>
+        {
+            Some((const_operand, place))
+        }
+        _ => None,
+    }?;
+    let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_operand.const_ else {
+        return None;
+    };
+    let is_scalar_one = scalar.to_bits(scalar.size()).is_ok_and(|val| val == 1);
+    is_scalar_one.then_some((assign.0, *op_place))
+}
+
+/// Returns true if place is initialized/assigned to zero before the given anchor block.
+fn is_zero_initialized_before_anchor<'tcx>(
+    place: Place<'tcx>,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    dominators: &Dominators<BasicBlock>,
+) -> bool {
+    let mut already_visited = FxHashSet::default();
+    return is_zero_initialized_before_anchor_inner(
+        place,
+        anchor_block,
+        anchor_block,
+        basic_blocks,
+        dominators,
+        &mut already_visited,
+    );
+
+    fn is_zero_assignment_to_place<'tcx>(
+        place: Place<'tcx>,
+        stmt: &Statement<'tcx>,
+    ) -> Option<bool> {
+        let StatementKind::Assign(assign) = &stmt.kind else {
+            return None;
+        };
+        if place != assign.0 {
+            return None;
+        }
+        let Rvalue::Use(operand) = &assign.1 else {
+            return Some(false);
+        };
+        let Operand::Constant(const_operand) = operand else {
+            return Some(false);
+        };
+        let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_operand.const_ else {
+            return Some(false);
+        };
+        let is_scalar_zero = scalar.to_bits(scalar.size()).is_ok_and(|val| val == 0);
+        Some(is_scalar_zero)
+    }
+
+    fn is_zero_initialized_before_anchor_inner<'tcx>(
+        place: Place<'tcx>,
+        current_block: BasicBlock,
+        anchor_block: BasicBlock,
+        basic_blocks: &BasicBlocks<'tcx>,
+        dominators: &Dominators<BasicBlock>,
+        already_visited: &mut FxHashSet<BasicBlock>,
+    ) -> bool {
+        for pred_bb in &basic_blocks.predecessors()[current_block] {
+            if already_visited.contains(pred_bb) {
+                continue;
+            }
+            already_visited.insert(*pred_bb);
+
+            if pred_bb.index() != anchor_block.index()
+                && !dominators.dominates(anchor_block, *pred_bb)
+            {
+                let bb_data = &basic_blocks[*pred_bb];
+                for stmt in &bb_data.statements {
+                    if let Some(res) = is_zero_assignment_to_place(place, stmt) {
+                        return res;
+                    }
+                }
+                let res = is_zero_initialized_before_anchor_inner(
+                    place,
+                    *pred_bb,
+                    anchor_block,
+                    basic_blocks,
+                    dominators,
+                    already_visited,
+                );
+                if res {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}
