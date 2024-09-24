@@ -36,6 +36,13 @@ pub fn handle_meta_args(command: &str) {
             println!("{version_info}");
         }
         process::exit(0);
+    } else if env::args().any(|arg| arg == "-vV") {
+        if is_rustc_wrapper_mode() {
+            call_wrapped_rustc();
+        } else {
+            call_rustc(None, env::args());
+        }
+        process::exit(0);
     }
 }
 

@@ -1,0 +1,6 @@
+error: Failed to generate tractable entry points for any dispatchable function in public interface
+   |
+   = help: Add some unit tests for dispatchable functions.
+
+error: aborting due to 1 previous error
+

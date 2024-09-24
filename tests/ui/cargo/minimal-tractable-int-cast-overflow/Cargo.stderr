@@ -1,0 +1,6 @@
+warning: possible attempt to cast with overflow
+  --> src/lib.rs:20:24
+   |
+LL |             let val2 = val as u8; //~ WARN: cast with overflow
+   |                        ^^^^^^^^^
+

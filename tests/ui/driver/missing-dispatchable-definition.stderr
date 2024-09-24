@@ -1,0 +1,12 @@
+warning: Couldn't find definition for dispatchable: `do_something`
+   |
+   = note: This is most likely a bug in pallet-verifier.
+   = help: Please consider filling a bug report at https://github.com/davidsemakula/pallet-verifier/issues
+
+error: Failed to find definitions for any dispatchable function in public interface
+   |
+   = note: pallet-verifier can only analyze FRAME dispatchable functions
+   = help: Learn more at https://github.com/davidsemakula/pallet-verifier
+
+error: aborting due to 1 previous error; 1 warning emitted
+

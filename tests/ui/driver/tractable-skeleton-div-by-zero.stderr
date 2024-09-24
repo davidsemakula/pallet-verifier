@@ -1,0 +1,8 @@
+warning: possible attempt to divide by zero
+  --> tests/ui/driver/tractable-skeleton-div-by-zero.rs:22:9
+   |
+LL |         1 / val;
+   |         ^^^^^^^
+
+warning: 1 warning emitted
+

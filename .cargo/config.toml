@@ -1,3 +1,7 @@
 [net]
 # solve issues with installing vcpkg git submodule
 git-fetch-with-cli = true
+
+[unstable]
+# Adds `-Zbinary-dep-depinfo` flag that allows tracking of rlib files for UI test dependencies.
+binary-dep-depinfo = true

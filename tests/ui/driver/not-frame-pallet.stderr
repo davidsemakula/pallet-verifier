@@ -1,0 +1,7 @@
+error: Couldn't find any dispatchable functions in public interface
+   |
+   = note: pallet-verifier can only analyze FRAME pallets
+   = help: Learn more at https://github.com/davidsemakula/pallet-verifier
+
+error: aborting due to 1 previous error
+

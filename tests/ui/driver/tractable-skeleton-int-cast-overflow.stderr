@@ -1,0 +1,8 @@
+warning: possible attempt to cast with overflow
+  --> tests/ui/driver/tractable-skeleton-int-cast-overflow.rs:22:20
+   |
+LL |         let val2 = val as u8;
+   |                    ^^^^^^^^^
+
+warning: 1 warning emitted
+

@@ -1,0 +1,6 @@
+error: Failed to find definitions for any dispatchable function in public interface
+   |
+   = note: pallet-verifier can only analyze FRAME dispatchable functions
+   = help: Learn more at https://github.com/davidsemakula/pallet-verifier
+
+error: could not compile `no-dispatchables` (lib test) due to 1 previous error

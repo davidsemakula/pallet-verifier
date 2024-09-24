@@ -1,0 +1,10 @@
+[package]
+name = "no-specialized-dispatchable-calls"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+frame-support = "29.0.2"
+frame-system = "29.0.0"
+parity-scale-codec = "3.6.12"
+scale-info = "2.11.3"

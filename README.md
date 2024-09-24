@@ -75,6 +75,14 @@ You can access library documentation locally by running the following command fr
 cargo doc --no-deps --open
 ```
 
+## Testing
+
+You can run [UI tests](https://rustc-dev-guide.rust-lang.org/tests/ui.html) by running the following command from the project root
+
+```shell
+cargo test
+```
+
 ## License
 
 Licensed under either [MIT](/LICENSE-MIT) or [Apache-2.0](/LICENSE-APACHE) license at your option.
