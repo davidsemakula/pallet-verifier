@@ -278,23 +278,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             if def_id != self.iterator_next_def_id {
                 return;
             }
-
             let dominators = self.basic_blocks.dominators();
             let place_ty = |place: Place<'tcx>| place.ty(self.local_decls, self.tcx).ty;
-            let deref_place = |place: Place<'tcx>, bb: BasicBlock| {
-                self.basic_blocks[bb].statements.iter().find_map(|stmt| {
-                    let StatementKind::Assign(assign) = &stmt.kind else {
-                        return None;
-                    };
-                    if place != assign.0 {
-                        return None;
-                    }
-                    let Rvalue::Ref(region, _, op_place) = &assign.1 else {
-                        return None;
-                    };
-                    Some((op_place, region))
-                })
-            };
 
             // Finds place and basic block for `std::iter::Iterator::next` operand/arg.
             let iter_next_arg = args.first().expect("Expected an arg for `Iterator::next`");
@@ -304,10 +289,9 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     return;
                 }
             };
-            let (iter_next_arg_deref_place, _) = deref_place(*iter_next_arg_place, location.block)
-                .expect("Expected a mutable ref arg for `Iterator::next`");
             let iter_next_arg_def_call = find_pre_loop_terminator_assign(
-                *iter_next_arg_deref_place,
+                *iter_next_arg_place,
+                location.block,
                 location.block,
                 self.basic_blocks,
                 dominators,
@@ -320,12 +304,13 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 return;
             };
 
-            // Finds place and basic block for the topmost `Iterator` adapter operand/arg (if any).
+            // Finds place and basic block for the innermost `Iterator` adapter operand/arg (if any).
             while !is_isize_bound_collection(place_ty(iter_target_place), self.tcx)
                 && is_non_growing_iter_adapter(place_ty(iter_target_place), self.tcx)
             {
                 let adapter_def_call = find_pre_loop_terminator_assign(
                     iter_target_place,
+                    iter_target_bb,
                     location.block,
                     self.basic_blocks,
                     dominators,
@@ -347,6 +332,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 if is_into_iter_ty(iter_target_ty, self.tcx) {
                     let into_iter_arg_def_call = find_pre_loop_terminator_assign(
                         iter_target_place,
+                        iter_target_bb,
                         location.block,
                         self.basic_blocks,
                         dominators,
@@ -363,18 +349,22 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 } else if is_slice_iter_ty(iter_target_ty, self.tcx) {
                     let slice_iter_arg_def_call = find_pre_loop_terminator_assign(
                         iter_target_place,
+                        iter_target_bb,
                         location.block,
                         self.basic_blocks,
                         dominators,
                     );
-                    let slice_place = slice_iter_arg_def_call
-                        .and_then(|(terminator, _)| slice_iter_operand(&terminator, self.tcx));
-                    let Some(slice_place) = slice_place else {
+                    let Some((slice_place, slice_bb)) =
+                        slice_iter_arg_def_call.and_then(|(terminator, bb)| {
+                            slice_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
+                        })
+                    else {
                         return;
                     };
 
                     let slice_def_call = find_pre_loop_terminator_assign(
                         slice_place,
+                        slice_bb,
                         location.block,
                         self.basic_blocks,
                         dominators,
@@ -395,7 +385,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             // or has a known length/size returning function and is passed by reference.
             iter_target_ty = place_ty(iter_target_place);
             let is_isize_bound = is_isize_bound_collection(iter_target_ty, self.tcx);
-            let iter_target_deref_place = deref_place(iter_target_place, iter_target_bb);
+            let iter_target_deref_place =
+                deref_place_recursive(iter_target_place, iter_target_bb, self.basic_blocks);
             let len_call = collection_len_call(iter_target_ty, self.tcx);
             let len_bound_info = iter_target_deref_place.zip(len_call);
             if !is_isize_bound && len_bound_info.is_none() {
@@ -451,8 +442,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                                     statement_index: stmt_idx + 1,
                                 },
                                 dest_place,
-                                *collection_place,
-                                *region,
+                                collection_place,
+                                region,
                                 len_call_def_id,
                                 len_gen_args,
                             ));
@@ -490,17 +481,70 @@ fn mirai_annotation_fn(name: &str, tcx: TyCtxt) -> Option<DefId> {
         })
 }
 
+/// Finds the innermost place if the given place is a single deref of a local,
+/// otherwise returns the given place.
+fn direct_place(place: Place) -> Place {
+    match place.local_or_deref_local() {
+        Some(local) => Place::from(local),
+        None => place,
+    }
+}
+
+/// Returns the derefed place and region (if the current place is a reference).
+fn deref_place<'tcx>(
+    place: Place<'tcx>,
+    bb: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+) -> Option<(Place<'tcx>, Region<'tcx>)> {
+    let target_place = direct_place(place);
+    basic_blocks[bb].statements.iter().find_map(|stmt| {
+        let StatementKind::Assign(assign) = &stmt.kind else {
+            return None;
+        };
+        if target_place != assign.0 {
+            return None;
+        }
+        let Rvalue::Ref(region, _, op_place) = &assign.1 else {
+            return None;
+        };
+        Some((direct_place(*op_place), *region))
+    })
+}
+
+// Returns the innermost derefed place and region (if the current place is a reference).
+fn deref_place_recursive<'tcx>(
+    place: Place<'tcx>,
+    bb: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+) -> Option<(Place<'tcx>, Region<'tcx>)> {
+    let mut result = None;
+    let mut deref_target_place = place;
+    while let Some((derefed_place, region)) = deref_place(deref_target_place, bb, basic_blocks) {
+        result = Some((derefed_place, region));
+        deref_target_place = derefed_place;
+    }
+    result
+}
+
 /// Returns terminator (if any) whose destination is the specified place,
 /// and whose basic block is a predecessor of the given anchor block.
 fn find_pre_loop_terminator_assign<'tcx>(
     place: Place<'tcx>,
+    parent_block: BasicBlock,
     anchor_block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
     dominators: &Dominators<BasicBlock>,
 ) -> Option<(Terminator<'tcx>, BasicBlock)> {
     let mut places = FxHashSet::default();
-    places.insert(place);
     let mut already_visited = FxHashSet::default();
+
+    places.insert(place);
+    let mut deref_target_place = place;
+    while let Some((derefed_place, _)) = deref_place(deref_target_place, parent_block, basic_blocks)
+    {
+        places.insert(derefed_place);
+        deref_target_place = derefed_place;
+    }
 
     return find_pre_loop_terminator_assign_inner(
         &mut places,
@@ -530,7 +574,7 @@ fn find_pre_loop_terminator_assign<'tcx>(
             {
                 let bb_data = &basic_blocks[*pred_bb];
                 for stmt in &bb_data.statements {
-                    add_place_copy(places, stmt);
+                    add_place_aliases(places, stmt);
                 }
                 if let Some(terminator) = &bb_data.terminator {
                     if let TerminatorKind::Call { destination, .. } = &terminator.kind {
@@ -556,7 +600,7 @@ fn find_pre_loop_terminator_assign<'tcx>(
         None
     }
 
-    fn add_place_copy<'tcx>(places: &mut FxHashSet<Place<'tcx>>, stmt: &Statement<'tcx>) {
+    fn add_place_aliases<'tcx>(places: &mut FxHashSet<Place<'tcx>>, stmt: &Statement<'tcx>) {
         if let StatementKind::Assign(assign) = &stmt.kind {
             if places.contains(&assign.0) {
                 if let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) = &assign.1 {
