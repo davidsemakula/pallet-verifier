@@ -1,0 +1,12 @@
+warning: possible attempt to add with overflow
+  --> src/lib.rs:637:28
+   |
+LL |             SpendCount::<T, I>::put(index + 1);
+   |                                     ^^^^^^^^^
+
+warning: possible attempt to add with overflow
+  --> src/lib.rs:511:31
+   |
+LL |             ProposalCount::<T, I>::put(proposal_index + 1);
+   |                                        ^^^^^^^^^^^^^^^^^^
+
