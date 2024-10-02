@@ -2,7 +2,7 @@
 
 use rustc_abi::Size;
 use rustc_const_eval::interpret::Scalar;
-use rustc_data_structures::graph::dominators::Dominators;
+use rustc_data_structures::graph::{dominators::Dominators, WithSuccessors};
 use rustc_hash::FxHashSet;
 use rustc_hir::{def::DefKind, LangItem};
 use rustc_middle::{
@@ -66,13 +66,20 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
             let Some(basic_block) = body.basic_blocks.get(location.block) else {
                 continue;
             };
-            let Some(loop_stmt) = basic_block.statements.get(match annotation {
-                Annotation::Isize(location, ..) => location.statement_index,
-                Annotation::Len(location, ..) => location.statement_index.saturating_sub(1),
-            }) else {
+            let Some(source_info) = basic_block
+                .statements
+                .get(location.statement_index)
+                .or_else(|| basic_block.statements.first())
+                .map(|stmt| stmt.source_info)
+                .or_else(|| {
+                    basic_block
+                        .terminator
+                        .as_ref()
+                        .map(|terminator| terminator.source_info)
+                })
+            else {
                 continue;
             };
-            let source_info = loop_stmt.source_info;
 
             // Extracts predecessors and successors.
             let (predecessors, successors) =
@@ -393,21 +400,18 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 return;
             }
 
-            // Collects all recurring/loop blocks using the block containing the `std::iter::Iterator::next` call
-            // as the anchor block.
-            let mut loop_blocks = FxHashSet::default();
-            collect_loop_blocks(
-                location.block,
-                self.basic_blocks,
-                dominators,
-                &mut loop_blocks,
-            );
+            // Collects all recurring/loop blocks and reachable immediate loop successor blocks (if any),
+            // using the block containing the `std::iter::Iterator::next` call as the anchor block.
+            let loop_blocks = collect_loop_blocks(location.block, self.basic_blocks, dominators);
             if loop_blocks.is_empty() {
                 return;
             }
+            let loop_successors =
+                collect_reachable_loop_successors(location.block, &loop_blocks, self.basic_blocks);
 
             // Composes annotations for loop invariants based on collection length/size bounds,
             // and indice increment operations.
+            let mut pre_loop_len_maxima_places = FxHashSet::default();
             for bb in loop_blocks {
                 let bb_data = &self.basic_blocks[bb];
                 for (stmt_idx, stmt) in bb_data.statements.iter().enumerate() {
@@ -442,6 +446,35 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                                     statement_index: stmt_idx + 1,
                                 },
                                 dest_place,
+                                collection_place,
+                                region,
+                                len_call_def_id,
+                                len_gen_args,
+                            ));
+                        }
+
+                        // Tracks operand place for loop successor annotations (if any).
+                        if !loop_successors.is_empty() {
+                            pre_loop_len_maxima_places.insert(op_place);
+                        }
+                    }
+                }
+            }
+
+            // Composes collection length/size bound annotations for reachable loop successors (if any).
+            if !loop_successors.is_empty() && !pre_loop_len_maxima_places.is_empty() {
+                if let Some(((collection_place, region), (len_call_def_id, len_gen_args))) =
+                    len_bound_info
+                {
+                    for bb in loop_successors {
+                        for len_maxima_place in &pre_loop_len_maxima_places {
+                            // Describes a collection length/size bound annotation.
+                            self.annotations.push(Annotation::Len(
+                                Location {
+                                    block: bb,
+                                    statement_index: 0,
+                                },
+                                *len_maxima_place,
                                 collection_place,
                                 region,
                                 len_call_def_id,
@@ -818,7 +851,7 @@ fn collection_len_call<'tcx>(
             ) {
                 (
                     "std" | "alloc",
-                    "Vec" | "VecDeque" | "LinkedList" | "BTreeMap" | "BTreeSet" | "BinaryHeap",
+                    "Vec" | "VecDeque" | "LinkedList" | "BTreeSet" | "BTreeMap" | "BinaryHeap",
                 )
                 | ("std" | "hashbrown", "HashSet" | "HashMap")
                 | ("hashbrown", "HashTable")
@@ -843,17 +876,18 @@ fn collect_loop_blocks(
     anchor_block: BasicBlock,
     basic_blocks: &BasicBlocks,
     dominators: &Dominators<BasicBlock>,
-    loop_blocks: &mut FxHashSet<BasicBlock>,
-) {
+) -> FxHashSet<BasicBlock> {
+    let mut loop_blocks = FxHashSet::default();
     let mut already_visited = FxHashSet::default();
     collect_loop_blocks_inner(
         anchor_block,
         anchor_block,
         basic_blocks,
         dominators,
-        loop_blocks,
+        &mut loop_blocks,
         &mut already_visited,
     );
+    return loop_blocks;
 
     fn collect_loop_blocks_inner(
         current_block: BasicBlock,
@@ -884,6 +918,35 @@ fn collect_loop_blocks(
             }
         }
     }
+}
+
+/// Accumulates all reachable immediate successor blocks,
+/// given an anchor block and a list recurring/loop blocks.
+///
+/// The anchor block is typically the block with an `std::iter::Iterator::next` terminator.
+fn collect_reachable_loop_successors(
+    anchor_block: BasicBlock,
+    loop_blocks: &FxHashSet<BasicBlock>,
+    basic_blocks: &BasicBlocks,
+) -> FxHashSet<BasicBlock> {
+    let mut successors = FxHashSet::default();
+    for loop_block in loop_blocks {
+        for successor_bb in basic_blocks.successors(*loop_block) {
+            if successor_bb.index() != anchor_block.index() && !loop_blocks.contains(&successor_bb)
+            {
+                let bb_data = &basic_blocks[successor_bb];
+                let is_unreachable = bb_data.statements.is_empty()
+                    && bb_data
+                        .terminator
+                        .as_ref()
+                        .is_some_and(|terminator| terminator.kind == TerminatorKind::Unreachable);
+                if !is_unreachable {
+                    successors.insert(successor_bb);
+                }
+            }
+        }
+    }
+    successors
 }
 
 /// Returns places (if any) of the destination and "other" operand for a unit increment assignment (i.e. `x += 1`).
