@@ -169,7 +169,7 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
                             args: vec![dummy_spanned(Operand::Move(collection_ref_place))],
                             destination: collection_len_place,
                             target: Some(annotation_block),
-                            unwind: UnwindAction::Continue,
+                            unwind: UnwindAction::Unreachable,
                             call_source: CallSource::Misc,
                             fn_span: Span::default(),
                         },
@@ -210,7 +210,7 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
                     args: vec![dummy_spanned(Operand::Move(arg_place))],
                     destination: annotation_place,
                     target: Some(successor_block),
-                    unwind: UnwindAction::Continue,
+                    unwind: UnwindAction::Unreachable,
                     call_source: CallSource::Misc,
                     fn_span: Span::default(),
                 },
@@ -424,7 +424,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                                 dominators,
                             )
                         });
-                    if let Some((dest_place, op_place)) = inc_invariant_places {
+                    if let Some((_, op_place)) = inc_invariant_places {
                         // Describes an `isize::MAX` bound annotation.
                         if is_isize_bound {
                             self.annotations.push(Annotation::Isize(
@@ -433,23 +433,6 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                                     statement_index: stmt_idx,
                                 },
                                 op_place,
-                            ));
-                        }
-
-                        // Describes a collection length/size bound annotation.
-                        if let Some(((collection_place, region), (len_call_def_id, len_gen_args))) =
-                            len_bound_info
-                        {
-                            self.annotations.push(Annotation::Len(
-                                Location {
-                                    block: bb,
-                                    statement_index: stmt_idx + 1,
-                                },
-                                dest_place,
-                                collection_place,
-                                region,
-                                len_call_def_id,
-                                len_gen_args,
                             ));
                         }
 
@@ -840,9 +823,16 @@ fn collection_len_call<'tcx>(
         TyKind::Adt(adt_def, gen_args) => {
             let adt_def_id = adt_def.did();
             let assoc_fn_def = |name: &str| {
-                tcx.associated_item_def_ids(adt_def_id)
-                    .iter()
-                    .find(|assoc_item_def_id| tcx.item_name(**assoc_item_def_id).as_str() == name)
+                tcx.inherent_impls(adt_def_id).ok().and_then(|impls_| {
+                    impls_.iter().find_map(|impl_def_id| {
+                        tcx.associated_item_def_ids(impl_def_id)
+                            .iter()
+                            .find(|assoc_item_def_id| {
+                                tcx.item_name(**assoc_item_def_id).as_str() == name
+                                    && tcx.def_kind(*assoc_item_def_id) == DefKind::AssocFn
+                            })
+                    })
+                })
             };
 
             match (
