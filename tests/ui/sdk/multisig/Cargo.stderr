@@ -1,0 +1,36 @@
+warning: possible attempt to cast with overflow
+  --> src/lib.rs:433:4
+   |
+LL | /             Self::operate(
+LL | |                 who,
+LL | |                 threshold,
+LL | |                 other_signatories,
+...  |
+LL | |                 max_weight,
+LL | |             )
+   | |_____________^
+   |
+note: related location
+  --> src/lib.rs:545:24
+   |
+LL |             let mut approvals = m.approvals.len() as u16;
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: possible attempt to cast with overflow
+  --> src/lib.rs:376:4
+   |
+LL | /             Self::operate(
+LL | |                 who,
+LL | |                 threshold,
+LL | |                 other_signatories,
+...  |
+LL | |                 max_weight,
+LL | |             )
+   | |_____________^
+   |
+note: related location
+  --> src/lib.rs:545:24
+   |
+LL |             let mut approvals = m.approvals.len() as u16;
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+
