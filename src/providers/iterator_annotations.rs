@@ -3,19 +3,26 @@
 use rustc_abi::Size;
 use rustc_const_eval::interpret::Scalar;
 use rustc_data_structures::graph::{dominators::Dominators, WithSuccessors};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{def::DefKind, LangItem};
 use rustc_middle::{
     middle::exported_symbols::ExportedSymbol,
     mir::{
         visit::Visitor, BasicBlock, BasicBlockData, BasicBlocks, BinOp, Body, BorrowKind,
         CallSource, Const, ConstValue, HasLocalDecls, LocalDecl, LocalDecls, Location, MirPass,
-        Operand, Place, Rvalue, Statement, StatementKind, Terminator, TerminatorKind, UnwindAction,
+        Operand, Place, PlaceElem, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+        UnwindAction,
     },
     ty::{GenericArg, ImplSubject, List, Region, ScalarInt, Ty, TyCtxt, TyKind, TypeAndMut},
 };
-use rustc_span::{def_id::DefId, source_map::dummy_spanned, Span};
+use rustc_span::{
+    def_id::DefId,
+    source_map::{dummy_spanned, Spanned},
+    Span, Symbol,
+};
 use rustc_type_ir::UintTy;
+
+use itertools::Itertools;
 
 use crate::utils;
 
@@ -52,7 +59,7 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
             Size::from_bits(pointer_width),
         )
         .expect("Expected a valid scalar bound");
-        let usize_ty = Ty::new(tcx, TyKind::Uint(UintTy::Usize));
+        let usize_ty = Ty::new_uint(tcx, UintTy::Usize);
         let isize_max_operand = Operand::const_from_scalar(
             tcx,
             usize_ty,
@@ -122,30 +129,37 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
                     collection_len_def_id,
                     collection_len_gen_args,
                 ) => {
-                    // Creates collection ref statement.
-                    let collection_ty = collection_place.ty(body.local_decls(), tcx).ty;
-                    let collection_ref_ty = Ty::new_ref(
-                        tcx,
-                        collection_region,
-                        TypeAndMut {
-                            ty: collection_ty,
-                            mutbl: rustc_ast::Mutability::Not,
-                        },
-                    );
-                    let collection_ref_local_decl =
-                        LocalDecl::with_source_info(collection_ref_ty, source_info);
-                    let collection_ref_local = body.local_decls.push(collection_ref_local_decl);
-                    let collection_ref_place = Place::from(collection_ref_local);
-                    let collection_ref_rvalue =
-                        Rvalue::Ref(collection_region, BorrowKind::Shared, collection_place);
-                    let collection_ref_stmt = Statement {
-                        source_info,
-                        kind: StatementKind::Assign(Box::new((
-                            collection_ref_place,
-                            collection_ref_rvalue,
-                        ))),
+                    // Sets collection ref place.
+                    let collection_place_ty = collection_place.ty(body.local_decls(), tcx).ty;
+                    let collection_ref_place = if collection_place_ty.is_ref() {
+                        collection_place
+                    } else {
+                        // Creates collection ref statement.
+                        let collection_ty = collection_place.ty(body.local_decls(), tcx).ty;
+                        let collection_ref_ty = Ty::new_ref(
+                            tcx,
+                            collection_region,
+                            TypeAndMut {
+                                ty: collection_ty,
+                                mutbl: rustc_ast::Mutability::Not,
+                            },
+                        );
+                        let collection_ref_local_decl =
+                            LocalDecl::with_source_info(collection_ref_ty, source_info);
+                        let collection_ref_local = body.local_decls.push(collection_ref_local_decl);
+                        let collection_ref_place = Place::from(collection_ref_local);
+                        let collection_ref_rvalue =
+                            Rvalue::Ref(collection_region, BorrowKind::Shared, collection_place);
+                        let collection_ref_stmt = Statement {
+                            source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                collection_ref_place,
+                                collection_ref_rvalue,
+                            ))),
+                        };
+                        predecessors.push(collection_ref_stmt);
+                        collection_ref_place
                     };
-                    predecessors.push(collection_ref_stmt);
 
                     // Creates collection length/size annotation block.
                     let annotation_block_data = BasicBlockData::new(None);
@@ -182,7 +196,7 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
 
                     // Creates collection length/size bound statement.
                     let arg_rvalue = Rvalue::BinaryOp(
-                        BinOp::Le,
+                        BinOp::Lt,
                         Box::new((
                             Operand::Copy(dest_place),
                             Operand::Copy(collection_len_place),
@@ -252,7 +266,7 @@ struct IteratorVisitor<'tcx, 'pass> {
     tcx: TyCtxt<'tcx>,
     basic_blocks: &'pass BasicBlocks<'tcx>,
     local_decls: &'pass LocalDecls<'tcx>,
-    iterator_next_def_id: DefId,
+    iterator_assoc_items: FxHashMap<Symbol, DefId>,
     /// A list of `Iterator` annotation descriptions.
     annotations: Vec<Annotation<'tcx>>,
 }
@@ -263,209 +277,360 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         basic_blocks: &'pass BasicBlocks<'tcx>,
         local_decls: &'pass LocalDecls<'tcx>,
     ) -> Self {
-        let iterator_next_def_id = tcx
+        let iterator_trait_def_id = tcx
             .lang_items()
-            .get(LangItem::IteratorNext)
-            .expect("Expected `std::iter::Iterator::next` lang item");
+            .get(LangItem::Iterator)
+            .expect("Expected `std::iter::Iterator` lang item");
+        let iterator_assoc_items = tcx
+            .associated_items(iterator_trait_def_id)
+            .in_definition_order()
+            .map(|assoc_item| (assoc_item.name, assoc_item.def_id))
+            .collect();
         Self {
             tcx,
             basic_blocks,
             local_decls,
-            iterator_next_def_id,
+            iterator_assoc_items,
             annotations: Vec::new(),
         }
     }
 
+    /// Returns the DefId of an `Iterator` assoc item, given it's name.
+    fn iterator_assoc_item_def_id(&self, name: &str) -> Option<&DefId> {
+        self.iterator_assoc_items.get(&Symbol::intern(name))
+    }
+
+    /// Analyses and annotates `Iterator` terminators.
     fn process_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
-        if let TerminatorKind::Call { func, args, .. } = &terminator.kind {
-            // Only analyze calls to `std::iter::Iterator::next`.
+        if let TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            ..
+        } = &terminator.kind
+        {
             let Some((def_id, ..)) = func.const_fn_def() else {
                 return;
             };
-            if def_id != self.iterator_next_def_id {
+
+            // Handles calls to `std::iter::Iterator::next`.
+            let iterator_next_def_id = *self
+                .iterator_assoc_item_def_id("next")
+                .expect("Expected DefId for `std::iter::Iterator::next`");
+            if def_id == iterator_next_def_id {
+                self.process_iterator_next(args, location);
+            }
+
+            // Handles calls to `std::iter::Iterator::position` and `std::iter::Iterator::rposition`.
+            let iterator_position_def_id = *self
+                .iterator_assoc_item_def_id("position")
+                .expect("Expected DefId for `std::iter::Iterator::position`");
+            let iterator_rposition_def_id = *self
+                .iterator_assoc_item_def_id("rposition")
+                .expect("Expected DefId for `std::iter::Iterator::rposition`");
+            if def_id == iterator_position_def_id || def_id == iterator_rposition_def_id {
+                self.process_iterator_position(args, destination, location);
+            }
+        }
+    }
+
+    /// Analyzes and annotates calls to `std::iter::Iterator::next`.
+    fn process_iterator_next(&mut self, args: &[Spanned<Operand<'tcx>>], location: Location) {
+        let dominators = self.basic_blocks.dominators();
+        let place_ty = |place: Place<'tcx>| place.ty(self.local_decls, self.tcx).ty;
+
+        // Finds place for `std::iter::Iterator::next` operand/arg.
+        let iter_next_arg = args.first().expect("Expected an arg for `Iterator::next`");
+        let iter_next_arg_place = match &iter_next_arg.node {
+            Operand::Copy(place) | Operand::Move(place) => place,
+            Operand::Constant(_) => {
                 return;
             }
-            let dominators = self.basic_blocks.dominators();
-            let place_ty = |place: Place<'tcx>| place.ty(self.local_decls, self.tcx).ty;
+        };
 
-            // Finds place and basic block for `std::iter::Iterator::next` operand/arg.
-            let iter_next_arg = args.first().expect("Expected an arg for `Iterator::next`");
-            let iter_next_arg_place = match &iter_next_arg.node {
-                Operand::Copy(place) | Operand::Move(place) => place,
-                Operand::Constant(_) => {
-                    return;
-                }
-            };
-            let iter_next_arg_def_call = find_pre_loop_terminator_assign(
-                *iter_next_arg_place,
-                location.block,
+        // Finds place and basic block for `std::iter::IntoIterator::into_iter` operand/arg.
+        let iter_next_arg_def_call = find_pre_anchor_terminator_assign(
+            *iter_next_arg_place,
+            location.block,
+            location.block,
+            self.basic_blocks,
+            dominators,
+        );
+        let Some((mut iter_target_place, mut iter_target_bb)) =
+            iter_next_arg_def_call.clone().and_then(|(terminator, bb)| {
+                into_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
+            })
+        else {
+            return;
+        };
+
+        // Finds place and basic block for the innermost "non-growing" `Iterator` adapter operand/arg (if any).
+        while !is_isize_bound_collection(place_ty(iter_target_place), self.tcx)
+            && is_non_growing_iter_adapter(place_ty(iter_target_place), self.tcx)
+        {
+            let adapter_def_call = find_pre_anchor_terminator_assign(
+                iter_target_place,
+                iter_target_bb,
                 location.block,
                 self.basic_blocks,
                 dominators,
             );
-            let into_iter_arg_place =
-                iter_next_arg_def_call.clone().and_then(|(terminator, bb)| {
-                    into_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
-                });
-            let Some((mut iter_target_place, mut iter_target_bb)) = into_iter_arg_place else {
+            let Some((adapter_arg_place, bb)) = adapter_def_call.and_then(|(terminator, bb)| {
+                iter_adapter_operand(&terminator, self.tcx).map(|place| (place, bb))
+            }) else {
                 return;
             };
+            iter_target_place = adapter_arg_place;
+            iter_target_bb = bb;
+        }
 
-            // Finds place and basic block for the innermost `Iterator` adapter operand/arg (if any).
-            while !is_isize_bound_collection(place_ty(iter_target_place), self.tcx)
-                && is_non_growing_iter_adapter(place_ty(iter_target_place), self.tcx)
-            {
-                let adapter_def_call = find_pre_loop_terminator_assign(
+        // Finds place and basic block for a slice `Iterator` or `IntoIter` operand/arg (if any).
+        let mut iter_target_ty = place_ty(iter_target_place);
+        if !is_isize_bound_collection(iter_target_ty, self.tcx) {
+            if is_into_iter_ty(iter_target_ty, self.tcx) {
+                let into_iter_arg_def_call = find_pre_anchor_terminator_assign(
                     iter_target_place,
                     iter_target_bb,
                     location.block,
                     self.basic_blocks,
                     dominators,
                 );
-                let Some((adapter_arg_place, bb)) =
-                    adapter_def_call.and_then(|(terminator, bb)| {
-                        iter_adapter_operand(&terminator, self.tcx).map(|place| (place, bb))
+                let Some((collection_place, bb)) =
+                    into_iter_arg_def_call.and_then(|(terminator, bb)| {
+                        into_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
                     })
                 else {
                     return;
                 };
-                iter_target_place = adapter_arg_place;
+                iter_target_place = collection_place;
+                iter_target_bb = bb;
+            } else if is_slice_iter_ty(iter_target_ty, self.tcx) {
+                let slice_iter_arg_def_call = find_pre_anchor_terminator_assign(
+                    iter_target_place,
+                    iter_target_bb,
+                    location.block,
+                    self.basic_blocks,
+                    dominators,
+                );
+                let Some((slice_place, slice_bb)) =
+                    slice_iter_arg_def_call.and_then(|(terminator, bb)| {
+                        slice_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
+                    })
+                else {
+                    return;
+                };
+
+                let slice_def_call = find_pre_anchor_terminator_assign(
+                    slice_place,
+                    slice_bb,
+                    location.block,
+                    self.basic_blocks,
+                    dominators,
+                );
+                let Some((slice_deref_arg_place, bb)) =
+                    slice_def_call.and_then(|(terminator, bb)| {
+                        deref_operand(&terminator, self.tcx).map(|place| (place, bb))
+                    })
+                else {
+                    return;
+                };
+                iter_target_place = slice_deref_arg_place;
                 iter_target_bb = bb;
             }
+        }
 
-            // Finds place and basic block for a slice `Iterator` or `IntoIter` operand/arg (if any).
-            let mut iter_target_ty = place_ty(iter_target_place);
-            if !is_isize_bound_collection(iter_target_ty, self.tcx) {
-                if is_into_iter_ty(iter_target_ty, self.tcx) {
-                    let into_iter_arg_def_call = find_pre_loop_terminator_assign(
-                        iter_target_place,
-                        iter_target_bb,
-                        location.block,
-                        self.basic_blocks,
-                        dominators,
-                    );
-                    let Some((collection_place, bb)) =
-                        into_iter_arg_def_call.and_then(|(terminator, bb)| {
-                            into_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
-                        })
-                    else {
-                        return;
-                    };
-                    iter_target_place = collection_place;
-                    iter_target_bb = bb;
-                } else if is_slice_iter_ty(iter_target_ty, self.tcx) {
-                    let slice_iter_arg_def_call = find_pre_loop_terminator_assign(
-                        iter_target_place,
-                        iter_target_bb,
-                        location.block,
-                        self.basic_blocks,
-                        dominators,
-                    );
-                    let Some((slice_place, slice_bb)) =
-                        slice_iter_arg_def_call.and_then(|(terminator, bb)| {
-                            slice_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
-                        })
-                    else {
-                        return;
-                    };
-
-                    let slice_def_call = find_pre_loop_terminator_assign(
-                        slice_place,
-                        slice_bb,
-                        location.block,
-                        self.basic_blocks,
-                        dominators,
-                    );
-                    let Some((slice_deref_arg_place, bb)) =
-                        slice_def_call.and_then(|(terminator, bb)| {
-                            slice_deref_operand(&terminator, self.tcx).map(|place| (place, bb))
-                        })
-                    else {
-                        return;
-                    };
-                    iter_target_place = slice_deref_arg_place;
-                    iter_target_bb = bb;
-                }
-            }
-
-            // Only continues if `Iterator` target either has a length/size with `isize::MAX` maxima,
-            // or has a known length/size returning function and is passed by reference.
-            iter_target_ty = place_ty(iter_target_place);
-            let is_isize_bound = is_isize_bound_collection(iter_target_ty, self.tcx);
-            let iter_target_deref_place =
-                deref_place_recursive(iter_target_place, iter_target_bb, self.basic_blocks);
-            let len_call = collection_len_call(iter_target_ty, self.tcx);
-            let len_bound_info = iter_target_deref_place.zip(len_call);
-            if !is_isize_bound && len_bound_info.is_none() {
-                return;
-            }
-
-            // Collects all recurring/loop blocks and reachable immediate loop successor blocks (if any),
-            // using the block containing the `std::iter::Iterator::next` call as the anchor block.
-            let loop_blocks = collect_loop_blocks(location.block, self.basic_blocks, dominators);
-            if loop_blocks.is_empty() {
-                return;
-            }
-            let loop_successors =
-                collect_reachable_loop_successors(location.block, &loop_blocks, self.basic_blocks);
-
-            // Composes annotations for loop invariants based on collection length/size bounds,
-            // and indice increment operations.
-            let mut pre_loop_len_maxima_places = FxHashSet::default();
-            for bb in loop_blocks {
-                let bb_data = &self.basic_blocks[bb];
-                for (stmt_idx, stmt) in bb_data.statements.iter().enumerate() {
-                    let inc_invariant_places =
-                        unit_incr_assign_places(stmt).filter(|(_, op_place)| {
-                            is_zero_initialized_before_anchor(
-                                *op_place,
-                                location.block,
-                                self.basic_blocks,
-                                dominators,
-                            )
-                        });
-                    if let Some((_, op_place)) = inc_invariant_places {
-                        // Describes an `isize::MAX` bound annotation.
-                        if is_isize_bound {
-                            self.annotations.push(Annotation::Isize(
-                                Location {
-                                    block: bb,
-                                    statement_index: stmt_idx,
-                                },
-                                op_place,
-                            ));
+        // Only continues if `Iterator` target either has a length/size with `isize::MAX` maxima,
+        // or has a known length/size returning function and is passed by reference.
+        iter_target_ty = place_ty(iter_target_place);
+        let is_isize_bound = is_isize_bound_collection(iter_target_ty, self.tcx);
+        let len_call_info = collection_len_call(iter_target_ty, self.tcx);
+        let len_bound_info = len_call_info.and_then(|(len_call_def_id, len_gen_args)| {
+            let collection_place_info =
+                deref_place_recursive(iter_target_place, iter_target_bb, self.basic_blocks)
+                    .or_else(|| {
+                        if let TyKind::Ref(region, _, _) = iter_target_ty.kind() {
+                            Some((iter_target_place, *region))
+                        } else {
+                            None
                         }
+                    });
+            collection_place_info.map(|(collection_place, region)| {
+                (collection_place, region, len_call_def_id, len_gen_args)
+            })
+        });
+        if !is_isize_bound && len_bound_info.is_none() {
+            return;
+        }
 
-                        // Tracks operand place for loop successor annotations (if any).
-                        if !loop_successors.is_empty() {
-                            pre_loop_len_maxima_places.insert(op_place);
-                        }
+        // Collects all recurring/loop blocks and reachable immediate loop successor blocks (if any),
+        // using the block containing the `std::iter::Iterator::next` call as the anchor block.
+        let loop_blocks = collect_loop_blocks(location.block, self.basic_blocks, dominators);
+        if loop_blocks.is_empty() {
+            return;
+        }
+        let loop_successors =
+            collect_reachable_loop_successors(location.block, &loop_blocks, self.basic_blocks);
+
+        // Composes annotations for loop invariants based on collection length/size bounds,
+        // and indice increment operations.
+        let mut pre_loop_len_maxima_places = FxHashSet::default();
+        for bb in loop_blocks {
+            let bb_data = &self.basic_blocks[bb];
+            for (stmt_idx, stmt) in bb_data.statements.iter().enumerate() {
+                let inc_invariant_places = unit_incr_assign_places(stmt).filter(|(_, op_place)| {
+                    is_zero_initialized_before_anchor(
+                        *op_place,
+                        location.block,
+                        self.basic_blocks,
+                        dominators,
+                    )
+                });
+                if let Some((_, op_place)) = inc_invariant_places {
+                    // Describes an `isize::MAX` bound annotation.
+                    if is_isize_bound {
+                        self.annotations.push(Annotation::Isize(
+                            Location {
+                                block: bb,
+                                statement_index: stmt_idx,
+                            },
+                            op_place,
+                        ));
+                    }
+
+                    // Tracks operand place for loop successor annotations (if any).
+                    if !loop_successors.is_empty() {
+                        pre_loop_len_maxima_places.insert(op_place);
                     }
                 }
             }
+        }
 
-            // Composes collection length/size bound annotations for reachable loop successors (if any).
-            if !loop_successors.is_empty() && !pre_loop_len_maxima_places.is_empty() {
-                if let Some(((collection_place, region), (len_call_def_id, len_gen_args))) =
-                    len_bound_info
-                {
-                    for bb in loop_successors {
-                        for len_maxima_place in &pre_loop_len_maxima_places {
-                            // Describes a collection length/size bound annotation.
-                            self.annotations.push(Annotation::Len(
-                                Location {
-                                    block: bb,
-                                    statement_index: 0,
-                                },
-                                *len_maxima_place,
-                                collection_place,
-                                region,
-                                len_call_def_id,
-                                len_gen_args,
-                            ));
-                        }
+        // Composes collection length/size bound annotations for reachable loop successors (if any).
+        if !loop_successors.is_empty() && !pre_loop_len_maxima_places.is_empty() {
+            if let Some((collection_place, region, len_call_def_id, len_gen_args)) = len_bound_info
+            {
+                for bb in loop_successors {
+                    for len_maxima_place in &pre_loop_len_maxima_places {
+                        // Describes a collection length/size bound annotation.
+                        self.annotations.push(Annotation::Len(
+                            Location {
+                                block: bb,
+                                statement_index: 0,
+                            },
+                            *len_maxima_place,
+                            collection_place,
+                            region,
+                            len_call_def_id,
+                            len_gen_args,
+                        ));
                     }
                 }
+            }
+        }
+    }
+
+    /// Analyzes and annotates calls to `std::iter::Iterator::position` and `std::iter::Iterator::rposition`.
+    fn process_iterator_position(
+        &mut self,
+        args: &[Spanned<Operand<'tcx>>],
+        destination: &Place<'tcx>,
+        location: Location,
+    ) {
+        // Finds place for `std::iter::Iterator::position` operand/arg.
+        let iter_pos_arg = args
+            .first()
+            .expect("Expected an arg for `Iterator::position`");
+        let iter_pos_arg_place = match &iter_pos_arg.node {
+            Operand::Copy(place) | Operand::Move(place) => place,
+            Operand::Constant(_) => {
+                return;
+            }
+        };
+
+        // Finds place and basic block for a slice `Iterator` operand/arg (if any).
+        // NOTE: We only care about slice `Iterator`s because our length annotation requires
+        // the target collection to be passed by reference (not value) so that
+        // it's length/size can still be referenced after this iteration.
+        let dominators = self.basic_blocks.dominators();
+        let slice_iter_arg_def_call = find_pre_anchor_terminator_assign(
+            *iter_pos_arg_place,
+            location.block,
+            location.block,
+            self.basic_blocks,
+            dominators,
+        );
+        let Some((slice_place, slice_bb)) = slice_iter_arg_def_call.and_then(|(terminator, bb)| {
+            slice_iter_operand(&terminator, self.tcx).map(|place| (place, bb))
+        }) else {
+            return;
+        };
+        let slice_def_call = find_pre_anchor_terminator_assign(
+            slice_place,
+            slice_bb,
+            location.block,
+            self.basic_blocks,
+            dominators,
+        );
+        let Some((slice_deref_arg_place, slice_deref_bb)) =
+            slice_def_call.and_then(|(terminator, bb)| {
+                deref_operand(&terminator, self.tcx).map(|place| (place, bb))
+            })
+        else {
+            return;
+        };
+
+        // Only continues if `Iterator` target has a known length/size returning function
+        // and is passed by reference.
+        let Some((len_call_def_id, len_gen_args)) = collection_len_call(
+            slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
+            self.tcx,
+        ) else {
+            return;
+        };
+        let collection_place_info =
+            deref_place_recursive(slice_deref_arg_place, slice_deref_bb, self.basic_blocks)
+                .or_else(|| {
+                    if let TyKind::Ref(region, _, _) = slice_deref_arg_place
+                        .ty(self.local_decls, self.tcx)
+                        .ty
+                        .kind()
+                    {
+                        Some((slice_deref_arg_place, *region))
+                    } else {
+                        None
+                    }
+                });
+        let Some((collection_place, region)) = collection_place_info else {
+            return;
+        };
+
+        // Finds switches based on the discriminant of return value of `std::iter::Iterator::position`
+        // in successor blocks.
+        for bb in self.basic_blocks.successors(location.block) {
+            // Finds `Option::Some` switch target.
+            let Some(target_bb) = some_discr_switch_target(*destination, &self.basic_blocks[bb])
+            else {
+                continue;
+            };
+
+            for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
+                // Finds `Option::Some` downcast to `usize` places (if any).
+                let Some(some_place) = some_downcast_to_usize_place(stmt, self.tcx) else {
+                    continue;
+                };
+
+                // Describes a collection length/size bound annotation.
+                self.annotations.push(Annotation::Len(
+                    Location {
+                        block: target_bb,
+                        statement_index: stmt_idx + 1,
+                    },
+                    some_place,
+                    collection_place,
+                    region,
+                    len_call_def_id,
+                    len_gen_args,
+                ));
             }
         }
     }
@@ -544,7 +709,7 @@ fn deref_place_recursive<'tcx>(
 
 /// Returns terminator (if any) whose destination is the specified place,
 /// and whose basic block is a predecessor of the given anchor block.
-fn find_pre_loop_terminator_assign<'tcx>(
+fn find_pre_anchor_terminator_assign<'tcx>(
     place: Place<'tcx>,
     parent_block: BasicBlock,
     anchor_block: BasicBlock,
@@ -562,7 +727,7 @@ fn find_pre_loop_terminator_assign<'tcx>(
         deref_target_place = derefed_place;
     }
 
-    return find_pre_loop_terminator_assign_inner(
+    return find_pre_anchor_terminator_assign_inner(
         &mut places,
         anchor_block,
         anchor_block,
@@ -571,7 +736,7 @@ fn find_pre_loop_terminator_assign<'tcx>(
         &mut already_visited,
     );
 
-    fn find_pre_loop_terminator_assign_inner<'tcx>(
+    fn find_pre_anchor_terminator_assign_inner<'tcx>(
         places: &mut FxHashSet<Place<'tcx>>,
         current_block: BasicBlock,
         anchor_block: BasicBlock,
@@ -599,7 +764,7 @@ fn find_pre_loop_terminator_assign<'tcx>(
                         }
                     }
                 }
-                let assign = find_pre_loop_terminator_assign_inner(
+                let assign = find_pre_anchor_terminator_assign_inner(
                     places,
                     *pred_bb,
                     anchor_block,
@@ -788,16 +953,13 @@ fn slice_iter_operand<'tcx>(
     }
 }
 
-/// Returns place (if any) for the arg/operand of `[T]::iter` initializer.
-fn slice_deref_operand<'tcx>(
-    terminator: &Terminator<'tcx>,
-    tcx: TyCtxt<'tcx>,
-) -> Option<Place<'tcx>> {
+/// Returns place (if any) for the arg/operand of `std::ops::Deref` or `std::ops::DerefMut`.
+fn deref_operand<'tcx>(terminator: &Terminator<'tcx>, tcx: TyCtxt<'tcx>) -> Option<Place<'tcx>> {
     let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
         return None;
     };
     let (def_id, ..) = func.const_fn_def()?;
-    let is_slice_deref_call = matches!(tcx.item_name(def_id).as_str(), "deref" | "deref_mut")
+    let is_deref_call = matches!(tcx.item_name(def_id).as_str(), "deref" | "deref_mut")
         && matches!(tcx.crate_name(def_id.krate).as_str(), "core" | "std")
         && tcx
             .opt_associated_item(def_id)
@@ -805,7 +967,7 @@ fn slice_deref_operand<'tcx>(
             .is_some_and(|trait_def_id| {
                 matches!(tcx.item_name(trait_def_id).as_str(), "Deref" | "DerefMut")
             });
-    if !is_slice_deref_call {
+    if !is_deref_call {
         return None;
     }
     match args.first()?.node {
@@ -859,7 +1021,7 @@ fn collection_len_call<'tcx>(
     }
 }
 
-/// Accumulates all recurring/loop blocks given an anchor block.
+/// Collects all recurring/loop blocks given an anchor block.
 ///
 /// The anchor block is typically the block with an `std::iter::Iterator::next` terminator.
 fn collect_loop_blocks(
@@ -1042,4 +1204,67 @@ fn is_zero_initialized_before_anchor<'tcx>(
 
         false
     }
+}
+
+/// Returns target basic block (if any) for the `Option::Some` variant of a switch on an `Option` discriminant.
+fn some_discr_switch_target<'tcx>(
+    place: Place<'tcx>,
+    bb_data: &BasicBlockData<'tcx>,
+) -> Option<BasicBlock> {
+    bb_data.statements.iter().find_map(|stmt| {
+        let StatementKind::Assign(assign) = &stmt.kind else {
+            return None;
+        };
+        let dest_place = assign.0;
+        let Rvalue::Discriminant(op_place) = assign.1 else {
+            return None;
+        };
+        if op_place != place {
+            return None;
+        }
+
+        let terminator = bb_data.terminator.as_ref()?;
+        let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {
+            return None;
+        };
+        let discr_place = match discr {
+            Operand::Copy(place) | Operand::Move(place) => place,
+            Operand::Constant(_) => {
+                return None;
+            }
+        };
+        if *discr_place != dest_place {
+            return None;
+        }
+
+        Some(targets.target_for_value(1))
+    })
+}
+
+/// Returns place (if any) for the `Option::Some` downcast to `usize`.
+fn some_downcast_to_usize_place<'tcx>(
+    stmt: &Statement<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<Place<'tcx>> {
+    let StatementKind::Assign(assign) = &stmt.kind else {
+        return None;
+    };
+
+    if let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) = &assign.1 {
+        if let Some((
+            (_, PlaceElem::Downcast(variant_name, variant_idx)),
+            (_, PlaceElem::Field(field_idx, field_ty)),
+        )) = op_place.iter_projections().collect_tuple()
+        {
+            if (variant_name.is_none() || variant_name.is_some_and(|name| name.as_str() == "Some"))
+                && variant_idx.as_u32() == 1
+                && field_idx.as_u32() == 0
+                && field_ty == Ty::new_uint(tcx, UintTy::Usize)
+            {
+                return Some(assign.0);
+            }
+        }
+    }
+
+    None
 }
