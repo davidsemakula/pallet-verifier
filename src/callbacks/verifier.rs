@@ -16,6 +16,7 @@ use rustc_span::{
 
 use std::{cell::RefCell, collections::HashMap, process, rc::Rc};
 
+use itertools::Itertools;
 use mirai::{
     body_visitor::BodyVisitor, call_graph::CallGraph, constant_domain::ConstantValueCache,
     crate_visitor::CrateVisitor, known_names::KnownNamesCache, summaries::PersistentSummaryCache,
@@ -322,6 +323,12 @@ fn emit_diagnostics(
             .iter()
             .any(|diag_span| entry_point_span.contains(diag_span.source_callsite()))
     };
+    let is_span_from_expansion = |mspan: &MultiSpan| {
+        mspan
+            .primary_spans()
+            .iter()
+            .any(|span| span.from_expansion())
+    };
     let is_span_in_cfg_test_mod = |mspan: &MultiSpan| {
         mspan.primary_spans().iter().any(|span| {
             test_mod_spans
@@ -437,14 +444,19 @@ fn emit_diagnostics(
                     .iter()
                     .map(|sub_diag| sub_diag.span.clone()),
             )
-            .skip_while(|span| !is_span_local(span) || is_span_in_entry_point(span))
+            .skip_while(|span| {
+                !is_span_local(span) || is_span_from_expansion(span) || is_span_in_entry_point(span)
+            })
             .collect::<Vec<_>>();
         if relevant_spans.is_empty()
             || relevant_spans.iter().any(|mspan| {
-                is_span_in_frame_substrate_core(mspan)
-                    || is_span_from_dispatch_error_from_impl(mspan)
-                    || is_span_in_cfg_test_mod(mspan)
+                is_span_from_dispatch_error_from_impl(mspan) || is_span_in_cfg_test_mod(mspan)
             })
+            || relevant_spans
+                .iter()
+                .rev()
+                .take_while_inclusive(|mspan| !is_span_local(mspan))
+                .any(is_span_in_frame_substrate_core)
         {
             diagnostic.cancel();
             continue;
