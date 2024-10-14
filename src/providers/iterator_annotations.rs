@@ -318,7 +318,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 .iterator_assoc_item_def_id("next")
                 .expect("Expected DefId for `std::iter::Iterator::next`");
             if def_id == iterator_next_def_id {
-                self.process_iterator_next(args, location);
+                self.process_iterator_next(args, destination, location);
             }
 
             // Handles calls to `std::iter::Iterator::position` and `std::iter::Iterator::rposition`.
@@ -335,7 +335,12 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
     }
 
     /// Analyzes and annotates calls to `std::iter::Iterator::next`.
-    fn process_iterator_next(&mut self, args: &[Spanned<Operand<'tcx>>], location: Location) {
+    fn process_iterator_next(
+        &mut self,
+        args: &[Spanned<Operand<'tcx>>],
+        destination: &Place<'tcx>,
+        location: Location,
+    ) {
         let dominators = self.basic_blocks.dominators();
         let place_ty = |place: Place<'tcx>| place.ty(self.local_decls, self.tcx).ty;
 
@@ -474,8 +479,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Composes annotations for loop invariants based on collection length/size bounds,
         // and indice increment operations.
         let mut pre_loop_len_maxima_places = FxHashSet::default();
-        for bb in loop_blocks {
-            let bb_data = &self.basic_blocks[bb];
+        for bb in &loop_blocks {
+            let bb_data = &self.basic_blocks[*bb];
             for (stmt_idx, stmt) in bb_data.statements.iter().enumerate() {
                 let inc_invariant_places = unit_incr_assign_places(stmt).filter(|(_, op_place)| {
                     is_zero_initialized_before_anchor(
@@ -483,6 +488,14 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                         location.block,
                         self.basic_blocks,
                         dominators,
+                    ) || is_enumerate_index(
+                        *op_place,
+                        *destination,
+                        *iter_next_arg_place,
+                        &loop_blocks,
+                        self.basic_blocks,
+                        self.local_decls,
+                        self.tcx,
                     )
                 });
                 if let Some((_, op_place)) = inc_invariant_places {
@@ -490,7 +503,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     if is_isize_bound {
                         self.annotations.push(Annotation::Isize(
                             Location {
-                                block: bb,
+                                block: *bb,
                                 statement_index: stmt_idx,
                             },
                             op_place,
@@ -615,7 +628,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
             for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
                 // Finds `Option::Some` downcast to `usize` places (if any).
-                let Some(some_place) = some_downcast_to_usize_place(stmt, self.tcx) else {
+                let Some(some_place) = some_downcast_to_usize_place(*destination, stmt, self.tcx)
+                else {
                     continue;
                 };
 
@@ -808,6 +822,7 @@ fn is_isize_bound_collection(ty: Ty, tcx: TyCtxt) -> bool {
                     "bounded_collections" | "frame_support",
                     "BoundedVec" | "WeakBoundedVec"
                 )
+                | ("frame_support", "PrefixIterator" | "KeyPrefixIterator")
         )
     })
 }
@@ -1206,7 +1221,71 @@ fn is_zero_initialized_before_anchor<'tcx>(
     }
 }
 
-/// Returns target basic block (if any) for the `Option::Some` variant of a switch on an `Option` discriminant.
+/// Returns true if place is the index of an `Enumerate::next` call.
+fn is_enumerate_index<'tcx>(
+    target_place: Place<'tcx>,
+    iter_next_dest_place: Place<'tcx>,
+    iter_next_arg_place: Place<'tcx>,
+    loop_blocks: &FxHashSet<BasicBlock>,
+    basic_blocks: &BasicBlocks<'tcx>,
+    local_decls: &LocalDecls<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> bool {
+    let iter_next_arg_ty = iter_next_arg_place.ty(local_decls, tcx).ty;
+    let Some(adt_def) = iter_next_arg_ty.peel_refs().ty_adt_def() else {
+        return false;
+    };
+    let adt_def_id = adt_def.did();
+    if !matches!(tcx.crate_name(adt_def_id.krate).as_str(), "core" | "std")
+        || tcx.item_name(adt_def_id).as_str() != "Enumerate"
+    {
+        return false;
+    }
+
+    for bb in loop_blocks {
+        for stmt in &basic_blocks[*bb].statements {
+            let StatementKind::Assign(assign) = &stmt.kind else {
+                continue;
+            };
+            if assign.0 != target_place {
+                continue;
+            }
+            let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) = &assign.1 else {
+                continue;
+            };
+            if op_place.local != iter_next_dest_place.local {
+                continue;
+            }
+            if let Some((
+                (_, PlaceElem::Downcast(variant_name, variant_idx)),
+                (_, PlaceElem::Field(inner_field_idx, inner_field_ty)),
+                (_, PlaceElem::Field(outer_field_idx, outer_field_ty)),
+            )) = op_place.iter_projections().collect_tuple()
+            {
+                let usize_ty = Ty::new_uint(tcx, UintTy::Usize);
+                let inner_field_ty_first = match inner_field_ty.kind() {
+                    TyKind::Tuple(ty_list) => ty_list.first(),
+                    _ => None,
+                };
+                if (variant_name.is_none()
+                    || variant_name.is_some_and(|name| name.as_str() == "Some"))
+                    && variant_idx.as_u32() == 1
+                    && inner_field_idx.as_u32() == 0
+                    && inner_field_ty_first.is_some_and(|ty| *ty == usize_ty)
+                    && outer_field_idx.as_u32() == 0
+                    && outer_field_ty == usize_ty
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Returns target basic block (if any) for the `Option::Some` variant of a switch on
+/// `Option` discriminant of give place.
 fn some_discr_switch_target<'tcx>(
     place: Place<'tcx>,
     bb_data: &BasicBlockData<'tcx>,
@@ -1241,28 +1320,32 @@ fn some_discr_switch_target<'tcx>(
     })
 }
 
-/// Returns place (if any) for the `Option::Some` downcast to `usize`.
+/// Returns place (if any) for the `Option::Some` downcast to `usize` of given place.
 fn some_downcast_to_usize_place<'tcx>(
+    place: Place,
     stmt: &Statement<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<Place<'tcx>> {
     let StatementKind::Assign(assign) = &stmt.kind else {
         return None;
     };
-
-    if let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) = &assign.1 {
-        if let Some((
-            (_, PlaceElem::Downcast(variant_name, variant_idx)),
-            (_, PlaceElem::Field(field_idx, field_ty)),
-        )) = op_place.iter_projections().collect_tuple()
+    let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) = &assign.1 else {
+        return None;
+    };
+    if op_place.local != place.local {
+        return None;
+    }
+    if let Some((
+        (_, PlaceElem::Downcast(variant_name, variant_idx)),
+        (_, PlaceElem::Field(field_idx, field_ty)),
+    )) = op_place.iter_projections().collect_tuple()
+    {
+        if (variant_name.is_none() || variant_name.is_some_and(|name| name.as_str() == "Some"))
+            && variant_idx.as_u32() == 1
+            && field_idx.as_u32() == 0
+            && field_ty == Ty::new_uint(tcx, UintTy::Usize)
         {
-            if (variant_name.is_none() || variant_name.is_some_and(|name| name.as_str() == "Some"))
-                && variant_idx.as_u32() == 1
-                && field_idx.as_u32() == 0
-                && field_ty == Ty::new_uint(tcx, UintTy::Usize)
-            {
-                return Some(assign.0);
-            }
+            return Some(assign.0);
         }
     }
 

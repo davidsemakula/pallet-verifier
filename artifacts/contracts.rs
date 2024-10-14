@@ -53,6 +53,16 @@ pub mod core {
         }
     }
 
+    pub mod iter {
+        pub mod adapters {
+            pub mod enumerate {
+                pub mod implement_core_iter_adapters_enumerate_Enumerate_generic_par_I {
+                    noop_result_custom_ty!(next);
+                }
+            }
+        }
+    }
+
     pub mod ops {
         pub mod arith {
             macro_rules! div {
