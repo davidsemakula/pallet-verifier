@@ -617,15 +617,11 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Finds switches based on the discriminant of return value of `std::iter::Iterator::position`
-        // in successor blocks.
-        for bb in self.basic_blocks.successors(location.block) {
-            // Finds `Option::Some` switch target.
-            let Some(target_bb) = some_discr_switch_target(*destination, &self.basic_blocks[bb])
-            else {
-                continue;
-            };
-
+        // Finds `Option::Some` target blocks for switches based on the discriminant of
+        // return value of `std::iter::Iterator::position` in successor blocks.
+        for target_bb in
+            collect_some_discr_switch_targets(*destination, location.block, self.basic_blocks)
+        {
             for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
                 // Finds `Option::Some` downcast to `usize` places (if any).
                 let Some(some_place) = some_downcast_to_usize_place(*destination, stmt, self.tcx)
@@ -1284,6 +1280,52 @@ fn is_enumerate_index<'tcx>(
     false
 }
 
+/// Collects target basic blocks (if any) for the `Option::Some` variant of a switch on
+/// `Option` discriminant of give place.
+fn collect_some_discr_switch_targets<'tcx>(
+    place: Place<'tcx>,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+) -> FxHashSet<BasicBlock> {
+    let mut target_blocks = FxHashSet::default();
+    let mut already_visited = FxHashSet::default();
+    collect_some_discr_switch_targets_inner(
+        place,
+        anchor_block,
+        basic_blocks,
+        &mut target_blocks,
+        &mut already_visited,
+    );
+    return target_blocks;
+    fn collect_some_discr_switch_targets_inner<'tcx>(
+        destination: Place<'tcx>,
+        anchor_block: BasicBlock,
+        basic_blocks: &BasicBlocks<'tcx>,
+        target_blocks: &mut FxHashSet<BasicBlock>,
+        already_visited: &mut FxHashSet<BasicBlock>,
+    ) {
+        for bb in basic_blocks.successors(anchor_block) {
+            if already_visited.contains(&bb) {
+                continue;
+            }
+            already_visited.insert(bb);
+
+            // Finds `Option::Some` switch target (if any).
+            if let Some(target_bb) = some_discr_switch_target(destination, &basic_blocks[bb]) {
+                target_blocks.insert(target_bb);
+            }
+
+            collect_some_discr_switch_targets_inner(
+                destination,
+                bb,
+                basic_blocks,
+                target_blocks,
+                already_visited,
+            );
+        }
+    }
+}
+
 /// Returns target basic block (if any) for the `Option::Some` variant of a switch on
 /// `Option` discriminant of give place.
 fn some_discr_switch_target<'tcx>(
@@ -1294,7 +1336,6 @@ fn some_discr_switch_target<'tcx>(
         let StatementKind::Assign(assign) = &stmt.kind else {
             return None;
         };
-        let dest_place = assign.0;
         let Rvalue::Discriminant(op_place) = assign.1 else {
             return None;
         };
@@ -1312,7 +1353,7 @@ fn some_discr_switch_target<'tcx>(
                 return None;
             }
         };
-        if *discr_place != dest_place {
+        if *discr_place != assign.0 {
             return None;
         }
 
