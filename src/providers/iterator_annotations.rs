@@ -306,9 +306,11 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             func,
             args,
             destination,
+            target,
             ..
         } = &terminator.kind
         {
+            // Retrieves `fn` definition (if any).
             let Some((def_id, ..)) = func.const_fn_def() else {
                 return;
             };
@@ -330,6 +332,16 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 .expect("Expected DefId for `std::iter::Iterator::rposition`");
             if def_id == iterator_position_def_id || def_id == iterator_rposition_def_id {
                 self.process_iterator_position(args, destination, location);
+            }
+
+            // Handles calls to collection `len` methods.
+            if self
+                .tcx
+                .opt_item_name(def_id)
+                .is_some_and(|name| name.as_str() == "len")
+                && args.len() == 1
+            {
+                self.process_len(args, destination, target.as_ref(), location);
             }
         }
     }
@@ -542,7 +554,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
     }
 
-    /// Analyzes and annotates calls to `std::iter::Iterator::position` and `std::iter::Iterator::rposition`.
+    /// Analyzes and annotates calls to collection `len` methods.
     fn process_iterator_position(
         &mut self,
         args: &[Spanned<Operand<'tcx>>],
@@ -643,6 +655,38 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 ));
             }
         }
+    }
+
+    /// Analyzes and annotates calls to `std::iter::Iterator::next`.
+    fn process_len(
+        &mut self,
+        args: &[Spanned<Operand<'tcx>>],
+        destination: &Place<'tcx>,
+        target: Option<&BasicBlock>,
+        _: Location,
+    ) {
+        // Only continues if `len` method operand/arg has a length/size with `isize::MAX` maxima
+        let Some(len_arg) = args.first() else {
+            return;
+        };
+        let len_arg_ty = len_arg.node.ty(self.local_decls, self.tcx);
+        if !is_isize_bound_collection(len_arg_ty, self.tcx) {
+            return;
+        }
+
+        // Only continues if the terminator has a target basic block.
+        let Some(target) = target else {
+            return;
+        };
+
+        // Describes an `isize::MAX` bound annotation.
+        self.annotations.push(Annotation::Isize(
+            Location {
+                block: *target,
+                statement_index: 0,
+            },
+            *destination,
+        ));
     }
 }
 

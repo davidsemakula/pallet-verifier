@@ -418,18 +418,39 @@ fn emit_diagnostics(
     };
 
     for mut diagnostic in diagnostics {
-        let is_missing_mir_or_incomplete_analysis = diagnostic
+        // Ignores noisy diagnostics about foreign functions with missing MIR bodies and incomplete analysis.
+        // Also ignores `mirai_annotations::assume!` related diagnostics because those are likely
+        // from our analysis code.
+        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
+        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#incomplete-analysis>
+        let is_noisy = diagnostic
             .messages
             .first()
             .and_then(|(msg, _)| msg.as_str())
             .is_some_and(|msg| {
-                let is_missing_mir = msg.contains("MIR body")
-                    && (msg.contains("without") || msg.contains("did not resolve"));
-                is_missing_mir || msg.contains("incomplete analysis")
+                let is_missing_mir = || {
+                    msg.contains("MIR body")
+                        && (msg.contains("without") || msg.contains("did not resolve"))
+                };
+                let is_truthy_assume = || {
+                    msg.contains("assumption")
+                        && (msg.contains("provably true") || msg.contains("provably false"))
+                };
+                let is_unreachable_assume = || {
+                    msg.contains("unreachable")
+                        && msg.contains("mark it")
+                        && msg.contains("verify_unreachable!")
+                };
+                let is_pointer_alloc_issue = || {
+                    msg.contains("pointer") && msg.contains("memory") && msg.contains("deallocated")
+                };
+                is_missing_mir()
+                    || msg.contains("incomplete analysis")
+                    || is_truthy_assume()
+                    || is_unreachable_assume()
+                    || is_pointer_alloc_issue()
             });
-        if is_missing_mir_or_incomplete_analysis {
-            // Ignores diagnostics about foreign functions with missing MIR bodies.
-            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
+        if is_noisy {
             diagnostic.cancel();
             continue;
         }
