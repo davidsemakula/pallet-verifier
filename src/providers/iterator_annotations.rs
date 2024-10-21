@@ -343,6 +343,17 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             {
                 self.process_len(args, destination, target.as_ref(), location);
             }
+
+            // Handles calls to slice `binary_search` methods.
+            if self.tcx.opt_item_name(def_id).is_some_and(|name| {
+                matches!(
+                    name.as_str(),
+                    "binary_search" | "binary_search_by" | "binary_search_by_key"
+                )
+            }) && is_slice_assoc_item(def_id, self.tcx)
+            {
+                self.process_binary_search(args, destination, location);
+            }
         }
     }
 
@@ -554,7 +565,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
     }
 
-    /// Analyzes and annotates calls to collection `len` methods.
+    /// Analyzes and annotates calls to `std::iter::Iterator::position`.
     fn process_iterator_position(
         &mut self,
         args: &[Spanned<Operand<'tcx>>],
@@ -657,7 +668,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
     }
 
-    /// Analyzes and annotates calls to `std::iter::Iterator::next`.
+    /// Analyzes and annotates calls to collection `len` methods.
     fn process_len(
         &mut self,
         args: &[Spanned<Operand<'tcx>>],
@@ -687,6 +698,213 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             },
             *destination,
         ));
+    }
+
+    /// Analyzes and annotates calls to slice `binary_search` methods.
+    fn process_binary_search(
+        &mut self,
+        args: &[Spanned<Operand<'tcx>>],
+        destination: &Place<'tcx>,
+        location: Location,
+    ) {
+        // Finds place for slice `binary_search` operand/arg.
+        let binary_search_arg = args
+            .first()
+            .expect("Expected an arg for slice `binary_search` method");
+        let binary_search_arg_place = match &binary_search_arg.node {
+            Operand::Copy(place) | Operand::Move(place) => place,
+            Operand::Constant(_) => {
+                return;
+            }
+        };
+
+        // Finds place and basic block for a slice `binary_search` operand/arg (if any).
+        let dominators = self.basic_blocks.dominators();
+        let slice_def_call = find_pre_anchor_terminator_assign(
+            *binary_search_arg_place,
+            location.block,
+            location.block,
+            self.basic_blocks,
+            dominators,
+        );
+        let Some((slice_deref_arg_place, slice_deref_bb)) =
+            slice_def_call.and_then(|(terminator, bb)| {
+                deref_operand(&terminator, self.tcx).map(|place| (place, bb))
+            })
+        else {
+            return;
+        };
+
+        // Only continues if slice target has a known length/size returning function
+        // and is passed by reference.
+        let Some((len_call_def_id, len_gen_args)) = collection_len_call(
+            slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
+            self.tcx,
+        ) else {
+            return;
+        };
+        let collection_place_info =
+            deref_place_recursive(slice_deref_arg_place, slice_deref_bb, self.basic_blocks)
+                .or_else(|| {
+                    if let TyKind::Ref(region, _, _) = slice_deref_arg_place
+                        .ty(self.local_decls, self.tcx)
+                        .ty
+                        .kind()
+                    {
+                        Some((slice_deref_arg_place, *region))
+                    } else {
+                        None
+                    }
+                });
+        let Some((collection_place, region)) = collection_place_info else {
+            return;
+        };
+
+        // Finds `Result::Ok` target blocks for switches based on the discriminant of
+        // return value of slice `binary_search` in successor blocks.
+        for target_bb in
+            collect_ok_discr_switch_targets(*destination, location.block, self.basic_blocks)
+        {
+            for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
+                // Finds `Result::Ok` downcast to `usize` places (if any).
+                let Some(ok_place) = ok_downcast_to_usize_place(*destination, stmt, self.tcx)
+                else {
+                    continue;
+                };
+
+                // Adds a collection length/size bound annotation.
+                let annotation_location = Location {
+                    block: target_bb,
+                    statement_index: stmt_idx + 1,
+                };
+                self.annotations.push(Annotation::Len(
+                    annotation_location,
+                    ok_place,
+                    collection_place,
+                    region,
+                    len_call_def_id,
+                    len_gen_args,
+                ));
+
+                // Adds a slice length/size bound annotation.
+                let slice_len_def_id = self
+                    .tcx
+                    .lang_items()
+                    .get(LangItem::SliceLen)
+                    .expect("Expected `[T]::len` lang item");
+                let slice_ref_ty = binary_search_arg_place.ty(self.local_decls, self.tcx).ty;
+                if let TyKind::Ref(region, slice_ty, _) = slice_ref_ty.kind() {
+                    let slice_len_generics = self.tcx.generics_of(slice_len_def_id);
+                    let slice_len_host_param_def = slice_len_generics
+                        .params
+                        .first()
+                        .expect("Expected `host` generic param");
+                    let slice_len_host_param_value = slice_len_host_param_def
+                        .default_value(self.tcx)
+                        .expect("Expected `host` generic param default value")
+                        .skip_binder();
+                    let gen_ty = slice_ty
+                        .walk()
+                        .nth(1)
+                        .expect("Expected a generic arg for `[T]`");
+                    let gen_args = self.tcx.mk_args(&[gen_ty, slice_len_host_param_value]);
+                    self.annotations.push(Annotation::Len(
+                        annotation_location,
+                        ok_place,
+                        *binary_search_arg_place,
+                        *region,
+                        slice_len_def_id,
+                        gen_args,
+                    ));
+                }
+
+                // Handles annotations for new-typed collection types with a `Deref` implementation
+                // (e.g. `bounded_collections::BoundedVec` which derefs to `Vec`).
+                if collection_place == slice_deref_arg_place {
+                    dbg!((
+                        &location,
+                        &binary_search_arg_place,
+                        &binary_search_arg_place.ty(self.local_decls, self.tcx).ty,
+                        &self.basic_blocks[location.block],
+                        &slice_deref_arg_place,
+                        &slice_deref_bb,
+                        &slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
+                        &self.basic_blocks[slice_deref_bb],
+                        &target_bb,
+                        &self.basic_blocks[target_bb],
+                        &ok_place,
+                        &collection_place,
+                    ));
+                    let newtype_collection_deref_call = find_pre_anchor_terminator_assign(
+                        collection_place,
+                        slice_deref_bb,
+                        location.block,
+                        self.basic_blocks,
+                        dominators,
+                    );
+                    let Some((newtype_collection_deref_arg_place, newtype_collection_deref_bb)) =
+                        newtype_collection_deref_call.and_then(|(terminator, bb)| {
+                            deref_operand(&terminator, self.tcx).map(|place| (place, bb))
+                        })
+                    else {
+                        continue;
+                    };
+                    // Adds a collection length/size bound annotation.
+                    self.annotations.push(Annotation::Len(
+                        annotation_location,
+                        ok_place,
+                        newtype_collection_deref_arg_place,
+                        region,
+                        len_call_def_id,
+                        len_gen_args,
+                    ));
+                    dbg!((
+                        &newtype_collection_deref_arg_place,
+                        &newtype_collection_deref_bb,
+                        &self.basic_blocks[newtype_collection_deref_bb],
+                    ));
+                    let Some((newtype_collection_place, _)) = deref_place_recursive(
+                        newtype_collection_deref_arg_place,
+                        newtype_collection_deref_bb,
+                        self.basic_blocks,
+                    ) else {
+                        continue;
+                    };
+                    dbg!((
+                        &newtype_collection_place,
+                        &newtype_collection_place.ty(self.local_decls, self.tcx).ty,
+                        collection_len_call(
+                            newtype_collection_place.ty(self.local_decls, self.tcx).ty,
+                            self.tcx,
+                        ),
+                    ));
+                    let new_type_collection_deref_place =
+                        self.tcx.mk_place_deref(newtype_collection_place);
+                    dbg!((
+                        &new_type_collection_deref_place,
+                        &new_type_collection_deref_place
+                            .ty(self.local_decls, self.tcx)
+                            .ty,
+                        collection_len_call(
+                            new_type_collection_deref_place
+                                .ty(self.local_decls, self.tcx)
+                                .ty,
+                            self.tcx,
+                        ),
+                    ));
+
+                    // Adds a collection length/size bound annotation.
+                    self.annotations.push(Annotation::Len(
+                        annotation_location,
+                        ok_place,
+                        new_type_collection_deref_place,
+                        region,
+                        len_call_def_id,
+                        len_gen_args,
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -742,7 +960,11 @@ fn deref_place<'tcx>(
         let Rvalue::Ref(region, _, op_place) = &assign.1 else {
             return None;
         };
-        Some((direct_place(*op_place), *region))
+        let direct_op_place = direct_place(*op_place);
+        direct_op_place
+            .projection
+            .is_empty()
+            .then_some((direct_op_place, *region))
     })
 }
 
@@ -985,20 +1207,7 @@ fn slice_iter_operand<'tcx>(
     let (def_id, ..) = func.const_fn_def()?;
     let is_slice_iter_call = tcx.item_name(def_id).as_str() == "iter"
         && matches!(tcx.crate_name(def_id.krate).as_str(), "core" | "std")
-        && tcx
-            .opt_associated_item(def_id)
-            .and_then(|assoc_item| assoc_item.impl_container(tcx))
-            .is_some_and(|impl_def_id| {
-                let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
-                if let ImplSubject::Inherent(ty) = impl_subject {
-                    if let TyKind::Slice(slice_ty) = ty.kind() {
-                        if let TyKind::Param(param_ty) = slice_ty.kind() {
-                            return param_ty.name.as_str() == "T";
-                        }
-                    }
-                }
-                false
-            });
+        && is_slice_assoc_item(def_id, tcx);
     if !is_slice_iter_call {
         return None;
     }
@@ -1006,6 +1215,23 @@ fn slice_iter_operand<'tcx>(
         Operand::Copy(place) | Operand::Move(place) => Some(place),
         Operand::Constant(_) => None,
     }
+}
+
+/// Returns true if the given `DefId` is an associated item of a slice type `[T]`.
+fn is_slice_assoc_item(def_id: DefId, tcx: TyCtxt) -> bool {
+    tcx.opt_associated_item(def_id)
+        .and_then(|assoc_item| assoc_item.impl_container(tcx))
+        .is_some_and(|impl_def_id| {
+            let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
+            if let ImplSubject::Inherent(ty) = impl_subject {
+                if let TyKind::Slice(slice_ty) = ty.kind() {
+                    if let TyKind::Param(param_ty) = slice_ty.kind() {
+                        return param_ty.name.as_str() == "T";
+                    }
+                }
+            }
+            false
+        })
 }
 
 /// Returns place (if any) for the arg/operand of `std::ops::Deref` or `std::ops::DerefMut`.
@@ -1325,24 +1551,47 @@ fn is_enumerate_index<'tcx>(
 }
 
 /// Collects target basic blocks (if any) for the `Option::Some` variant of a switch on
-/// `Option` discriminant of give place.
+/// `Option` discriminant of given place.
 fn collect_some_discr_switch_targets<'tcx>(
     place: Place<'tcx>,
     anchor_block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
 ) -> FxHashSet<BasicBlock> {
+    collect_switch_targets_for_discr_value(place, 1, anchor_block, basic_blocks)
+}
+
+/// Collects target basic blocks (if any) for the `Result::Ok` variant of a switch on
+/// `Result` discriminant of given place.
+fn collect_ok_discr_switch_targets<'tcx>(
+    place: Place<'tcx>,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+) -> FxHashSet<BasicBlock> {
+    collect_switch_targets_for_discr_value(place, 0, anchor_block, basic_blocks)
+}
+
+/// Collects target basic blocks (if any) for the given value of a switch on discriminant of given place.
+fn collect_switch_targets_for_discr_value<'tcx>(
+    place: Place<'tcx>,
+    value: u128,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+) -> FxHashSet<BasicBlock> {
     let mut target_blocks = FxHashSet::default();
     let mut already_visited = FxHashSet::default();
-    collect_some_discr_switch_targets_inner(
+    collect_switch_targets_for_discr_value_inner(
         place,
+        value,
         anchor_block,
         basic_blocks,
         &mut target_blocks,
         &mut already_visited,
     );
     return target_blocks;
-    fn collect_some_discr_switch_targets_inner<'tcx>(
+
+    fn collect_switch_targets_for_discr_value_inner<'tcx>(
         destination: Place<'tcx>,
+        value: u128,
         anchor_block: BasicBlock,
         basic_blocks: &BasicBlocks<'tcx>,
         target_blocks: &mut FxHashSet<BasicBlock>,
@@ -1355,12 +1604,15 @@ fn collect_some_discr_switch_targets<'tcx>(
             already_visited.insert(bb);
 
             // Finds `Option::Some` switch target (if any).
-            if let Some(target_bb) = some_discr_switch_target(destination, &basic_blocks[bb]) {
+            if let Some(target_bb) =
+                switch_target_for_discr_value(destination, value, &basic_blocks[bb])
+            {
                 target_blocks.insert(target_bb);
             }
 
-            collect_some_discr_switch_targets_inner(
+            collect_switch_targets_for_discr_value_inner(
                 destination,
+                value,
                 bb,
                 basic_blocks,
                 target_blocks,
@@ -1370,10 +1622,10 @@ fn collect_some_discr_switch_targets<'tcx>(
     }
 }
 
-/// Returns target basic block (if any) for the `Option::Some` variant of a switch on
-/// `Option` discriminant of give place.
-fn some_discr_switch_target<'tcx>(
+/// Returns target basic block (if any) for the given value of a switch on discriminant of given place.
+fn switch_target_for_discr_value<'tcx>(
     place: Place<'tcx>,
+    value: u128,
     bb_data: &BasicBlockData<'tcx>,
 ) -> Option<BasicBlock> {
     bb_data.statements.iter().find_map(|stmt| {
@@ -1401,13 +1653,33 @@ fn some_discr_switch_target<'tcx>(
             return None;
         }
 
-        Some(targets.target_for_value(1))
+        Some(targets.target_for_value(value))
     })
 }
 
 /// Returns place (if any) for the `Option::Some` downcast to `usize` of given place.
 fn some_downcast_to_usize_place<'tcx>(
     place: Place,
+    stmt: &Statement<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<Place<'tcx>> {
+    variant_downcast_to_usize_place(place, "Some", 1, stmt, tcx)
+}
+
+/// Returns place (if any) for the `Result::Ok` downcast to `usize` of given place.
+fn ok_downcast_to_usize_place<'tcx>(
+    place: Place,
+    stmt: &Statement<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<Place<'tcx>> {
+    variant_downcast_to_usize_place(place, "Ok", 0, stmt, tcx)
+}
+
+/// Returns place (if any) for the variant downcast to `usize` of given place.
+fn variant_downcast_to_usize_place<'tcx>(
+    place: Place,
+    variant_name: &str,
+    variant_idx: u32,
     stmt: &Statement<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<Place<'tcx>> {
@@ -1421,12 +1693,13 @@ fn some_downcast_to_usize_place<'tcx>(
         return None;
     }
     if let Some((
-        (_, PlaceElem::Downcast(variant_name, variant_idx)),
+        (_, PlaceElem::Downcast(op_variant_name, op_variant_idx)),
         (_, PlaceElem::Field(field_idx, field_ty)),
     )) = op_place.iter_projections().collect_tuple()
     {
-        if (variant_name.is_none() || variant_name.is_some_and(|name| name.as_str() == "Some"))
-            && variant_idx.as_u32() == 1
+        if (op_variant_name.is_none()
+            || op_variant_name.is_some_and(|name| name.as_str() == variant_name))
+            && op_variant_idx.as_u32() == variant_idx
             && field_idx.as_u32() == 0
             && field_ty == Ty::new_uint(tcx, UintTy::Usize)
         {
