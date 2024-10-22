@@ -58,15 +58,15 @@ appropriate options and compiler flags, before invoking the [custom rustc driver
 
 The [custom rustc driver][rustc-driver-src] implements the core functionality of `pallet-verifier`. 
 It operates in two conceptual phases:
-- First an analysis, annotation and entry-point generation phase.
-- Then finally a verification/ abstract interpretation phase.
+- An analysis, annotation and entry-point generation phase.
+- A verification/abstract interpretation phase.
 
 ### Analysis, annotation and entry-point generation
 
 Entry-point generation is implemented via a [custom rustc driver callback][enrty-point-callback-src], 
 while annotations (and assertions) are implemented/added by overriding the [`optimized-mir` query][optimized-mir-query] 
 using a [custom provider][MIR-provider-src] that adds [custom MIR passes][MIR-pass] 
-(e.g. [a pass that finds all integer `as` conversions that are either narrowing or lossy conversions and adds for overflow checks][int-cast-overflow-src]).
+(e.g. [a pass that finds all integer `as` conversions that are either narrowing or lossy, and adds for overflow checks][int-cast-overflow-src]).
 
 [enrty-point-callback-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/callbacks/entry_points.rs
 [optimized-mir-query]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.optimized_mir
@@ -74,8 +74,9 @@ using a [custom provider][MIR-provider-src] that adds [custom MIR passes][MIR-pa
 [MIR-provider-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers.rs
 [int-cast-overflow-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers/int_cast_overflow.rs
 
-Automatic entry point generation is necessary because [FRAME] is inherently a [generic] framework as it makes extensive use of
-[Rust generic types and traits][rust-generics], while, when performing verification/abstract interpretation with MIRAI, 
+Automatic "tractable" entry point generation is necessary because [FRAME] is inherently a [generic] framework, 
+as it makes extensive use of [Rust generic types and traits][rust-generics], while, 
+when performing verification/abstract interpretation with [MIRAI], 
 ["it is not possible for a generic or higher order function to serve as an entry point"][MIRAI-entrypoint]. 
 This is because ["it is necessary for MIRAI to resolve and analyze all functions that can be reached from an entry point"][MIRAI-entrypoint].
 
@@ -103,7 +104,8 @@ essentially uses [MIRAI] as library.
 ## Current Capabilities
 
 Currently, `pallet-verifier` focuses on detecting [panics] and [arithmetic overflow/underflow]
-(and [lossy integer conversions][as-conversions-lossy]) in [dispatchable functions/extrinsics][call] of [FRAME pallets][FRAME].
+(and [lossy integer conversions][as-conversions-lossy]) in [dispatchable functions/extrinsics][call] and 
+public associated functions of [FRAME pallets][FRAME].
 However, the goal is also target other classes of security vulnerabilities (e.g. [insufficient or missing origin checks][origin-checks],
 [bad randomness][randomness], [insufficient unsigned transaction validation][validate-unsigned] e.t.c) in the future.
 
