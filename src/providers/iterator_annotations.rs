@@ -364,9 +364,6 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         destination: &Place<'tcx>,
         location: Location,
     ) {
-        let dominators = self.basic_blocks.dominators();
-        let place_ty = |place: Place<'tcx>| place.ty(self.local_decls, self.tcx).ty;
-
         // Finds place for `std::iter::Iterator::next` operand/arg.
         let iter_next_arg = args.first().expect("Expected an arg for `Iterator::next`");
         let iter_next_arg_place = match &iter_next_arg.node {
@@ -377,6 +374,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         };
 
         // Finds place and basic block for `std::iter::IntoIterator::into_iter` operand/arg.
+        let dominators = self.basic_blocks.dominators();
         let iter_next_arg_def_call = find_pre_anchor_terminator_assign(
             *iter_next_arg_place,
             location.block,
@@ -393,8 +391,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         };
 
         // Finds place and basic block for the innermost "non-growing" `Iterator` adapter operand/arg (if any).
-        while !is_isize_bound_collection(place_ty(iter_target_place), self.tcx)
-            && is_non_growing_iter_adapter(place_ty(iter_target_place), self.tcx)
+        while !is_isize_bound_collection(self.place_ty(iter_target_place), self.tcx)
+            && is_non_growing_iter_adapter(self.place_ty(iter_target_place), self.tcx)
         {
             let adapter_def_call = find_pre_anchor_terminator_assign(
                 iter_target_place,
@@ -413,7 +411,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
 
         // Finds place and basic block for a slice `Iterator` or `IntoIter` operand/arg (if any).
-        let mut iter_target_ty = place_ty(iter_target_place);
+        let mut iter_target_ty = self.place_ty(iter_target_place);
         if !is_isize_bound_collection(iter_target_ty, self.tcx) {
             if is_into_iter_ty(iter_target_ty, self.tcx) {
                 let into_iter_arg_def_call = find_pre_anchor_terminator_assign(
@@ -469,7 +467,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Only continues if `Iterator` target either has a length/size with `isize::MAX` maxima,
         // or has a known length/size returning function and is passed by reference.
-        iter_target_ty = place_ty(iter_target_place);
+        iter_target_ty = self.place_ty(iter_target_place);
         let is_isize_bound = is_isize_bound_collection(iter_target_ty, self.tcx);
         let len_call_info = collection_len_call(iter_target_ty, self.tcx);
         let len_bound_info = len_call_info.and_then(|(len_call_def_id, len_gen_args)| {
@@ -617,20 +615,15 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Only continues if `Iterator` target has a known length/size returning function
         // and is passed by reference.
-        let Some((len_call_def_id, len_gen_args)) = collection_len_call(
-            slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
-            self.tcx,
-        ) else {
+        let Some((len_call_def_id, len_gen_args)) =
+            collection_len_call(self.place_ty(slice_deref_arg_place), self.tcx)
+        else {
             return;
         };
         let collection_place_info =
             deref_place_recursive(slice_deref_arg_place, slice_deref_bb, self.basic_blocks)
                 .or_else(|| {
-                    if let TyKind::Ref(region, _, _) = slice_deref_arg_place
-                        .ty(self.local_decls, self.tcx)
-                        .ty
-                        .kind()
-                    {
+                    if let TyKind::Ref(region, _, _) = self.place_ty(slice_deref_arg_place).kind() {
                         Some((slice_deref_arg_place, *region))
                     } else {
                         None
@@ -737,20 +730,15 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Only continues if slice target has a known length/size returning function
         // and is passed by reference.
-        let Some((len_call_def_id, len_gen_args)) = collection_len_call(
-            slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
-            self.tcx,
-        ) else {
+        let Some((len_call_def_id, len_gen_args)) =
+            collection_len_call(self.place_ty(slice_deref_arg_place), self.tcx)
+        else {
             return;
         };
         let collection_place_info =
             deref_place_recursive(slice_deref_arg_place, slice_deref_bb, self.basic_blocks)
                 .or_else(|| {
-                    if let TyKind::Ref(region, _, _) = slice_deref_arg_place
-                        .ty(self.local_decls, self.tcx)
-                        .ty
-                        .kind()
-                    {
+                    if let TyKind::Ref(region, _, _) = self.place_ty(slice_deref_arg_place).kind() {
                         Some((slice_deref_arg_place, *region))
                     } else {
                         None
@@ -792,8 +780,9 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     .lang_items()
                     .get(LangItem::SliceLen)
                     .expect("Expected `[T]::len` lang item");
-                let slice_ref_ty = binary_search_arg_place.ty(self.local_decls, self.tcx).ty;
-                if let TyKind::Ref(region, slice_ty, _) = slice_ref_ty.kind() {
+                if let TyKind::Ref(region, slice_ty, _) =
+                    self.place_ty(*binary_search_arg_place).kind()
+                {
                     let slice_len_generics = self.tcx.generics_of(slice_len_def_id);
                     let slice_len_host_param_def = slice_len_generics
                         .params
@@ -817,94 +806,13 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                         gen_args,
                     ));
                 }
-
-                // Handles annotations for new-typed collection types with a `Deref` implementation
-                // (e.g. `bounded_collections::BoundedVec` which derefs to `Vec`).
-                if collection_place == slice_deref_arg_place {
-                    dbg!((
-                        &location,
-                        &binary_search_arg_place,
-                        &binary_search_arg_place.ty(self.local_decls, self.tcx).ty,
-                        &self.basic_blocks[location.block],
-                        &slice_deref_arg_place,
-                        &slice_deref_bb,
-                        &slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
-                        &self.basic_blocks[slice_deref_bb],
-                        &target_bb,
-                        &self.basic_blocks[target_bb],
-                        &ok_place,
-                        &collection_place,
-                    ));
-                    let newtype_collection_deref_call = find_pre_anchor_terminator_assign(
-                        collection_place,
-                        slice_deref_bb,
-                        location.block,
-                        self.basic_blocks,
-                        dominators,
-                    );
-                    let Some((newtype_collection_deref_arg_place, newtype_collection_deref_bb)) =
-                        newtype_collection_deref_call.and_then(|(terminator, bb)| {
-                            deref_operand(&terminator, self.tcx).map(|place| (place, bb))
-                        })
-                    else {
-                        continue;
-                    };
-                    // Adds a collection length/size bound annotation.
-                    self.annotations.push(Annotation::Len(
-                        annotation_location,
-                        ok_place,
-                        newtype_collection_deref_arg_place,
-                        region,
-                        len_call_def_id,
-                        len_gen_args,
-                    ));
-                    dbg!((
-                        &newtype_collection_deref_arg_place,
-                        &newtype_collection_deref_bb,
-                        &self.basic_blocks[newtype_collection_deref_bb],
-                    ));
-                    let Some((newtype_collection_place, _)) = deref_place_recursive(
-                        newtype_collection_deref_arg_place,
-                        newtype_collection_deref_bb,
-                        self.basic_blocks,
-                    ) else {
-                        continue;
-                    };
-                    dbg!((
-                        &newtype_collection_place,
-                        &newtype_collection_place.ty(self.local_decls, self.tcx).ty,
-                        collection_len_call(
-                            newtype_collection_place.ty(self.local_decls, self.tcx).ty,
-                            self.tcx,
-                        ),
-                    ));
-                    let new_type_collection_deref_place =
-                        self.tcx.mk_place_deref(newtype_collection_place);
-                    dbg!((
-                        &new_type_collection_deref_place,
-                        &new_type_collection_deref_place
-                            .ty(self.local_decls, self.tcx)
-                            .ty,
-                        collection_len_call(
-                            new_type_collection_deref_place
-                                .ty(self.local_decls, self.tcx)
-                                .ty,
-                            self.tcx,
-                        ),
-                    ));
-
-                    // Adds a collection length/size bound annotation.
-                    self.annotations.push(Annotation::Len(
-                        annotation_location,
-                        ok_place,
-                        new_type_collection_deref_place,
-                        region,
-                        len_call_def_id,
-                        len_gen_args,
-                    ));
-                }
             }
         }
+    }
+
+    /// Returns the type for the given place.
+    fn place_ty(&self, place: Place<'tcx>) -> Ty<'tcx> {
+        place.ty(self.local_decls, self.tcx).ty
     }
 }
 
