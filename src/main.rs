@@ -39,112 +39,15 @@ fn main() {
                         env::var("CARGO_PKG_NAME").is_ok_and(|cargo_pkg| target_pkg == cargo_pkg)
                     })
             };
-            // Checks whether the current target is a build script.
-            let is_build_script = || {
-                // First `*.rs` CLI argument should be a `build.rs` file
-                // and `--crate-name` arg should be `build_script_build`.
-                env::args().any(|arg| {
-                    Path::new(&arg)
-                        .file_name()
-                        .is_some_and(|name| name == "build.rs")
-                }) && cli_utils::arg_value("--crate-name")
-                    .is_some_and(|crate_name| crate_name == "build_script_build")
-            };
             if is_primary_package && is_analysis_target() && !is_build_script() {
                 // Analyzes "primary" package with `pallet-verifier`.
                 call_pallet_verifier();
+            } else if is_build_script() {
+                // Compiles build scripts.
+                compile_build_script(sub_command, env::args().skip(2));
             } else {
-                // Compiles dependencies and build scripts with `rustc`.
-                let args = env::args().skip(2);
-                let is_wasm_target = cli_utils::arg_value("--target")
-                    .or(env::var(ENV_TARGET).ok())
-                    .is_some_and(|target| target.starts_with("wasm"));
-                if is_wasm_target
-                    && env::var("CARGO_PKG_NAME").is_ok_and(|name| name.starts_with("wasmtime"))
-                {
-                    // Don't compile `wasmtime` (and related `wasmtime-*`packages) for `wasm` targets.
-                    if is_build_script() {
-                        // Compiles build scripts as no-op binaries.
-                        let out_dir = cli_utils::arg_value("--out-dir")
-                            .expect("Expected an output directory arg");
-                        let dummy_build_file = Path::new(&out_dir).join("build.rs");
-                        std::fs::write(&dummy_build_file, "fn main() {}")
-                            .expect("Failed to create dummy build file");
-                        cli_utils::call_rustc(
-                            Some(sub_command),
-                            args.map(|arg| {
-                                if arg.ends_with("/build.rs") {
-                                    dummy_build_file.to_string_lossy().to_string()
-                                } else {
-                                    arg
-                                }
-                            }),
-                        );
-                    } else {
-                        process::exit(0);
-                    }
-                } else if is_wasm_target
-                    && cli_utils::arg_value("--crate-name")
-                        .is_some_and(|crate_name| crate_name.starts_with("sp_wasm_interface"))
-                {
-                    // Removes `wasmtime` depencency and feature from `sp-wasm-interface` package.
-                    let mut skip_next = false;
-                    let args = args.enumerate().filter_map(|(idx, arg)| {
-                        if skip_next {
-                            skip_next = false;
-                            return None;
-                        }
-
-                        // +3 because `args` iterator skipped 2 args and we're using the original `env::args`.
-                        let next_arg = || env::args().nth(idx + 3);
-
-                        // Removes `wasmtime` feature flag.
-                        if arg == "--cfg" || arg.starts_with("--cfg=") {
-                            let is_wasmtime_feature_flag =
-                                |val: &str| val.contains("feature=") && val.contains("wasmtime");
-                            if arg
-                                .strip_prefix("--cfg=")
-                                .is_some_and(is_wasmtime_feature_flag)
-                            {
-                                return None;
-                            }
-                            if next_arg().as_deref().is_some_and(is_wasmtime_feature_flag) {
-                                skip_next = true;
-                                return None;
-                            }
-                        }
-
-                        // Removes `wasmtime` dependency arg.
-                        if arg == "--extern" || arg.starts_with("--extern=") {
-                            let is_wasmtime_extern_flag = |val: &str| val.contains("wasmtime=");
-                            if arg
-                                .strip_prefix("--extern=")
-                                .is_some_and(is_wasmtime_extern_flag)
-                            {
-                                return None;
-                            }
-                            if next_arg().as_deref().is_some_and(is_wasmtime_extern_flag) {
-                                skip_next = true;
-                                return None;
-                            }
-                        }
-
-                        Some(arg)
-                    });
-                    cli_utils::call_rustc(Some(sub_command), args);
-                } else if cli_utils::arg_value("--crate-name")
-                    .is_some_and(|crate_name| crate_name.starts_with("serde"))
-                {
-                    // TODO: Remove `--cfg no_diagnostic_namespace` when compiler is updated to >= nightly-2024-05-03
-                    // Ref: <https://blog.rust-lang.org/2024/05/02/Rust-1.78.0.html#diagnostic-attributes>
-                    // Ref: <https://github.com/serde-rs/serde/commit/694fe0595358aa0857120a99041d99975b1a8a70#diff-be34659e38d3b07b2dad53cae7b6a6a00860685171d703b524deb72c10d3f4e7R92>
-                    cli_utils::call_rustc(
-                        Some(sub_command),
-                        args.chain(["--cfg", "no_diagnostic_namespace"].map(ToString::to_string)),
-                    );
-                } else {
-                    cli_utils::call_rustc(Some(sub_command), args);
-                }
+                // Compiles dependencies.
+                compile_dependency(sub_command, env::args().skip(2));
             }
         }
         _ => {
@@ -306,4 +209,121 @@ fn call_pallet_verifier() {
 
     // Executes command (exits on failure).
     cli_utils::exec_cmd(&mut cmd);
+}
+
+/// Compiles dependencies.
+fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
+    let is_wasm = is_wasm_target();
+    if is_wasm && is_wasmtime_package() {
+        // Don't compile `wasmtime` (and related `wasmtime-*` packages) for `wasm` targets.
+        process::exit(0);
+    } else if is_wasm
+        && cli_utils::arg_value("--crate-name")
+            .is_some_and(|crate_name| crate_name.starts_with("sp_wasm_interface"))
+    {
+        // Removes `wasmtime` dependency and feature from `sp-wasm-interface` package.
+        let mut skip_next = false;
+        let args = args.enumerate().filter_map(|(idx, arg)| {
+            if skip_next {
+                skip_next = false;
+                return None;
+            }
+
+            // +3 because `args` iterator skipped 2 args and we're using the original `env::args`.
+            let next_arg = || env::args().nth(idx + 3);
+
+            // Removes `wasmtime` feature flag.
+            if arg == "--cfg" || arg.starts_with("--cfg=") {
+                let is_wasmtime_feature_flag =
+                    |val: &str| val.contains("feature=") && val.contains("wasmtime");
+                if arg
+                    .strip_prefix("--cfg=")
+                    .is_some_and(is_wasmtime_feature_flag)
+                {
+                    return None;
+                }
+                if next_arg().as_deref().is_some_and(is_wasmtime_feature_flag) {
+                    skip_next = true;
+                    return None;
+                }
+            }
+
+            // Removes `wasmtime` dependency arg.
+            if arg == "--extern" || arg.starts_with("--extern=") {
+                let is_wasmtime_extern_flag = |val: &str| val.contains("wasmtime=");
+                if arg
+                    .strip_prefix("--extern=")
+                    .is_some_and(is_wasmtime_extern_flag)
+                {
+                    return None;
+                }
+                if next_arg().as_deref().is_some_and(is_wasmtime_extern_flag) {
+                    skip_next = true;
+                    return None;
+                }
+            }
+
+            Some(arg)
+        });
+        cli_utils::call_rustc(Some(rustc_path), args);
+    } else if cli_utils::arg_value("--crate-name")
+        .is_some_and(|crate_name| crate_name.starts_with("serde"))
+    {
+        // TODO: Remove `--cfg no_diagnostic_namespace` when compiler is updated to >= nightly-2024-05-03
+        // Ref: <https://blog.rust-lang.org/2024/05/02/Rust-1.78.0.html#diagnostic-attributes>
+        // Ref: <https://github.com/serde-rs/serde/commit/694fe0595358aa0857120a99041d99975b1a8a70#diff-be34659e38d3b07b2dad53cae7b6a6a00860685171d703b524deb72c10d3f4e7R92>
+        cli_utils::call_rustc(
+            Some(rustc_path),
+            args.chain(["--cfg", "no_diagnostic_namespace"].map(ToString::to_string)),
+        );
+    } else {
+        cli_utils::call_rustc(Some(rustc_path), args);
+    }
+}
+
+/// Compiles build scripts.
+fn compile_build_script(rustc_path: String, args: impl Iterator<Item = String>) {
+    if is_wasm_target() && is_wasmtime_package() {
+        // Compiles `wasmtime` build scripts (and those of related `wasmtime-*` packages) as no-op binaries.
+        let out_dir = cli_utils::arg_value("--out-dir").expect("Expected an output directory arg");
+        let dummy_build_file = Path::new(&out_dir).join("build.rs");
+        std::fs::write(&dummy_build_file, "fn main() {}")
+            .expect("Failed to create dummy build file");
+        cli_utils::call_rustc(
+            Some(rustc_path),
+            args.map(|arg| {
+                if arg.ends_with("/build.rs") {
+                    dummy_build_file.to_string_lossy().to_string()
+                } else {
+                    arg
+                }
+            }),
+        );
+    } else {
+        cli_utils::call_rustc(Some(rustc_path), args);
+    }
+}
+
+/// Checks if current compilation target is a build script.
+fn is_build_script() -> bool {
+    // First `*.rs` CLI argument should be a `build.rs` file
+    // and `--crate-name` arg should be `build_script_build`.
+    env::args().any(|arg| {
+        Path::new(&arg)
+            .file_name()
+            .is_some_and(|name| name == "build.rs")
+    }) && cli_utils::arg_value("--crate-name")
+        .is_some_and(|crate_name| crate_name == "build_script_build")
+}
+
+/// Checks if the `rustc` target (if any) is wasm.
+fn is_wasm_target() -> bool {
+    cli_utils::arg_value("--target")
+        .or(env::var(ENV_TARGET).ok())
+        .is_some_and(|target| target.starts_with("wasm"))
+}
+
+/// Checks if the current `cargo` package is the `wastime`.
+fn is_wasmtime_package() -> bool {
+    env::var("CARGO_PKG_NAME").is_ok_and(|name| name.starts_with("wasmtime"))
 }
