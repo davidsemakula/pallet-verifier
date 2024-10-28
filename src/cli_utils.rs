@@ -12,6 +12,9 @@ use itertools::Itertools;
 /// Env var for tracking dependency renames from `Cargo.toml`.
 pub const ENV_DEP_RENAMES: &str = "PALLET_VERIFIER_DEP_RENAMES";
 
+/// Env var that's set if the crate being compiled/annotated is a dependency.
+pub const ENV_DEP_CRATE: &str = "PALLET_VERIFIER_DEP_CRATE";
+
 /// Shows help and version messages (and exits, if necessary).
 ///
 /// **NOTE:** We let `rustc` handle help and version messages

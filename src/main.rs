@@ -8,12 +8,17 @@ use std::{
     process::{self, Command},
 };
 
-use cli_utils::ENV_DEP_RENAMES;
+use cli_utils::{ENV_DEP_CRATE, ENV_DEP_RENAMES};
 
 const COMMAND: &str = "cargo verify-pallet";
-const ENV_PKG_NAME: &str = "PALLET_VERIFIER_PKG_NAME";
-const ENV_TARGET: &str = "PALLET_VERIFIER_TARGET";
 const ARG_POINTER_WIDTH: &str = "--pointer-width";
+
+/// Env var set to the name of the top-level package being analyzed
+/// (i.e. the package name in the `Cargo.toml` in the directory where `cargo verify-pallet`) is invoked.
+const ENV_PKG_NAME: &str = "PALLET_VERIFIER_PKG_NAME";
+/// Env var set to the name current `rustc` target (if set).
+/// Ref: <https://doc.rust-lang.org/rustc/targets/index.html>
+const ENV_TARGET: &str = "PALLET_VERIFIER_TARGET";
 
 fn main() {
     // Shows help and version messages (and exits, if necessary).
@@ -39,15 +44,16 @@ fn main() {
                         env::var("CARGO_PKG_NAME").is_ok_and(|cargo_pkg| target_pkg == cargo_pkg)
                     })
             };
+            let args = env::args().skip(2);
             if is_primary_package && is_analysis_target() && !is_build_script() {
                 // Analyzes "primary" package with `pallet-verifier`.
-                call_pallet_verifier();
+                call_pallet_verifier(args, std::iter::empty());
             } else if is_build_script() {
                 // Compiles build scripts.
-                compile_build_script(sub_command, env::args().skip(2));
+                compile_build_script(sub_command, args);
             } else {
                 // Compiles dependencies.
-                compile_dependency(sub_command, env::args().skip(2));
+                compile_dependency(sub_command, args);
             }
         }
         _ => {
@@ -170,7 +176,10 @@ fn call_cargo() {
 }
 
 /// Calls `pallet-verifier`.
-fn call_pallet_verifier() {
+fn call_pallet_verifier(
+    args: impl Iterator<Item = String>,
+    vars: impl Iterator<Item = (String, String)>,
+) {
     // Builds `pallet-verifier` command (specifically for the standalone executable).
     let mut path = env::current_exe()
         .expect("Expected valid executable path")
@@ -179,7 +188,8 @@ fn call_pallet_verifier() {
         path.set_extension("exe");
     }
     let mut cmd = Command::new(path);
-    cmd.args(env::args().skip(2));
+    cmd.args(args);
+    cmd.envs(vars);
 
     // Explicitly sets dynamic/shared library path to match `pallet-verifier`.
     let mut add_dy_lib_path = |dylib_path: &str| {
@@ -214,11 +224,13 @@ fn call_pallet_verifier() {
 /// Compiles dependencies.
 fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
     let is_wasm = is_wasm_target();
+    let crate_name = cli_utils::arg_value("--crate-name");
     if is_wasm && is_wasmtime_package() {
         // Don't compile `wasmtime` (and related `wasmtime-*` packages) for `wasm` targets.
         process::exit(0);
     } else if is_wasm
-        && cli_utils::arg_value("--crate-name")
+        && crate_name
+            .as_ref()
             .is_some_and(|crate_name| crate_name.starts_with("sp_wasm_interface"))
     {
         // Removes `wasmtime` dependency and feature from `sp-wasm-interface` package.
@@ -266,7 +278,8 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
             Some(arg)
         });
         cli_utils::call_rustc(Some(rustc_path), args);
-    } else if cli_utils::arg_value("--crate-name")
+    } else if crate_name
+        .as_ref()
         .is_some_and(|crate_name| crate_name.starts_with("serde"))
     {
         // TODO: Remove `--cfg no_diagnostic_namespace` when compiler is updated to >= nightly-2024-05-03
@@ -276,7 +289,16 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
             Some(rustc_path),
             args.chain(["--cfg", "no_diagnostic_namespace"].map(ToString::to_string)),
         );
+    } else if let Some(dep_name) = crate_name
+        .as_ref()
+        .filter(|crate_name| crate_name.starts_with("pallet"))
+    {
+        // Compiles `pallet` dependencies with `pallet-verifier`.
+        // The `PALLET_VERIFIER_DEP_CRATE` env var tells `pallet-verifier` that this a dependency.
+        let vars = [(ENV_DEP_CRATE.to_string(), dep_name.to_owned())];
+        call_pallet_verifier(args, vars.into_iter());
     } else {
+        // Compiles dependencies with `rustc`.
         cli_utils::call_rustc(Some(rustc_path), args);
     }
 }

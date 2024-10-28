@@ -16,16 +16,16 @@ use std::{
     process,
 };
 
-use cli_utils::ENV_DEP_RENAMES;
+use cli_utils::{ENV_DEP_CRATE, ENV_DEP_RENAMES};
 use pallet_verifier::{
-    DefaultCallbacks, EntryPointsCallbacks, VerifierCallbacks, VirtualFileLoader,
-    CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
+    DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, VerifierCallbacks,
+    VirtualFileLoader, CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
 };
 
 const COMMAND: &str = "pallet-verifier";
 
 fn main() {
-    // Initialize loggers.
+    // Initializes loggers.
     if let Ok(log) = env::var("PALLET_VERIFIER_LOG") {
         // Initialize `rustc` logger.
         env::set_var("RUSTC_LOG", &log);
@@ -46,7 +46,7 @@ fn main() {
     // Shows help and version messages (and exits, if necessary).
     cli_utils::handle_meta_args(COMMAND);
 
-    // Retrieve command line arguments.
+    // Retrieves command line arguments.
     let mut cli_args: Vec<_> = env::args().collect();
     // Setting `RUSTC_WRAPPER` causes `cargo` to pass 'rustc' as the first argument.
     // We're invoking the compiler programmatically, so we remove it (if present).
@@ -58,29 +58,6 @@ fn main() {
         .is_some_and(|arg| cli_utils::is_rustc_path(arg));
     if is_rustc_wrapper_mode {
         cli_args.remove(1);
-    }
-    if env::var("CARGO_PKG_NAME").is_err() || env::var("CARGO_PRIMARY_PACKAGE").is_err() {
-        // Presumably, this is some kind of direct call to the `pallet-verifier` binary,
-        // instead of via `cargo verify-pallet`, so we need to set some extra flags.
-        // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
-        cli_args.extend(
-            [
-                // Enables compilation of unit tests and test harness generation.
-                // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--test-build-a-test-harness>
-                "--test",
-                // Enables dumping MIR for all functions.
-                // Ref: <https://github.com/rust-lang/rust/blob/master/compiler/rustc_session/src/options.rs#L1632>
-                // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
-                "-Zalways-encode-mir=yes",
-                // Disables debug assertions.
-                // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#debug-assertions>
-                "-Cdebug-assertions=no",
-                // Enables overflow checks.
-                // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#overflow-checks>
-                "-Coverflow-checks=yes",
-            ]
-            .map(ToOwned::to_owned),
-        );
     }
 
     // Compiles `mirai-annotations` crate and adds it as a dependency (if necessary).
@@ -165,8 +142,47 @@ fn main() {
         extern_crates.insert("mirai_annotations");
         extern_crates_opt = Some(extern_crates);
     }
-    let entry_point_file_loader =
+    let analysis_file_loader =
         VirtualFileLoader::new(target_path.clone(), None, extern_crates_opt.as_ref(), None);
+
+    // The `PALLET_VERIFIER_DEP_CRATE` env var is only set when compiling/annotating a dependency crate,
+    // So we invoke an appropriate compiler and exit.
+    if env::var(ENV_DEP_CRATE).is_ok() {
+        let mut callbacks = DependencyCallbacks;
+        let mut compiler = rustc_driver::RunCompiler::new(&cli_args, &mut callbacks);
+        compiler.set_file_loader(Some(Box::new(analysis_file_loader)));
+        let result = compiler.run();
+        let exit_code = match result {
+            Ok(_) => rustc_driver::EXIT_SUCCESS,
+            Err(_) => rustc_driver::EXIT_FAILURE,
+        };
+        process::exit(exit_code);
+    }
+
+    // If neither `CARGO_PKG_NAME` nor `CARGO_PRIMARY_PACKAGE`, then presumably this is
+    // some kind of direct call to the `pallet-verifier` binary, instead of via `cargo verify-pallet`,
+    // so we need to set some extra flags.
+    // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
+    if env::var("CARGO_PKG_NAME").is_err() || env::var("CARGO_PRIMARY_PACKAGE").is_err() {
+        cli_args.extend(
+            [
+                // Enables compilation of unit tests and test harness generation.
+                // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--test-build-a-test-harness>
+                "--test",
+                // Enables dumping MIR for all functions.
+                // Ref: <https://github.com/rust-lang/rust/blob/master/compiler/rustc_session/src/options.rs#L1632>
+                // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
+                "-Zalways-encode-mir=yes",
+                // Disables debug assertions.
+                // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#debug-assertions>
+                "-Cdebug-assertions=no",
+                // Enables overflow checks.
+                // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#overflow-checks>
+                "-Coverflow-checks=yes",
+            ]
+            .map(ToOwned::to_owned),
+        );
+    }
 
     // Generates tractable entry points for FRAME pallet.
     let dep_renames = env::var(ENV_DEP_RENAMES).ok().and_then(|dep_renames_json| {
@@ -175,7 +191,7 @@ fn main() {
     let mut entry_point_callbacks = EntryPointsCallbacks::new(&dep_renames);
     let mut entry_point_compiler =
         rustc_driver::RunCompiler::new(&cli_args, &mut entry_point_callbacks);
-    entry_point_compiler.set_file_loader(Some(Box::new(entry_point_file_loader)));
+    entry_point_compiler.set_file_loader(Some(Box::new(analysis_file_loader)));
     let entry_point_result = entry_point_compiler.run();
     if entry_point_result.is_err() {
         process::exit(rustc_driver::EXIT_FAILURE);

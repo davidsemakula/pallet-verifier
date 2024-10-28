@@ -37,7 +37,9 @@ mod file_loader;
 mod providers;
 mod utils;
 
-pub use callbacks::{DefaultCallbacks, EntryPointsCallbacks, VerifierCallbacks};
+pub use callbacks::{
+    DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, VerifierCallbacks,
+};
 pub use file_loader::VirtualFileLoader;
 
 /// Name of generated `mod` for entry points.
