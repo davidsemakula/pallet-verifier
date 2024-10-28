@@ -295,8 +295,13 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
     {
         // Compiles `pallet` dependencies with `pallet-verifier`.
         // The `PALLET_VERIFIER_DEP_CRATE` env var tells `pallet-verifier` that this a dependency.
-        let vars = [(ENV_DEP_CRATE.to_string(), dep_name.to_owned())];
-        call_pallet_verifier(args, vars.into_iter());
+        if env::var("PALLET_VERIFIER_UI_TESTS").is_err() {
+            let vars = [(ENV_DEP_CRATE.to_string(), dep_name.to_owned())];
+            call_pallet_verifier(args, vars.into_iter());
+        } else {
+            // TODO: Disable this option when UI tests play nicely with this config.
+            cli_utils::call_rustc(Some(rustc_path), args);
+        }
     } else {
         // Compiles dependencies with `rustc`.
         cli_utils::call_rustc(Some(rustc_path), args);

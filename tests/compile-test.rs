@@ -95,10 +95,10 @@ fn generic_config(config: &mut Config, cmd: &str, is_rustc_wrapper: bool) {
             ]);
         }
     } else {
-        config
-            .program
-            .envs
-            .push(("RUSTFLAGS".into(), Some(flags.join(" ").into())));
+        config.program.envs.extend([
+            ("RUSTFLAGS".into(), Some(flags.join(" ").into())),
+            ("PALLET_VERIFIER_UI_TESTS".into(), Some("true".into())),
+        ]);
         config
             .fill_host_and_target()
             .expect("Expected valid host and target triples");
