@@ -82,14 +82,15 @@ fn call_cargo() {
         cmd.env("RUSTUP_TOOLCHAIN", toolchain);
     }
 
-    // Enables dumping MIR for all functions, and disables debug assertions, and enables overflow checks.
+    // Enables dumping MIR for all functions, disables debug assertions, enables overflow checks,
+    // and disables diagnostics deduplication.
     // Ref: <https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags>
     // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
     // Ref: <https://github.com/rust-lang/rust/blob/master/compiler/rustc_session/src/options.rs#L1632>
     // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
     // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#debug-assertions>
     // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#overflow-checks>
-    let flags = "-Zalways-encode-mir=yes -Cdebug-assertions=no -Coverflow-checks=yes";
+    let flags = "-Zalways-encode-mir=yes -Cdebug-assertions=no -Coverflow-checks=yes -Zdeduplicate-diagnostics=no";
     cmd.env(
         "RUSTFLAGS",
         env::var("RUSTFLAGS")
@@ -287,7 +288,7 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
         // Ref: <https://github.com/serde-rs/serde/commit/694fe0595358aa0857120a99041d99975b1a8a70#diff-be34659e38d3b07b2dad53cae7b6a6a00860685171d703b524deb72c10d3f4e7R92>
         cli_utils::call_rustc(
             Some(rustc_path),
-            args.chain(["--cfg", "no_diagnostic_namespace"].map(ToString::to_string)),
+            args.chain(["--cfg=no_diagnostic_namespace".to_string()]),
         );
     } else if let Some(dep_name) = crate_name
         .as_ref()

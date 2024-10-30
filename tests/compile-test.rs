@@ -62,7 +62,6 @@ fn generic_config(config: &mut Config, cmd: &str, is_rustc_wrapper: bool) {
     // Sets UI test friendly rustc args.
     let flags = [
         "-Zui-testing",
-        "-Zdeduplicate-diagnostics=no",
         "-Aunused",
         "-Adeprecated",
         "-Anonstandard_style",
