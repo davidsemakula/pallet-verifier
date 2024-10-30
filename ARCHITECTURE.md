@@ -146,3 +146,10 @@ However, the goal is also target other classes of security vulnerabilities (e.g.
 [origin-checks]: https://secure-contracts.com/not-so-smart-contracts/substrate/origins/
 [randomness]: https://secure-contracts.com/not-so-smart-contracts/substrate/randomness/
 [validate-unsigned]: https://secure-contracts.com/not-so-smart-contracts/substrate/validate_unsigned/
+
+**NOTE:** `pallet-verifier` assumes a 32 bit [target pointer width][rustc-target-pointer-width] by default 
+(i.e. the same pointer width as the `wasm32` and `riscv32` targets), however, this can be overridden using 
+the `--pointer-width` argument which accepts a value of either `32` or `64` (e.g. `cargo verify-pallet --pointer-width 64`). 
+However, the 64 bit target pointer width option is currently only supported on 64 bit host machines.
+
+[rustc-target-pointer-width]: https://doc.rust-lang.org/reference/conditional-compilation.html#target_pointer_width

@@ -75,6 +75,10 @@ You can access library documentation locally by running the following command fr
 cargo doc --no-deps --open
 ```
 
+### Architecture Documentation
+
+To learn more about how `pallet-verifier` works under the hood, check out [ARCHITECTURE.md](/ARCHITECTURE.md).
+
 ## Testing
 
 You can run [UI tests](https://rustc-dev-guide.rust-lang.org/tests/ui.html) by running the following command from the project root
