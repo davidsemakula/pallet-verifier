@@ -27,7 +27,7 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
         if checks.is_empty() {
             return;
         }
-        // Reverse sorts integer cast overflow checks by location.
+        // Reverse sorts integer cast overflow check declarations by location.
         checks.sort_by(|(loc_a, ..), (loc_b, ..)| loc_b.cmp(loc_a));
 
         // Creates `mirai_verify` annotation handle and diagnostic message.
@@ -131,8 +131,10 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
         }
     }
 
+    /// Checks `Rvalue`s for lossy integer cast operations and required describes overflow checks.
     fn process_rvalue(&mut self, rvalue: &Rvalue<'tcx>, location: Location) {
         if let Rvalue::Cast(CastKind::IntToInt, operand, ty) = rvalue {
+            // Retrieves the bitwidth for integer type of the operand.
             let op_ty = operand.ty(self.local_decls, self.tcx);
             let pointer_width = utils::target_pointer_width();
             let op_ty_bit_width = match op_ty.kind() {
@@ -144,6 +146,8 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                 return;
             };
             let host_size = Size::from_bits(int_bit_width);
+
+            // Declares the maximum bound for the integer type (if any).
             let max_scalar = match (ty.kind(), op_ty.kind()) {
                 // i8
                 (
@@ -249,6 +253,8 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                 }
                 _ => None,
             };
+
+            // Declares the minimum bound for the integer type (if any).
             let min_scalar = match (ty.kind(), op_ty.kind()) {
                 // uint from int
                 (TyKind::Uint(_), TyKind::Int(_)) => ScalarInt::try_from_uint(0u8, host_size),
@@ -294,6 +300,7 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                 _ => None,
             };
 
+            // Adds required cast overflow checks (if any).
             let mut add_check = |assert_cond, bound_scalar| {
                 let mut requires_check = true;
                 if let Operand::Constant(const_op) = operand {
@@ -318,7 +325,6 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                         .push((location, assert_cond, operand.clone(), max_operand));
                 }
             };
-
             if let Some(max_scalar) = max_scalar {
                 add_check(BinOp::Le, max_scalar);
             }

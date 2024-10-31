@@ -37,7 +37,7 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
         if annotations.is_empty() {
             return;
         }
-        // Reverse sorts annotations by location.
+        // Reverse sorts annotation declarations by location.
         annotations.sort_by(|a, b| b.location().cmp(a.location()));
 
         // Creates `mirai_assume` annotation handle.
@@ -562,7 +562,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
     }
 
-    /// Analyzes and annotates calls to `std::iter::Iterator::position`.
+    /// Analyzes and annotates calls to `std::iter::Iterator::position` and `std::iter::Iterator::rposition`.
     fn process_iterator_position(
         &mut self,
         args: &[Spanned<Operand<'tcx>>],
