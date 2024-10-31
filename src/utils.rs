@@ -1,9 +1,10 @@
 //! Common analysis utilities.
 
 use rustc_ast::NestedMetaItem;
-use rustc_hir::HirId;
+use rustc_hir::{def::DefKind, HirId};
+use rustc_middle::middle::exported_symbols::ExportedSymbol;
 use rustc_middle::ty::TyCtxt;
-use rustc_span::Symbol;
+use rustc_span::{def_id::DefId, Symbol};
 
 use std::env;
 
@@ -42,4 +43,23 @@ pub fn has_cfg_test_attr(hir_id: HirId, tcx: TyCtxt) -> bool {
                     })
             })
     })
+}
+
+/// Returns `DefId` (if known) of a mirai annotation function.
+pub fn mirai_annotation_fn(name: &str, tcx: TyCtxt) -> Option<DefId> {
+    let annotations_crate = tcx
+        .crates(())
+        .iter()
+        .find(|crate_num| tcx.crate_name(**crate_num).as_str() == "mirai_annotations")
+        .expect("Expected `mirai_annotations` crate as a dependency");
+    tcx.exported_symbols(*annotations_crate)
+        .iter()
+        .find_map(|(exported_sym, _)| {
+            if let ExportedSymbol::NonGeneric(def_id) = exported_sym {
+                if tcx.def_kind(def_id) == DefKind::Fn && tcx.item_name(*def_id).as_str() == name {
+                    return Some(*def_id);
+                }
+            }
+            None
+        })
 }

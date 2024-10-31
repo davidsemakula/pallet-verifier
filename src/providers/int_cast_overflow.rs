@@ -2,12 +2,11 @@
 
 use rustc_abi::{Align, Size};
 use rustc_const_eval::interpret::{Allocation, Scalar};
-use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
         visit::Visitor, BasicBlockData, BinOp, Body, CallSource, CastKind, Const, ConstOperand,
         ConstValue, HasLocalDecls, LocalDecl, LocalDecls, Location, MirPass, Operand, Place,
-        Rvalue, Statement, StatementKind, SwitchTargets, Terminator, TerminatorKind, UnwindAction,
+        Rvalue, Statement, StatementKind, Terminator, TerminatorKind, UnwindAction,
     },
     ty::{ScalarInt, Ty, TyCtxt, TyKind},
 };
@@ -31,36 +30,25 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
         // Reverse sorts integer cast overflow checks by location.
         checks.sort_by(|(loc_a, ..), (loc_b, ..)| loc_b.cmp(loc_a));
 
-        // Creates panic handle.
-        let panic_def_id = tcx
-            .lang_items()
-            .get(LangItem::Panic)
-            .expect("Expected panic lang item");
-        let panic_msg = "attempt to cast with overflow".as_bytes();
-        let panic_msg_const = ConstValue::Slice {
+        // Creates `mirai_verify` annotation handle and diagnostic message.
+        let mirai_verify_def_id = utils::mirai_annotation_fn("mirai_verify", tcx)
+            .expect("Expected a fn def for `mirai_verify`");
+        let mirai_verify_handle =
+            Operand::function_handle(tcx, mirai_verify_def_id, [], Span::default());
+        let diag_msg = "attempt to cast with overflow".as_bytes();
+        let diag_msg_const = ConstValue::Slice {
             data: tcx.mk_const_alloc(Allocation::from_bytes(
-                panic_msg,
+                diag_msg,
                 Align::ONE,
                 rustc_ast::Mutability::Not,
             )),
-            meta: panic_msg.len() as u64,
+            meta: diag_msg.len() as u64,
         };
-        let panic_msg_op = Operand::Constant(Box::new(ConstOperand {
+        let diag_msg_op = Operand::Constant(Box::new(ConstOperand {
             span: Span::default(),
             user_ty: None,
-            const_: Const::from_value(panic_msg_const, Ty::new_static_str(tcx)),
+            const_: Const::from_value(diag_msg_const, Ty::new_static_str(tcx)),
         }));
-        let panic_generics = tcx.generics_of(panic_def_id);
-        let panic_host_param_def = panic_generics
-            .params
-            .first()
-            .expect("Expected `host` generic param");
-        let panic_host_param_value = panic_host_param_def
-            .default_value(tcx)
-            .expect("Expected `host` generic param default value")
-            .skip_binder();
-        let panic_handle =
-            Operand::function_handle(tcx, panic_def_id, [panic_host_param_value], Span::default());
 
         // Adds integer cast overflow checks.
         for (location, assert_cond, val_operand, bound_operand) in checks {
@@ -79,9 +67,14 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
             let successors = successors.to_vec();
             let terminator = basic_block.terminator.clone();
 
+            // Adds successor block.
+            let mut successor_block_data = BasicBlockData::new(terminator);
+            successor_block_data.statements = successors;
+            let successor_block = body.basic_blocks_mut().push(successor_block_data);
+
             // Adds condition statement.
-            let cond_ty = Ty::new(tcx, TyKind::Bool);
-            let cond_local_decl = LocalDecl::with_source_info(cond_ty, source_info);
+            let cond_local_decl =
+                LocalDecl::with_source_info(Ty::new(tcx, TyKind::Bool), source_info);
             let cond_local = body.local_decls.push(cond_local_decl);
             let cond_place = Place::from(cond_local);
             let cond_rvalue = Rvalue::BinaryOp(assert_cond, Box::new((val_operand, bound_operand)));
@@ -91,45 +84,31 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
             };
             predecessors.push(cond_stmt);
 
-            // Creates panic call.
-            let panic_ty = Ty::new(tcx, TyKind::Never);
-            let panic_local_decl = LocalDecl::with_source_info(panic_ty, source_info);
-            let panic_local = body.local_decls.push(panic_local_decl);
-            let panic_place = Place::from(panic_local);
-            let panic_call = Terminator {
+            // Creates `mirai_verify` annotation call.
+            let annotation_ty = Ty::new(tcx, TyKind::Never);
+            let annotation_local_decl = LocalDecl::with_source_info(annotation_ty, source_info);
+            let annotation_local = body.local_decls.push(annotation_local_decl);
+            let annotation_place = Place::from(annotation_local);
+            let annotation_call = Terminator {
                 source_info,
                 kind: TerminatorKind::Call {
-                    func: panic_handle.clone(),
-                    args: vec![dummy_spanned(panic_msg_op.clone())],
-                    destination: panic_place,
-                    target: None,
-                    unwind: UnwindAction::Continue,
+                    func: mirai_verify_handle.clone(),
+                    args: vec![
+                        dummy_spanned(Operand::Move(cond_place)),
+                        dummy_spanned(diag_msg_op.clone()),
+                    ],
+                    destination: annotation_place,
+                    target: Some(successor_block),
+                    unwind: UnwindAction::Unreachable,
                     call_source: CallSource::Misc,
                     fn_span: Span::default(),
                 },
             };
 
-            // Adds successor block.
+            // Updates target block statements and terminator.
             let basic_blocks = body.basic_blocks_mut();
-            let mut successor_block_data = BasicBlockData::new(terminator);
-            successor_block_data.statements = successors;
-            let successor_block = basic_blocks.push(successor_block_data);
-
-            // Adds panic block.
-            let panic_block_data = BasicBlockData::new(Some(panic_call));
-            let panic_block = basic_blocks.push(panic_block_data);
-
-            // Updates current block statements and terminator.
-            let targets = SwitchTargets::new([(0u128, panic_block)].into_iter(), successor_block);
-            let terminator_check = Terminator {
-                source_info,
-                kind: TerminatorKind::SwitchInt {
-                    discr: Operand::Move(cond_place),
-                    targets,
-                },
-            };
             basic_blocks[location.block].statements = predecessors;
-            basic_blocks[location.block].terminator = Some(terminator_check);
+            basic_blocks[location.block].terminator = Some(annotation_call);
         }
     }
 }

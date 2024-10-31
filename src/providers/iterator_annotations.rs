@@ -6,7 +6,6 @@ use rustc_data_structures::graph::{dominators::Dominators, WithSuccessors};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{def::DefKind, LangItem};
 use rustc_middle::{
-    middle::exported_symbols::ExportedSymbol,
     mir::{
         visit::Visitor, BasicBlock, BasicBlockData, BasicBlocks, BinOp, Body, BorrowKind,
         CallSource, Const, ConstValue, HasLocalDecls, LocalDecl, LocalDecls, Location, MirPass,
@@ -42,8 +41,8 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
         annotations.sort_by(|a, b| b.location().cmp(a.location()));
 
         // Creates `mirai_assume` annotation handle.
-        let mirai_assume_def_id =
-            mirai_annotation_fn("mirai_assume", tcx).expect("Expected a fn def for `mirai_assume`");
+        let mirai_assume_def_id = utils::mirai_annotation_fn("mirai_assume", tcx)
+            .expect("Expected a fn def for `mirai_assume`");
         let mirai_assume_handle =
             Operand::function_handle(tcx, mirai_assume_def_id, [], Span::default());
 
@@ -821,25 +820,6 @@ impl<'tcx, 'pass> Visitor<'tcx> for IteratorVisitor<'tcx, 'pass> {
         self.process_terminator(terminator, location);
         self.super_terminator(terminator, location);
     }
-}
-
-/// Returns `DefId` (if known) of a mirai annotation function.
-fn mirai_annotation_fn(name: &str, tcx: TyCtxt) -> Option<DefId> {
-    let annotations_crate = tcx
-        .crates(())
-        .iter()
-        .find(|crate_num| tcx.crate_name(**crate_num).as_str() == "mirai_annotations")
-        .expect("Expected `mirai_annotations` crate as a dependency");
-    tcx.exported_symbols(*annotations_crate)
-        .iter()
-        .find_map(|(exported_sym, _)| {
-            if let ExportedSymbol::NonGeneric(def_id) = exported_sym {
-                if tcx.def_kind(def_id) == DefKind::Fn && tcx.item_name(*def_id).as_str() == name {
-                    return Some(*def_id);
-                }
-            }
-            None
-        })
 }
 
 /// Finds the innermost place if the given place is a single deref of a local,
