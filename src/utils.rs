@@ -2,8 +2,7 @@
 
 use rustc_ast::NestedMetaItem;
 use rustc_hir::{def::DefKind, HirId};
-use rustc_middle::middle::exported_symbols::ExportedSymbol;
-use rustc_middle::ty::TyCtxt;
+use rustc_middle::{middle::exported_symbols::ExportedSymbol, ty::TyCtxt};
 use rustc_span::{def_id::DefId, Symbol};
 
 use std::env;
