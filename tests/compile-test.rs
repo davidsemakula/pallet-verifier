@@ -73,7 +73,7 @@ fn generic_config(config: &mut Config, cmd: &str, is_rustc_wrapper: bool) {
         let exec_dep_info =
             fs::read_to_string(&exec_dep_info_path).expect("Expected test dependencies info");
         let mirai_annotations_path = exec_dep_info.lines().into_iter().find_map(|line| {
-            if !line.starts_with(char::is_whitespace) {
+            if !line.starts_with(char::is_whitespace) && !line.is_empty() {
                 let path_str = line.strip_suffix(':')?;
                 let path = Path::new(path_str);
                 let filename = path.file_stem()?.to_str()?;

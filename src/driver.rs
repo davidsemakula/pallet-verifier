@@ -8,7 +8,7 @@ extern crate rustc_session;
 
 mod cli_utils;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use std::{
     env, fs,
@@ -66,9 +66,10 @@ fn main() {
         arg.starts_with("mirai_annotations")
             && cli_args.get(idx - 1).is_some_and(|arg| arg == "--extern")
     });
+    let mut annotations_source_map_info = None;
     if !has_mirai_annotations_dep {
-        let mut annotations_path = env::current_dir().expect("Expected valid current dir");
-        annotations_path.push("__pallet_verifier_artifacts/mirai_annotations/src/lib.rs");
+        let annotations_path =
+            PathBuf::from("$virtual/pallet-verifier/mirai_annotations/src/lib.rs");
         let mut out_dir = cli_utils::arg_value("--out-dir")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -105,12 +106,15 @@ fn main() {
             annotations_args.push(format!("--target={target}"));
         }
         let mut rustc_callbacks = DefaultCallbacks;
-        let annotations_file_loader = VirtualFileLoader::new(
+        let mut annotations_source_map = FxHashMap::default();
+        let annotations_content = include_str!("../artifacts/mirai_annotations.rs");
+        annotations_source_map_info =
+            Some((annotations_path.clone(), annotations_content.to_owned()));
+        annotations_source_map.insert(
             annotations_path,
-            Some(include_str!("../artifacts/mirai_annotations.rs").to_owned()),
-            None,
-            None,
+            (Some(annotations_content.to_owned()), None, None),
         );
+        let annotations_file_loader = VirtualFileLoader::new(annotations_source_map);
         let mut annotations_compiler =
             rustc_driver::RunCompiler::new(&annotations_args, &mut rustc_callbacks);
         annotations_compiler.set_file_loader(Some(Box::new(annotations_file_loader)));
@@ -142,8 +146,17 @@ fn main() {
         extern_crates.insert("mirai_annotations");
         extern_crates_opt = Some(extern_crates);
     }
-    let analysis_file_loader =
-        VirtualFileLoader::new(target_path.clone(), None, extern_crates_opt.as_ref(), None);
+    let mut analysis_source_map = FxHashMap::default();
+    analysis_source_map.insert(
+        target_path.clone(),
+        (None, extern_crates_opt.as_ref(), None),
+    );
+    let mut dependency_source_maps = FxHashMap::default();
+    if let Some((annotations_path, annotations_content)) = annotations_source_map_info {
+        dependency_source_maps.insert(annotations_path, (Some(annotations_content), None, None));
+    }
+    analysis_source_map.extend(dependency_source_maps.clone());
+    let analysis_file_loader = VirtualFileLoader::new(analysis_source_map);
 
     // The `PALLET_VERIFIER_DEP_CRATE` env var is only set when compiling/annotating a dependency crate,
     // So we invoke an appropriate compiler and exit.
@@ -202,24 +215,29 @@ fn main() {
 
     // Initializes "virtual" `FileLoader` for "analysis-only" external crates,
     // and entry point and "contracts" content.
-    let verifier_file_loader = VirtualFileLoader::new(
+    let mut verifier_source_map = FxHashMap::default();
+    verifier_source_map.insert(
         target_path,
-        None,
-        extern_crates_opt.as_ref(),
-        Some(
-            [
-                // Adds generated entry points.
-                (ENTRY_POINTS_MOD_NAME, entry_points_content),
-                // Adds MIRAI contracts for FRAME/Substrate functions.
-                (
-                    CONTRACTS_MOD_NAME,
-                    include_str!("../artifacts/contracts.rs").to_owned(),
-                ),
-            ]
-            .into_iter()
-            .collect(),
+        (
+            None,
+            extern_crates_opt.as_ref(),
+            Some(
+                [
+                    // Adds generated entry points.
+                    (ENTRY_POINTS_MOD_NAME, entry_points_content),
+                    // Adds MIRAI contracts for FRAME/Substrate functions.
+                    (
+                        CONTRACTS_MOD_NAME,
+                        include_str!("../artifacts/contracts.rs").to_owned(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
         ),
     );
+    verifier_source_map.extend(dependency_source_maps);
+    let verifier_file_loader = VirtualFileLoader::new(verifier_source_map);
 
     // Analyzes FRAME pallet with MIRAI.
     // Enables compilation of MIRAI only code.

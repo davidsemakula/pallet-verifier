@@ -1,5 +1,7 @@
 //! A `FileLoader` that "virtually" adds "analysis-only" external crates and modules to a crate.
 
+#![allow(clippy::type_complexity)]
+
 use rustc_data_structures::sync::Lrc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_span::source_map::RealFileLoader;
@@ -11,70 +13,104 @@ use itertools::Itertools;
 /// A `FileLoader` that "virtually" adds "analysis-only" external crates and modules to a crate.
 pub struct VirtualFileLoader {
     file_loader: RealFileLoader,
-    root_path: PathBuf,
-    root_content: Option<String>,
-    extern_crate_decls: Option<String>,
-    virtual_mod_decls: Option<String>,
-    // `path` -> `content` map for "virtual" modules.
-    virtual_mod_contents: FxHashMap<PathBuf, String>,
+    // Source map for "virtual" contents for root paths.
+    root_source_map: FxHashMap<
+        // The root path.
+        PathBuf,
+        (
+            // base "virtual" content for root path.
+            Option<String>,
+            // `extern crate` declarations.
+            Option<String>,
+            // "virtual" `mod` declarations.
+            Option<String>,
+        ),
+    >,
+    // Source map for content of "virtual" modules.
+    mod_source_map: FxHashMap<PathBuf, String>,
 }
 
 impl VirtualFileLoader {
     /// Creates a "virtual" file loader.
     pub fn new(
-        root_path: PathBuf,
-        root_content: Option<String>,
-        extern_crates: Option<&FxHashSet<&str>>,
-        // `name` -> `content` map for "virtual" modules.
-        virtual_mods: Option<FxHashMap<&str, String>>,
+        source_map_def: FxHashMap<
+            // The root path.
+            PathBuf,
+            (
+                // "virtual" content for root path.
+                Option<String>,
+                // names of external crates to declare.
+                Option<&FxHashSet<&str>>,
+                // `name` -> `content` map for "virtual" modules.
+                Option<FxHashMap<&str, String>>,
+            ),
+        >,
     ) -> Self {
-        let extern_crate_decls = extern_crates
-            .filter(|extern_crates| !extern_crates.is_empty())
-            .map(|extern_crates| {
-                extern_crates
-                    .iter()
-                    .map(|extern_crate| format!("extern crate {extern_crate};"))
-                    .join("\n")
-            });
-        let mut virtual_mod_decls = FxHashSet::default();
-        let mut virtual_mod_contents = FxHashMap::default();
-        if let Some(virtual_mods) = virtual_mods {
-            for (name, content) in virtual_mods {
-                let mut mod_path = root_path.clone();
-                mod_path.set_file_name(format!("{name}.rs"));
-                virtual_mod_contents.insert(mod_path, content);
-                virtual_mod_decls.insert(format!("mod {name};"));
+        // Composes root and module source "virtual" maps based on the given definition.
+        let mut root_source_map = FxHashMap::default();
+        let mut mod_source_map = FxHashMap::default();
+        for (root_path, (root_content, extern_crates, virtual_mods)) in source_map_def {
+            let extern_crate_decls = extern_crates
+                .filter(|extern_crates| !extern_crates.is_empty())
+                .map(|extern_crates| {
+                    extern_crates
+                        .iter()
+                        .map(|extern_crate| format!("extern crate {extern_crate};"))
+                        .join("\n")
+                });
+            let mut virtual_mod_decls = FxHashSet::default();
+            if let Some(virtual_mods) = virtual_mods {
+                for (name, content) in virtual_mods {
+                    let mut mod_path = root_path.clone();
+                    mod_path.set_file_name(format!("{name}.rs"));
+                    mod_source_map.insert(mod_path, content);
+                    virtual_mod_decls.insert(format!("mod {name};"));
+                }
             }
+            let virtual_mod_decls_str =
+                (!virtual_mod_decls.is_empty()).then_some(virtual_mod_decls.into_iter().join("\n"));
+            root_source_map.insert(
+                root_path,
+                (root_content, extern_crate_decls, virtual_mod_decls_str),
+            );
         }
 
         Self {
             file_loader: RealFileLoader,
-            root_path,
-            root_content,
-            extern_crate_decls,
-            virtual_mod_decls: (!virtual_mod_decls.is_empty())
-                .then_some(virtual_mod_decls.into_iter().join("\n")),
-            virtual_mod_contents,
+            root_source_map,
+            mod_source_map,
         }
     }
 
     /// Returns "virtual" content for the specified path.
-    fn virtual_content(&self, path: &Path) -> Option<&String> {
-        self.virtual_mod_contents.get(path).or_else(|| {
-            if path == self.root_path && self.root_content.is_some() {
-                self.root_content.as_ref()
-            } else {
-                None
+    fn base_virtual_content(&self, path: &Path) -> Option<&String> {
+        let virtual_root_content = self
+            .root_source_map
+            .get(path)
+            .and_then(|(root_content, ..)| root_content.as_ref());
+        virtual_root_content.or_else(|| self.mod_source_map.get(path))
+    }
+
+    /// Appends extra "virtual" content for the specified path to the given base content (if necessary).
+    fn append_extra_virtual_content(&self, path: &Path, base_content: &mut String) {
+        if let Some((_, extern_crate_decls, virtual_mod_decls)) = self.root_source_map.get(path) {
+            if let Some(decls) = extern_crate_decls.as_deref() {
+                base_content.push_str(decls);
             }
-        })
+            if let Some(decls) = virtual_mod_decls.as_deref() {
+                base_content.push_str(decls);
+            }
+        }
     }
 }
 
 impl rustc_span::source_map::FileLoader for VirtualFileLoader {
     fn file_exists(&self, path: &Path) -> bool {
-        if self.virtual_mod_contents.contains_key(path)
-            || (path == self.root_path && self.root_content.is_some())
-        {
+        let has_virtual_root_content = self
+            .root_source_map
+            .get(path)
+            .is_some_and(|(content, ..)| content.is_some());
+        if has_virtual_root_content || self.mod_source_map.contains_key(path) {
             true
         } else {
             self.file_loader.file_exists(path)
@@ -82,24 +118,19 @@ impl rustc_span::source_map::FileLoader for VirtualFileLoader {
     }
 
     fn read_file(&self, path: &Path) -> std::io::Result<String> {
-        let mut content = if let Some(content) = self.virtual_content(path) {
+        let mut content = if let Some(content) = self.base_virtual_content(path) {
             content.clone()
         } else {
             self.file_loader.read_file(path)?
         };
-        if path == self.root_path {
-            if let Some(decls) = self.extern_crate_decls.as_deref() {
-                content.push_str(decls);
-            }
-            if let Some(decls) = self.virtual_mod_decls.as_deref() {
-                content.push_str(decls);
-            }
-        }
+        self.append_extra_virtual_content(path, &mut content);
         std::io::Result::Ok(content)
     }
 
     fn read_binary_file(&self, path: &Path) -> std::io::Result<Lrc<[u8]>> {
-        if let Some(content) = self.virtual_content(path) {
+        if let Some(mut content) = self.base_virtual_content(path).cloned() {
+            self.append_extra_virtual_content(path, &mut content);
+
             let mut bytes = Lrc::new_uninit_slice(content.len());
             let data: &mut [std::mem::MaybeUninit<u8>] = Lrc::get_mut(&mut bytes).unwrap();
             for (idx, byte) in content.as_bytes().iter().enumerate() {
