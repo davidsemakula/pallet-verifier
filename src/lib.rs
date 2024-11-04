@@ -53,6 +53,13 @@ pub const CONTRACTS_MOD_NAME: &str = "foreign_contracts";
 /// Tracks pointer width for target execution environment.
 pub const ENV_TARGET_POINTER_WIDTH: &str = "PALLET_VERIFIER_TARGET_POINTER_WIDTH";
 
+use rustc_hash::FxHashMap;
+use rustc_span::def_id::DefPathHash;
+
+/// Map from generated entry point `fn` names to a stable `DefPathHash` of the target pallet `fn`
+/// and it's [`CallKind`].
+pub type EntrysPointInfo = FxHashMap<String, (DefPathHash, CallKind)>;
+
 /// Kind of pallet `fn`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallKind {

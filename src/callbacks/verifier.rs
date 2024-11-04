@@ -2,7 +2,7 @@
 
 use rustc_driver::Compilation;
 use rustc_errors::{DiagnosticBuilder, Level, MultiSpan, Style, SubDiagnostic};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_interface::interface::Compiler;
 use rustc_middle::{
@@ -10,7 +10,7 @@ use rustc_middle::{
     ty::{AssocKind, TyCtxt},
 };
 use rustc_span::{
-    def_id::{CrateNum, DefId, DefPathHash, LocalDefId},
+    def_id::{CrateNum, DefId, LocalDefId},
     Span, Symbol,
 };
 
@@ -24,18 +24,18 @@ use mirai::{
 };
 use tempfile::TempDir;
 
-use crate::{providers, utils, CallKind, CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX};
+use crate::{
+    providers, utils, CallKind, EntrysPointInfo, CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX,
+};
 
 /// `rustc` callbacks for analyzing FRAME pallet with MIRAI.
 pub struct VerifierCallbacks<'compilation> {
-    entry_points: &'compilation FxHashMap<&'compilation str, (DefPathHash, CallKind)>,
+    entry_points: &'compilation EntrysPointInfo,
     mirai_config: Option<MiraiConfig>,
 }
 
 impl<'compilation> VerifierCallbacks<'compilation> {
-    pub fn new(
-        entry_points: &'compilation FxHashMap<&'compilation str, (DefPathHash, CallKind)>,
-    ) -> Self {
+    pub fn new(entry_points: &'compilation EntrysPointInfo) -> Self {
         Self {
             entry_points,
             mirai_config: None,
@@ -198,7 +198,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                             self.entry_points
                                 .iter()
                                 .find_map(|(name, (target_hash, call_kind))| {
-                                    if *name == def_name.as_str() {
+                                    if name == def_name.as_str() {
                                         let mut dispatchable_def_id_error = || {
                                             let mut error =
                                                 compiler.sess.dcx().struct_err(format!(

@@ -27,7 +27,7 @@ use rustc_span::{
 
 use itertools::Itertools;
 
-use crate::{providers, utils, CallKind, ENTRY_POINT_FN_PREFIX};
+use crate::{providers, utils, CallKind, EntrysPointInfo, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions.
 ///
@@ -400,10 +400,10 @@ use crate::*;
 
     /// Returns a map from generated entry point `fn` names to a stable `DefPathHash` of the
     /// target pallet `fn` and it's [`CallKind`].
-    pub fn entry_points_info(&self) -> FxHashMap<&str, (DefPathHash, CallKind)> {
+    pub fn entry_points_info(&self) -> EntrysPointInfo {
         self.entry_points
             .iter()
-            .map(|(name, (_, hash, call_kind))| (name.as_str(), (*hash, *call_kind)))
+            .map(|(name, (_, hash, call_kind))| (name.to_owned(), (*hash, *call_kind)))
             .collect()
     }
 }

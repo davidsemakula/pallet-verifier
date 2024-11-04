@@ -13,163 +13,65 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process,
+    process::exit,
 };
 
 use cli_utils::{ENV_DEP_CRATE, ENV_DEP_RENAMES};
 use pallet_verifier::{
-    DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, VerifierCallbacks,
-    VirtualFileLoader, CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
+    DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntrysPointInfo,
+    VerifierCallbacks, VirtualFileLoader, CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
 };
 
 const COMMAND: &str = "pallet-verifier";
 
 fn main() {
-    // Initializes loggers.
-    if let Ok(log) = env::var("PALLET_VERIFIER_LOG") {
-        // Initialize `rustc` logger.
-        env::set_var("RUSTC_LOG", &log);
-        env::set_var("RUSTC_LOG_COLOR", "always");
-        let early_error_handler =
-            rustc_session::EarlyDiagCtxt::new(rustc_session::config::ErrorOutputType::default());
-        rustc_driver::init_rustc_env_logger(&early_error_handler);
-
-        // Initialize `MIRAI` logger.
-        env::set_var("MIRAI_LOG", &log);
-        env::set_var("MIRAI_LOG_STYLE", "always");
-        let e = env_logger::Env::new()
-            .filter("MIRAI_LOG")
-            .write_style("MIRAI_LOG_STYLE");
-        env_logger::init_from_env(e);
-    }
+    // Initializes loggers (if necessary).
+    init_loggers();
 
     // Shows help and version messages (and exits, if necessary).
     cli_utils::handle_meta_args(COMMAND);
 
     // Retrieves command line arguments.
-    let mut cli_args: Vec<_> = env::args().collect();
+    let mut args: Vec<_> = env::args().collect();
     // Setting `RUSTC_WRAPPER` causes `cargo` to pass 'rustc' as the first argument.
     // We're invoking the compiler programmatically, so we remove it (if present).
     // Ref: <https://doc.rust-lang.org/cargo/reference/config.html#buildrustc-wrapper>
     // Ref: <https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-reads>
     // Ref: <https://github.com/rust-lang/rust-clippy/blob/caad063933e5012b152d883a6c03f1d0ad5ec6a8/src/driver.rs#L244-L251>
-    let is_rustc_wrapper_mode = cli_args
-        .get(1)
-        .is_some_and(|arg| cli_utils::is_rustc_path(arg));
+    let is_rustc_wrapper_mode = args.get(1).is_some_and(|arg| cli_utils::is_rustc_path(arg));
     if is_rustc_wrapper_mode {
-        cli_args.remove(1);
+        args.remove(1);
     }
 
     // Compiles `mirai-annotations` crate and adds it as a dependency (if necessary).
-    // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
-    let has_mirai_annotations_dep = cli_args.iter().enumerate().any(|(idx, arg)| {
-        arg.starts_with("mirai_annotations")
-            && cli_args.get(idx - 1).is_some_and(|arg| arg == "--extern")
-    });
-    let mut annotations_source_map_info = None;
-    if !has_mirai_annotations_dep {
-        let annotations_path =
-            PathBuf::from("$virtual/pallet-verifier/mirai_annotations/src/lib.rs");
-        let mut out_dir = cli_utils::arg_value("--out-dir")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                let mut target_dir = env::current_dir().expect("Expected valid current dir");
-                target_dir.push("target/debug/deps");
-                target_dir
-            });
-        if !out_dir.ends_with("deps") {
-            out_dir.push("deps");
-            fs::create_dir_all(&out_dir).expect("Failed to create `deps` directory");
-        }
-        let mut annotations_out_file = out_dir.clone();
-        let suffix = "pallet-verifier";
-        annotations_out_file.push(format!("libmirai_annotations-{suffix}.rlib"));
-        let mut annotations_args = [
-            // NOTE: `rustc` ignores the first argument, so we set that to "pallet-verifier".
-            "pallet-verifier",
-            "--crate-name=mirai_annotations",
-            "--edition=2021",
-            &format!("{}", annotations_path.display()),
-            "--crate-type=lib",
-            "--emit=dep-info,metadata,link",
-            "-Cembed-bitcode=no",
-            &format!("-Cmetadata={suffix}"),
-            &format!("-Cextra-filename=-{suffix}"),
-            &format!("--out-dir={}", out_dir.display()),
-            "--cfg=mirai",
-            "-Zalways_encode_mir=yes",
-            "--cap-lints=allow",
-        ]
-        .map(ToString::to_string)
-        .to_vec();
-        if let Some(target) = cli_utils::arg_value("--target") {
-            annotations_args.push(format!("--target={target}"));
-        }
-        let mut rustc_callbacks = DefaultCallbacks;
-        let mut annotations_source_map = FxHashMap::default();
-        let annotations_content = include_str!("../artifacts/mirai_annotations.rs");
-        annotations_source_map_info =
-            Some((annotations_path.clone(), annotations_content.to_owned()));
-        annotations_source_map.insert(
-            annotations_path,
-            (Some(annotations_content.to_owned()), None, None),
-        );
-        let annotations_file_loader = VirtualFileLoader::new(annotations_source_map);
-        let mut annotations_compiler =
-            rustc_driver::RunCompiler::new(&annotations_args, &mut rustc_callbacks);
-        annotations_compiler.set_file_loader(Some(Box::new(annotations_file_loader)));
-        let annotations_result = annotations_compiler.run();
-        if annotations_result.is_err() {
-            process::exit(rustc_driver::EXIT_FAILURE);
-        }
-        cli_args.extend([
-            // Add `mirai-annotations` crate as a dependency.
-            // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--extern-specify-where-an-external-library-is-located>
+    let mut annotations_source_info = None;
+    if !has_mirai_annotations_dep() {
+        let Ok((annotations_out_file, annotations_path, annotations_content)) =
+            compile_annotations_crate()
+        else {
+            // Exit if `mirai-annotations` crate compilation failed,
+            // presumably, the compiler already emitted an error in this case.
+            exit(rustc_driver::EXIT_FAILURE);
+        };
+
+        // Track annotations source map input path and content for later user by virtual file loaders.
+        annotations_source_info = Some((annotations_path.clone(), annotations_content.to_owned()));
+
+        // Add `mirai-annotations` crate as a dependency.
+        // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--extern-specify-where-an-external-library-is-located>
+        args.extend([
             "--extern".to_owned(),
             format!("mirai_annotations={}", annotations_out_file.display()),
         ]);
     }
 
-    // Initializes "virtual" `FileLoader` for "analysis-only" external crates.
-    // Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
-    let target_path_str = cli_args
-        .iter()
-        .find(|arg| Path::new(arg).extension().is_some_and(|ext| ext == "rs"))
-        .expect("Expected target path as the first `*.rs` argument");
-    let target_path = PathBuf::from(target_path_str);
-    let mut extern_crates_opt = None;
-    if !has_mirai_annotations_dep
-        || fs::read_to_string(target_path.clone())
-            .is_ok_and(|content| !content.contains("mirai_annotations"))
-    {
-        let mut extern_crates = FxHashSet::default();
-        extern_crates.insert("mirai_annotations");
-        extern_crates_opt = Some(extern_crates);
-    }
-    let mut analysis_source_map = FxHashMap::default();
-    analysis_source_map.insert(
-        target_path.clone(),
-        (None, extern_crates_opt.as_ref(), None),
-    );
-    let mut dependency_source_maps = FxHashMap::default();
-    if let Some((annotations_path, annotations_content)) = annotations_source_map_info {
-        dependency_source_maps.insert(annotations_path, (Some(annotations_content), None, None));
-    }
-    analysis_source_map.extend(dependency_source_maps.clone());
-    let analysis_file_loader = VirtualFileLoader::new(analysis_source_map);
-
     // The `PALLET_VERIFIER_DEP_CRATE` env var is only set when compiling/annotating a dependency crate,
     // So we invoke an appropriate compiler and exit.
     if env::var(ENV_DEP_CRATE).is_ok() {
-        let mut callbacks = DependencyCallbacks;
-        let mut compiler = rustc_driver::RunCompiler::new(&cli_args, &mut callbacks);
-        compiler.set_file_loader(Some(Box::new(analysis_file_loader)));
-        let result = compiler.run();
-        let exit_code = match result {
-            Ok(_) => rustc_driver::EXIT_SUCCESS,
-            Err(_) => rustc_driver::EXIT_FAILURE,
-        };
-        process::exit(exit_code);
+        exit(compile_annotated_dependency(
+            &args,
+            annotations_source_info.clone(),
+        ));
     }
 
     // If neither `CARGO_PKG_NAME` nor `CARGO_PRIMARY_PACKAGE`, then presumably this is
@@ -177,7 +79,7 @@ fn main() {
     // so we need to set some extra flags.
     // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html>
     if env::var("CARGO_PKG_NAME").is_err() || env::var("CARGO_PRIMARY_PACKAGE").is_err() {
-        cli_args.extend(
+        args.extend(
             [
                 // Enables compilation of unit tests and test harness generation.
                 // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--test-build-a-test-harness>
@@ -197,60 +99,225 @@ fn main() {
         );
     }
 
-    // Generates tractable entry points for FRAME pallet.
-    let dep_renames = env::var(ENV_DEP_RENAMES).ok().and_then(|dep_renames_json| {
-        serde_json::from_str::<rustc_hash::FxHashMap<String, String>>(&dep_renames_json).ok()
-    });
-    let mut entry_point_callbacks = EntryPointsCallbacks::new(&dep_renames);
-    let mut entry_point_compiler =
-        rustc_driver::RunCompiler::new(&cli_args, &mut entry_point_callbacks);
-    entry_point_compiler.set_file_loader(Some(Box::new(analysis_file_loader)));
-    let entry_point_result = entry_point_compiler.run();
-    if entry_point_result.is_err() {
-        process::exit(rustc_driver::EXIT_FAILURE);
-    }
-    let Some(entry_points_content) = entry_point_callbacks.entry_points_content() else {
-        process::exit(rustc_driver::EXIT_FAILURE);
+    // Generates "tractable" entry points for FRAME pallet (if possible).
+    let Ok((entry_points_content, entry_points_info)) =
+        generate_entry_points(&args, annotations_source_info.clone())
+    else {
+        // Exit if entry point generation failed,
+        // presumably, the compiler already emitted an error in this case.
+        exit(rustc_driver::EXIT_FAILURE);
     };
-
-    // Initializes "virtual" `FileLoader` for "analysis-only" external crates,
-    // and entry point and "contracts" content.
-    let mut verifier_source_map = FxHashMap::default();
-    verifier_source_map.insert(
-        target_path,
-        (
-            None,
-            extern_crates_opt.as_ref(),
-            Some(
-                [
-                    // Adds generated entry points.
-                    (ENTRY_POINTS_MOD_NAME, entry_points_content),
-                    // Adds MIRAI contracts for FRAME/Substrate functions.
-                    (
-                        CONTRACTS_MOD_NAME,
-                        include_str!("../artifacts/contracts.rs").to_owned(),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            ),
-        ),
-    );
-    verifier_source_map.extend(dependency_source_maps);
-    let verifier_file_loader = VirtualFileLoader::new(verifier_source_map);
 
     // Analyzes FRAME pallet with MIRAI.
     // Enables compilation of MIRAI only code.
-    cli_args.push("--cfg=mirai".to_owned());
-    let entry_points_info = entry_point_callbacks.entry_points_info();
-    let mut verifier_callbacks = VerifierCallbacks::new(&entry_points_info);
-    let mut verifier_compiler = rustc_driver::RunCompiler::new(&cli_args, &mut verifier_callbacks);
-    verifier_compiler.set_file_loader(Some(Box::new(verifier_file_loader)));
-    let verifier_result = verifier_compiler.run();
+    args.push("--cfg=mirai".to_owned());
+    exit(analyze_with_mirai(
+        &args,
+        entry_points_content,
+        &entry_points_info,
+        annotations_source_info,
+    ));
+}
 
-    let exit_code = match verifier_result {
+/// Compiles and analyses target crate (presumably a FRAME pallet) to generate "tractable" entry points.
+/// Returns a tuple of the raw entry point content (as a `String`),
+/// as well some entry points metadata (as [`EntryPointsInfo`]) if successful.
+fn generate_entry_points(
+    args: &[String],
+    annotations_source_info: AnnotationsSourceInfo,
+) -> Result<(String, EntrysPointInfo), ()> {
+    let dep_renames = env::var(ENV_DEP_RENAMES).ok().and_then(|dep_renames_json| {
+        serde_json::from_str::<rustc_hash::FxHashMap<String, String>>(&dep_renames_json).ok()
+    });
+    let mut callbacks = EntryPointsCallbacks::new(&dep_renames);
+    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
+    let target_path = analysis_target_path(args);
+    let file_loader = analysis_file_loader(target_path, annotations_source_info, &[]);
+    compiler.set_file_loader(Some(Box::new(file_loader)));
+    compiler.run().map_err(|_| ()).and_then(|_| {
+        callbacks
+            .entry_points_content()
+            .map(|content| (content, callbacks.entry_points_info()))
+            .ok_or(())
+    })
+}
+
+/// Analyzes FRAME pallet with MIRAI.
+fn analyze_with_mirai(
+    args: &[String],
+    entry_points_content: String,
+    entry_points_info: &EntrysPointInfo,
+    annotations_source_info: AnnotationsSourceInfo,
+) -> i32 {
+    let mut callbacks = VerifierCallbacks::new(entry_points_info);
+    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
+    let target_path = analysis_target_path(args);
+    let file_loader = analysis_file_loader(
+        target_path,
+        annotations_source_info,
+        &[
+            // Adds generated entry points.
+            (ENTRY_POINTS_MOD_NAME, entry_points_content),
+            // Adds MIRAI contracts for FRAME/Substrate functions.
+            (
+                CONTRACTS_MOD_NAME,
+                include_str!("../artifacts/contracts.rs").to_owned(),
+            ),
+        ],
+    );
+    compiler.set_file_loader(Some(Box::new(file_loader)));
+    match compiler.run() {
         Ok(_) => rustc_driver::EXIT_SUCCESS,
         Err(_) => rustc_driver::EXIT_FAILURE,
+    }
+}
+
+/// Type alias for tracking input path and content used for compiling `mirai-annotations` crate (if any).
+type AnnotationsSourceInfo = Option<(PathBuf, String)>;
+
+/// Compiles annotated dependencies.
+fn compile_annotated_dependency(
+    args: &[String],
+    annotations_source_info: AnnotationsSourceInfo,
+) -> i32 {
+    let mut callbacks = DependencyCallbacks;
+    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
+    let target_path = analysis_target_path(args);
+    let file_loader = analysis_file_loader(target_path, annotations_source_info, &[]);
+    compiler.set_file_loader(Some(Box::new(file_loader)));
+    match compiler.run() {
+        Ok(_) => rustc_driver::EXIT_SUCCESS,
+        Err(_) => rustc_driver::EXIT_FAILURE,
+    }
+}
+
+/// Compiles `mirai-annotations` crate and returns output `rlib` path, the input path and content if successful.
+fn compile_annotations_crate() -> Result<(PathBuf, PathBuf, String), ()> {
+    let input_path = Path::new("$virtual/pallet-verifier/mirai_annotations/src/lib.rs");
+    let mut out_dir = cli_utils::arg_value("--out-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut target_dir = env::current_dir().expect("Expected valid current dir");
+            target_dir.push("target/debug/deps");
+            target_dir
+        });
+    if !out_dir.ends_with("deps") {
+        out_dir.push("deps");
+        fs::create_dir_all(&out_dir).expect("Failed to create `deps` directory");
+    }
+    let mut out_path = out_dir.clone();
+    let suffix = "pallet-verifier";
+    out_path.push(format!("libmirai_annotations-{suffix}.rlib"));
+    let mut args = [
+        // NOTE: `rustc` ignores the first argument, so we set that to "pallet-verifier".
+        "pallet-verifier",
+        "--crate-name=mirai_annotations",
+        "--edition=2021",
+        &format!("{}", input_path.display()),
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "-Cembed-bitcode=no",
+        &format!("-Cmetadata={suffix}"),
+        &format!("-Cextra-filename=-{suffix}"),
+        &format!("--out-dir={}", out_dir.display()),
+        "--cfg=mirai",
+        "-Zalways_encode_mir=yes",
+        "--cap-lints=allow",
+    ]
+    .map(ToString::to_string)
+    .to_vec();
+    if let Some(target) = cli_utils::arg_value("--target") {
+        args.push(format!("--target={target}"));
+    }
+    let mut callbacks = DefaultCallbacks;
+    let input_content = include_str!("../artifacts/mirai_annotations.rs");
+    let mut source_map = FxHashMap::default();
+    source_map.insert(
+        input_path.to_path_buf(),
+        (Some(input_content.to_owned()), None, None),
+    );
+    let file_loader = VirtualFileLoader::new(source_map);
+    let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
+    compiler.set_file_loader(Some(Box::new(file_loader)));
+    compiler
+        .run()
+        .map(|_| (out_path, input_path.to_path_buf(), input_content.to_owned()))
+        .map_err(|_| ())
+}
+
+/// Creates "virtual" `FileLoader` for "analysis-only" external crates and "virtual" modules
+/// (e.g. for entry point and "contracts" content).
+fn analysis_file_loader(
+    target_path: PathBuf,
+    annotations_source_info: AnnotationsSourceInfo,
+    // `name` -> `content` map for "virtual" modules.
+    virtual_mods: &[(&str, String)],
+) -> VirtualFileLoader {
+    let mut extern_crates_opt = None;
+    if !has_mirai_annotations_dep()
+        || fs::read_to_string(&target_path)
+            .is_ok_and(|content| !content.contains("mirai_annotations"))
+    {
+        let mut extern_crates = FxHashSet::default();
+        extern_crates.insert("mirai_annotations");
+        extern_crates_opt = Some(extern_crates);
+    }
+    let mut analysis_source_map = FxHashMap::default();
+    analysis_source_map.insert(
+        target_path.clone(),
+        (
+            None,
+            extern_crates_opt.as_ref(),
+            (!virtual_mods.is_empty()).then_some(virtual_mods.iter().cloned().collect()),
+        ),
+    );
+    let mut dependency_source_maps = FxHashMap::default();
+    if let Some((annotations_path, annotations_content)) = annotations_source_info {
+        dependency_source_maps.insert(annotations_path, (Some(annotations_content), None, None));
+    }
+    analysis_source_map.extend(dependency_source_maps.clone());
+    VirtualFileLoader::new(analysis_source_map)
+}
+
+// Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
+fn analysis_target_path(args: &[String]) -> PathBuf {
+    let target_path_str = args
+        .iter()
+        .find(|arg| Path::new(arg).extension().is_some_and(|ext| ext == "rs"))
+        .expect("Expected target path as the first `*.rs` argument");
+    PathBuf::from(target_path_str)
+}
+
+/// Returns true if the `mirai-annotations` crate was already included as a dependency
+/// in the original args passed to `pallet-verifier`.
+fn has_mirai_annotations_dep() -> bool {
+    env::args().enumerate().any(|(idx, arg)| {
+        arg.starts_with("mirai_annotations")
+            && env::args()
+                .nth(idx - 1)
+                .is_some_and(|arg| arg == "--extern")
+    })
+}
+
+/// Initializes loggers (if necessary).
+fn init_loggers() {
+    // Only continue if a log level is set via `PALLET_VERIFIER_LOG` env var.
+    let Ok(log) = env::var("PALLET_VERIFIER_LOG") else {
+        return;
     };
-    process::exit(exit_code);
+
+    // Initialize `rustc` logger.
+    env::set_var("RUSTC_LOG", &log);
+    env::set_var("RUSTC_LOG_COLOR", "always");
+    let early_error_handler =
+        rustc_session::EarlyDiagCtxt::new(rustc_session::config::ErrorOutputType::default());
+    rustc_driver::init_rustc_env_logger(&early_error_handler);
+
+    // Initialize `MIRAI` logger.
+    env::set_var("MIRAI_LOG", &log);
+    env::set_var("MIRAI_LOG_STYLE", "always");
+    let e = env_logger::Env::new()
+        .filter("MIRAI_LOG")
+        .write_style("MIRAI_LOG_STYLE");
+    env_logger::init_from_env(e);
 }
