@@ -137,8 +137,9 @@ and module definitions in a way that leverages `rustc`'s excellent support for [
 Currently, `pallet-verifier` focuses on detecting [panics] and [arithmetic overflow/underflow]
 (and [lossy integer conversions][as-conversions-lossy]) in [dispatchable functions/extrinsics][call] and 
 public associated functions of [FRAME pallets][FRAME].
-However, the goal is also target other classes of security vulnerabilities (e.g. [insufficient or missing origin checks][origin-checks],
-[bad randomness][randomness], [insufficient unsigned transaction validation][validate-unsigned] e.t.c) in the future.
+However, other classes of security vulnerabilities (e.g. [insufficient or missing origin checks][origin-checks],
+[bad randomness][randomness], [insufficient unsigned transaction validation][validate-unsigned] e.t.c) 
+will also be targeted in the future.
 
 [panics]: https://secure-contracts.com/not-so-smart-contracts/substrate/dont_panic/
 [arithmetic overflow/underflow]: https://secure-contracts.com/not-so-smart-contracts/substrate/arithmetic_overflow/

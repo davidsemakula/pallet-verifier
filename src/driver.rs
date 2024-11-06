@@ -11,10 +11,14 @@ mod cli_utils;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     process::exit,
 };
+
+use itertools::Itertools;
 
 use cli_utils::{ENV_DEP_CRATE, ENV_DEP_RENAMES};
 use pallet_verifier::{
@@ -132,7 +136,7 @@ fn generate_entry_points(
     let mut callbacks = EntryPointsCallbacks::new(&dep_renames);
     let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
-    let file_loader = analysis_file_loader(target_path, annotations_source_info, &[]);
+    let file_loader = analysis_file_loader(target_path, &[], annotations_source_info, true);
     compiler.set_file_loader(Some(Box::new(file_loader)));
     compiler.run().map_err(|_| ()).and_then(|_| {
         callbacks
@@ -154,7 +158,6 @@ fn analyze_with_mirai(
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(
         target_path,
-        annotations_source_info,
         &[
             // Adds generated entry points.
             (ENTRY_POINTS_MOD_NAME, entry_points_content),
@@ -164,6 +167,8 @@ fn analyze_with_mirai(
                 include_str!("../artifacts/contracts.rs").to_owned(),
             ),
         ],
+        annotations_source_info,
+        true,
     );
     compiler.set_file_loader(Some(Box::new(file_loader)));
     match compiler.run() {
@@ -183,7 +188,7 @@ fn compile_annotated_dependency(
     let mut callbacks = DependencyCallbacks;
     let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
-    let file_loader = analysis_file_loader(target_path, annotations_source_info, &[]);
+    let file_loader = analysis_file_loader(target_path, &[], annotations_source_info, false);
     compiler.set_file_loader(Some(Box::new(file_loader)));
     match compiler.run() {
         Ok(_) => rustc_driver::EXIT_SUCCESS,
@@ -249,9 +254,10 @@ fn compile_annotations_crate() -> Result<(PathBuf, PathBuf, String), ()> {
 /// (e.g. for entry point and "contracts" content).
 fn analysis_file_loader(
     target_path: PathBuf,
-    annotations_source_info: AnnotationsSourceInfo,
     // `name` -> `content` map for "virtual" modules.
     virtual_mods: &[(&str, String)],
+    annotations_source_info: AnnotationsSourceInfo,
+    include_annotated_deps: bool,
 ) -> VirtualFileLoader {
     let mut extern_crates_opt = None;
     if !has_mirai_annotations_dep()
@@ -271,11 +277,67 @@ fn analysis_file_loader(
             (!virtual_mods.is_empty()).then_some(virtual_mods.iter().cloned().collect()),
         ),
     );
-    let mut dependency_source_maps = FxHashMap::default();
     if let Some((annotations_path, annotations_content)) = annotations_source_info {
-        dependency_source_maps.insert(annotations_path, (Some(annotations_content), None, None));
+        analysis_source_map.insert(annotations_path, (Some(annotations_content), None, None));
     }
-    analysis_source_map.extend(dependency_source_maps.clone());
+    if include_annotated_deps {
+        let mut is_extern_val_next = false;
+        for arg in env::args() {
+            if arg == "--extern" {
+                is_extern_val_next = true;
+                continue;
+            }
+            if !is_extern_val_next {
+                continue;
+            }
+            is_extern_val_next = false;
+            if !arg.starts_with("pallet_") {
+                continue;
+            }
+            let Some((_, extern_path_str)) = arg.splitn(2, '=').collect_tuple() else {
+                continue;
+            };
+            let extern_path = Path::new(extern_path_str);
+            let is_rlib_path = extern_path.extension().is_some_and(|ext| ext == "rlib");
+            if !is_rlib_path {
+                continue;
+            }
+            let filename = extern_path
+                .file_stem()
+                .and_then(OsStr::to_str)
+                .and_then(|name| name.strip_prefix("lib"));
+            let Some(filename) = filename else {
+                continue;
+            };
+            let mut dep_info_path = extern_path.to_path_buf();
+            dep_info_path.set_file_name(format!("{filename}.d"));
+            let dep_info =
+                fs::read_to_string(&dep_info_path).expect("Expected test dependencies info");
+            let lib_src_path = dep_info.lines().find_map(|line| {
+                if !line.starts_with(char::is_whitespace) && !line.is_empty() {
+                    let path_str = line.strip_suffix(':')?;
+                    let path = Path::new(path_str);
+                    let filename = path.file_stem()?.to_str()?;
+                    let ext = path.extension()?;
+                    if filename == "lib" && ext == "rs" {
+                        return Some(path);
+                    }
+                }
+                None
+            });
+            let Some(lib_src_path) = lib_src_path else {
+                continue;
+            };
+            let abs_lib_src_path = if lib_src_path.is_relative() {
+                env::current_dir()
+                    .expect("Expected valid current working directory")
+                    .join(lib_src_path)
+            } else {
+                lib_src_path.to_path_buf()
+            };
+            analysis_source_map.insert(abs_lib_src_path, (None, extern_crates_opt.as_ref(), None));
+        }
+    }
     VirtualFileLoader::new(analysis_source_map)
 }
 
