@@ -87,6 +87,8 @@ You can run [UI tests](https://rustc-dev-guide.rust-lang.org/tests/ui.html) by r
 cargo test
 ```
 
+Check out [TESTING.md](/TESTING.md) for more details.
+
 ## License
 
 Licensed under either [MIT](/LICENSE-MIT) or [Apache-2.0](/LICENSE-APACHE) license at your option.

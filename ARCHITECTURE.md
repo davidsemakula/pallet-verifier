@@ -29,7 +29,7 @@ pallet-verifier analyzes is Rust's [MIR (Mid-level Intermediate Representation)]
 [MIR-simple]: https://blog.rust-lang.org/2016/04/19/MIR.html#reducing-rust-to-a-simple-core
 [MIRAI-MIR]: https://github.com/endorlabs/MIRAI/blob/main/documentation/WhyMir.md
 
-At the highest level, `pallet-verifier` is a custom [rust compiler (rustc) driver][rustc-driver] which uses
+At the highest level, `pallet-verifier` is a custom [Rust compiler (rustc) driver][rustc-driver] which uses
 [MIRAI] as a backend for [abstract interpretation][MIRAI-abs-int] (and in the future, also as a
 [tag and taint analysis][MIRAI-tag] engine).
 
@@ -95,8 +95,8 @@ as substitutions for generic types, while keeping the call arguments ["abstract"
 [MIRAI-abstract-value]: https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#abstract-values
 
 [Annotations][annotations] (and additional assertions) are necessary to either add checks that aren't included by 
-the default rust compiler (e.g. [overflow checks for narrowing and/or lossy integer cast conversions][overflow-rfc-design] 
-([see also][overflow-rfc-remove-as])), or [declare invariants that can't be inferred from source code alone to improve the accuracy of the verifier and reduce false positives][annotations] 
+the default Rust compiler (e.g. [overflow checks for narrowing and/or lossy integer cast/`as` conversions][overflow-rfc-updates] 
+(see also [this][overflow-rfc-remove-as] and [this][as-conversions-lossy])), or [declare invariants that can't be inferred from source code alone to improve the accuracy of the verifier and reduce false positives][annotations] 
 (e.g. [iterator related annotations][iterator-annotations-src]).
 
 **NOTE:** [Annotations][annotations] require the [mirai-annotations crate][annotations] to be a dependency of the target
@@ -105,8 +105,9 @@ so the [custom rustc driver][rustc-driver-src] detects when the [mirai-annotatio
 and automatically compiles it and "silently" adds it as a dependency 
 (i.e. without modifying the actual source code and/or `Cargo.toml` manifest of the target [FRAME] pallet).
 
-[overflow-rfc-design]: https://rust-lang.github.io/rfcs/0560-integer-overflow.html#detailed-design
+[overflow-rfc-updates]: https://rust-lang.github.io/rfcs/0560-integer-overflow.html#updates-since-being-accepted
 [overflow-rfc-remove-as]: https://github.com/rust-lang/rfcs/pull/1019#issuecomment-88277675
+[as-conversions-lossy]: https://doc.rust-lang.org/reference/expressions/operator-expr.html#semantics
 [annotations]: https://crates.io/crates/mirai-annotations
 [iterator-annotations-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers/iterator_annotations.rs
 
@@ -135,7 +136,7 @@ and module definitions in a way that leverages `rustc`'s excellent support for [
 ## Current Capabilities
 
 Currently, `pallet-verifier` focuses on detecting [panics] and [arithmetic overflow/underflow]
-(and [lossy integer conversions][as-conversions-lossy]) in [dispatchable functions/extrinsics][call] and 
+(including [overflow checks for narrowing and/or lossy integer cast/`as` conversions that aren't checked by the default Rust compiler][overflow-rfc-updates] - see also [this][overflow-rfc-remove-as] and [this][as-conversions-lossy]) in [dispatchable functions/extrinsics][call] and 
 public associated functions of [FRAME pallets][FRAME].
 However, other classes of security vulnerabilities (e.g. [insufficient or missing origin checks][origin-checks],
 [bad randomness][randomness], [insufficient unsigned transaction validation][validate-unsigned] e.t.c) 
@@ -143,7 +144,6 @@ will also be targeted in the future.
 
 [panics]: https://secure-contracts.com/not-so-smart-contracts/substrate/dont_panic/
 [arithmetic overflow/underflow]: https://secure-contracts.com/not-so-smart-contracts/substrate/arithmetic_overflow/
-[as-conversions-lossy]: https://doc.rust-lang.org/reference/expressions/operator-expr.html#semantics
 [origin-checks]: https://secure-contracts.com/not-so-smart-contracts/substrate/origins/
 [randomness]: https://secure-contracts.com/not-so-smart-contracts/substrate/randomness/
 [validate-unsigned]: https://secure-contracts.com/not-so-smart-contracts/substrate/validate_unsigned/
