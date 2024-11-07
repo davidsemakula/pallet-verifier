@@ -13,18 +13,21 @@ use ui_test::{
     status_emitter::Text, Args, Config, Errored, Format, OutputConflictHandling,
 };
 
+/// Runs all ui tests.
 fn main() -> ui_test::color_eyre::Result<()> {
     ui_driver()?;
     ui_cargo("tests/ui/cargo")?;
     ui_cargo("tests/ui/sdk")
 }
 
+/// Runs ui tests for direct calls to the rustc driver binary (i.e. without cargo).
 fn ui_driver() -> ui_test::color_eyre::Result<()> {
     let mut config = Config::rustc("tests/ui/driver");
     generic_config(&mut config, "pallet-verifier", true);
     ui_test::run_tests(config)
 }
 
+/// Runs ui tests with cargo subcommand (i.e. `cargo verify-pallet`).
 fn ui_cargo(dir: &str) -> ui_test::color_eyre::Result<()> {
     let mut config = Config::cargo(dir);
     let sub_cmd = OsString::from("verify-pallet");
@@ -45,6 +48,7 @@ fn ui_cargo(dir: &str) -> ui_test::color_eyre::Result<()> {
     )
 }
 
+/// Sets low-level options and flags shared across test suites.
 fn generic_config(config: &mut Config, cmd: &str, is_rustc_wrapper: bool) {
     // Fails on mismatches.
     config.output_conflict_handling = OutputConflictHandling::Error;
