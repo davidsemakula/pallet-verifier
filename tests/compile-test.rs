@@ -5,13 +5,9 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
-use ui_test::{
-    build_manager::BuildManager, custom_flags::Flag, per_test_config::TestConfig,
-    status_emitter::Text, Args, Config, Errored, Format, OutputConflictHandling,
-};
+use ui_test::{status_emitter::Text, Args, Config, Format, OutputConflictHandling};
 
 /// Runs all ui tests.
 fn main() -> ui_test::color_eyre::Result<()> {
@@ -113,38 +109,9 @@ fn generic_config(config: &mut Config, cmd: &str, is_rustc_wrapper: bool) {
     // Sets UI test to simply compare stderr to output files.
     config.comment_defaults.base().require_annotations = None.into();
     config.comment_defaults.base().exit_status = None.into();
-    // Ignores stdout.
-    config
-        .comment_defaults
-        .base()
-        .add_custom("dont-check-compiler-stdout", IgnoreStdOut);
     // Sets bless arg/config based on env var.
     let mut args = Args::test().unwrap();
-    args.bless |= env::var("PALLET_VERIFIER_BLESS").is_ok_and(|val| val == "true");
+    args.bless |= env::var("PALLET_VERIFIER_BLESS")
+        .is_ok_and(|val| matches!(val.as_str(), "true" | "yes" | "y" | "1"));
     config.with_args(&args);
-}
-
-/// Custom comment/header for ignoring compiler stdout.
-/// Similar to `dont-check-compiler-stderr` from [`compiletest`](https://rustc-dev-guide.rust-lang.org/tests/headers.html).
-#[derive(Debug, Clone, Copy)]
-struct IgnoreStdOut;
-
-impl Flag for IgnoreStdOut {
-    fn clone_inner(&self) -> Box<dyn Flag> {
-        Box::new(*self)
-    }
-
-    fn must_be_unique(&self) -> bool {
-        true
-    }
-
-    fn apply(
-        &self,
-        cmd: &mut Command,
-        _config: &TestConfig,
-        _build_manager: &BuildManager,
-    ) -> Result<(), Errored> {
-        cmd.stdout(std::process::Stdio::null());
-        Ok(())
-    }
 }

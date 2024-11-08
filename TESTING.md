@@ -56,9 +56,12 @@ are production [FRAME] pallet tests, and include FRAME pallets copied directly f
 [arch-caps]: /ARCHITECTURE.md#current-capabilities
 [polkadot-sdk]: https://github.com/paritytech/polkadot-sdk
 
-The expected stderr output/diagnostics for each test case is defined in an `*.stderr` file 
-(e.g. [see this][pallet-multisig-stderr] and [this][driver-int-cast-overflow-stderr]), with the absence of this file 
-implying a test case has no expected diagnostics.
+The expected `stdout` and `stderr` output for each test case is defined in `*.stdout` and `*.stderr` files 
+(e.g. see [this][pallet-multisig-stdout] and [this][pallet-multisig-stderr], or [this][driver-int-cast-overflow-stdout] 
+and [this][driver-int-cast-overflow-stderr]), with the absence of a `*.stderr` file implying that a test case has 
+no expected diagnostics.
 
+[pallet-multisig-stdout]: https://github.com/davidsemakula/pallet-verifier/blob/master/tests/ui/sdk/multisig/Cargo.stdout
 [pallet-multisig-stderr]: https://github.com/davidsemakula/pallet-verifier/blob/master/tests/ui/sdk/multisig/Cargo.stderr
+[driver-int-cast-overflow-stdout]: https://github.com/davidsemakula/pallet-verifier/blob/master/tests/ui/driver/tractable-skeleton-int-cast-overflow.stdout
 [driver-int-cast-overflow-stderr]: https://github.com/davidsemakula/pallet-verifier/blob/master/tests/ui/driver/tractable-skeleton-int-cast-overflow.stderr
