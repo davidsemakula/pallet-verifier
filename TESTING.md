@@ -35,7 +35,7 @@ the [ui_test framework][ui_test-crate] as its [UI tests runner][ui-tests-runner]
 Test cases are divided into three main test suites, each in its own subdirectory: 
 - [tests/ui/driver][ui-tests-src-driver]: for testing minimal direct calls to the [custom rustc driver][rustc-driver-src] (i.e. without [cargo]).
 - [tests/ui/cargo][ui-tests-src-cargo]: for testing calls via the [custom cargo subcommand][cargo-sub-cmd-src] (i.e. `cargo verify-pallet`).
-- [tests/ui/sdk][ui-tests-src-sdk]: for testing a few production [FRAME] pallet tests.
+- [tests/ui/sdk][ui-tests-src-sdk]: for testing a few production [FRAME] pallets from the [Polkadot SDK][polkadot-sdk].
 
 [ui-tests-src-driver]: https://github.com/davidsemakula/pallet-verifier/tree/master/tests/ui/driver
 [rustc-driver-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/driver.rs
@@ -44,6 +44,7 @@ Test cases are divided into three main test suites, each in its own subdirectory
 [cargo-sub-cmd-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/main.rs
 [ui-tests-src-sdk]: https://github.com/davidsemakula/pallet-verifier/tree/master/tests/ui/sdk
 [FRAME]: https://docs.substrate.io/learn/runtime-development/#frame
+[polkadot-sdk]: https://github.com/paritytech/polkadot-sdk
 
 However, at a higher-level, test cases in the [tests/ui/driver][ui-tests-src-driver] and [tests/ui/cargo][ui-tests-src-cargo] 
 test suites are essentially minimal sanity checks with descriptive names based on the specific feature/behaviour 
@@ -54,7 +55,6 @@ are production [FRAME] pallet tests, and include FRAME pallets copied directly f
 [ui-test-driver-int-cast-overflow]: https://github.com/davidsemakula/pallet-verifier/blob/master/tests/ui/driver/tractable-skeleton-int-cast-overflow.rs
 [ui-test-cargo-int-cast-overflow]: https://github.com/davidsemakula/pallet-verifier/tree/master/tests/ui/cargo/minimal-tractable-int-cast-overflow
 [arch-caps]: /ARCHITECTURE.md#current-capabilities
-[polkadot-sdk]: https://github.com/paritytech/polkadot-sdk
 
 The expected `stdout` and `stderr` output for each test case is defined in `*.stdout` and `*.stderr` files 
 (e.g. see [this][pallet-multisig-stdout] and [this][pallet-multisig-stderr], or [this][driver-int-cast-overflow-stdout] 
