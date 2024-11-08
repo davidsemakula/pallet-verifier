@@ -42,6 +42,31 @@ Additionally, for a seamless and familiar developer experience, `pallet-verifier
 [MIRAI-tag]: https://github.com/endorlabs/MIRAI/blob/main/documentation/TagAnalysis.md
 [cargo-sub-cmd]: https://doc.rust-lang.org/cargo/reference/external-tools.html#custom-subcommands
 
+## Current Capabilities
+
+Currently, `pallet-verifier` focuses on detecting [panics] and [arithmetic overflow/underflow]
+(including [overflow checks for narrowing and/or lossy integer cast/`as` conversions that aren't checked by the default Rust compiler][overflow-rfc-updates] - see also [this][overflow-rfc-remove-as] and [this][as-conversions-lossy]) in [dispatchable functions/extrinsics][call] and
+public associated functions of [FRAME pallets][FRAME].
+However, other classes of security vulnerabilities (e.g. [insufficient or missing origin checks][origin-checks],
+[bad randomness][randomness], [insufficient unsigned transaction validation][validate-unsigned] e.t.c)
+will also be targeted in the future.
+
+[panics]: https://secure-contracts.com/not-so-smart-contracts/substrate/dont_panic/
+[arithmetic overflow/underflow]: https://secure-contracts.com/not-so-smart-contracts/substrate/arithmetic_overflow/
+[overflow-rfc-updates]: https://rust-lang.github.io/rfcs/0560-integer-overflow.html#updates-since-being-accepted
+[overflow-rfc-remove-as]: https://github.com/rust-lang/rfcs/pull/1019#issuecomment-88277675
+[as-conversions-lossy]: https://doc.rust-lang.org/reference/expressions/operator-expr.html#semantics
+[origin-checks]: https://secure-contracts.com/not-so-smart-contracts/substrate/origins/
+[randomness]: https://secure-contracts.com/not-so-smart-contracts/substrate/randomness/
+[validate-unsigned]: https://secure-contracts.com/not-so-smart-contracts/substrate/validate_unsigned/
+
+**NOTE:** `pallet-verifier` assumes a 32 bit [target pointer width][rustc-target-pointer-width] by default
+(i.e. the same pointer width as the `wasm32` and `riscv32` targets), however, this can be overridden using
+the `--pointer-width` argument which accepts a value of either `32` or `64` (e.g. `cargo verify-pallet --pointer-width 64`).
+However, the 64 bit target pointer width option is currently only supported on 64 bit host machines.
+
+[rustc-target-pointer-width]: https://doc.rust-lang.org/reference/conditional-compilation.html#target_pointer_width
+
 ## Implementation Details
 
 `pallet-verifier` consists of two binaries:
@@ -105,9 +130,6 @@ so the [custom rustc driver][rustc-driver-src] detects when the [mirai-annotatio
 and automatically compiles it and "silently" adds it as a dependency 
 (i.e. without modifying the actual source code and/or `Cargo.toml` manifest of the target [FRAME] pallet).
 
-[overflow-rfc-updates]: https://rust-lang.github.io/rfcs/0560-integer-overflow.html#updates-since-being-accepted
-[overflow-rfc-remove-as]: https://github.com/rust-lang/rfcs/pull/1019#issuecomment-88277675
-[as-conversions-lossy]: https://doc.rust-lang.org/reference/expressions/operator-expr.html#semantics
 [annotations]: https://crates.io/crates/mirai-annotations
 [iterator-annotations-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers/iterator_annotations.rs
 
@@ -133,24 +155,4 @@ and module definitions in a way that leverages `rustc`'s excellent support for [
 [rustc-inc-comp]: https://rustc-dev-guide.rust-lang.org/queries/incremental-compilation.html
 [rustc-query]: https://rustc-dev-guide.rust-lang.org/query.html
 
-## Current Capabilities
 
-Currently, `pallet-verifier` focuses on detecting [panics] and [arithmetic overflow/underflow]
-(including [overflow checks for narrowing and/or lossy integer cast/`as` conversions that aren't checked by the default Rust compiler][overflow-rfc-updates] - see also [this][overflow-rfc-remove-as] and [this][as-conversions-lossy]) in [dispatchable functions/extrinsics][call] and 
-public associated functions of [FRAME pallets][FRAME].
-However, other classes of security vulnerabilities (e.g. [insufficient or missing origin checks][origin-checks],
-[bad randomness][randomness], [insufficient unsigned transaction validation][validate-unsigned] e.t.c) 
-will also be targeted in the future.
-
-[panics]: https://secure-contracts.com/not-so-smart-contracts/substrate/dont_panic/
-[arithmetic overflow/underflow]: https://secure-contracts.com/not-so-smart-contracts/substrate/arithmetic_overflow/
-[origin-checks]: https://secure-contracts.com/not-so-smart-contracts/substrate/origins/
-[randomness]: https://secure-contracts.com/not-so-smart-contracts/substrate/randomness/
-[validate-unsigned]: https://secure-contracts.com/not-so-smart-contracts/substrate/validate_unsigned/
-
-**NOTE:** `pallet-verifier` assumes a 32 bit [target pointer width][rustc-target-pointer-width] by default 
-(i.e. the same pointer width as the `wasm32` and `riscv32` targets), however, this can be overridden using 
-the `--pointer-width` argument which accepts a value of either `32` or `64` (e.g. `cargo verify-pallet --pointer-width 64`). 
-However, the 64 bit target pointer width option is currently only supported on 64 bit host machines.
-
-[rustc-target-pointer-width]: https://doc.rust-lang.org/reference/conditional-compilation.html#target_pointer_width
