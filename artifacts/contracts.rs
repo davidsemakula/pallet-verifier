@@ -301,6 +301,14 @@ pub mod memory_db {
     }
 }
 
+pub mod parity_scale_codec {
+    pub mod codec {
+        pub trait Encode {
+            noop_result!(, encode, Vec<u8>);
+        }
+    }
+}
+
 pub mod primitive_types {
     macro_rules! primitive_type {
         ($name:ident) => {

@@ -418,7 +418,7 @@ fn emit_diagnostics(
     };
 
     for mut diagnostic in diagnostics {
-        // Ignores noisy diagnostics about foreign functions with missing MIR bodies and incomplete analysis.
+        // Ignores noisy diagnostics about foreign functions with missing MIR bodies, incomplete analysis e.t.c.
         // Also ignores `mirai_annotations::assume!` related diagnostics because those are likely
         // from our analysis code.
         // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
@@ -432,6 +432,17 @@ fn emit_diagnostics(
                     msg.contains("MIR body")
                         && (msg.contains("without") || msg.contains("did not resolve"))
                 };
+                // `-Cdebug-assertions=no` doesn't remove debug asserts from pre-compiled crates.
+                let is_debug_assert = || {
+                    msg.contains("assert")
+                        && diagnostic.span.primary_span().is_some_and(|span| {
+                            source_map.span_to_snippet(span).is_ok_and(|snippet| {
+                                snippet.contains("debug_assert!")
+                                    || snippet.contains("debug_assert_eq!")
+                                    || snippet.contains("debug_assert_ne!")
+                            })
+                        })
+                };
                 let is_truthy_assume = || {
                     msg.contains("assumption")
                         && (msg.contains("provably true") || msg.contains("provably false"))
@@ -444,11 +455,36 @@ fn emit_diagnostics(
                 let is_pointer_alloc_issue = || {
                     msg.contains("pointer") && msg.contains("memory") && msg.contains("deallocated")
                 };
+                let is_iter_arg_validity_related = || {
+                    let is_iter_related = || {
+                        diagnostic.children.iter().any(|sub_diag| {
+                            sub_diag.span.primary_span().is_some_and(|span| {
+                                let is_std_or_core = source_map
+                                    .span_to_location_info(span)
+                                    .0
+                                    .is_some_and(|source_file| {
+                                        matches!(
+                                            tcx.crate_name(source_file.cnum).as_str(),
+                                            "std" | "core"
+                                        )
+                                    });
+                                is_std_or_core
+                                    && source_map
+                                        .span_to_snippet(span)
+                                        .is_ok_and(|snippet| snippet.contains("Iterator::"))
+                            })
+                        })
+                    };
+                    (msg.contains("invalid args") || msg.contains("dummy argument"))
+                        && is_iter_related()
+                };
                 is_missing_mir()
                     || msg.contains("incomplete analysis")
+                    || is_debug_assert()
                     || is_truthy_assume()
                     || is_unreachable_assume()
                     || is_pointer_alloc_issue()
+                    || is_iter_arg_validity_related()
             });
         if is_noisy {
             diagnostic.cancel();
