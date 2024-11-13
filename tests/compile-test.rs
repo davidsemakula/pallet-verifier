@@ -1,11 +1,8 @@
+//! Test runner for [UI tests](https://rustc-dev-guide.rust-lang.org/tests/ui.html).
+
 extern crate mirai_annotations;
 
-use std::{
-    env,
-    ffi::OsString,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{env, ffi::OsString, fs, path::Path};
 
 use ui_test::{status_emitter::Text, Args, Config, Format, OutputConflictHandling};
 
@@ -103,8 +100,8 @@ fn generic_config(config: &mut Config, cmd: &str, is_rustc_wrapper: bool) {
             .expect("Expected valid host and target triples");
     }
     // Sets output directory.
-    let out_dir = PathBuf::from(env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".into()))
-        .join("ui_test");
+    let out_dir =
+        Path::new(env::var("CARGO_TARGET_DIR").as_deref().unwrap_or("target")).join("ui_test");
     config.out_dir = out_dir;
     // Sets UI test to simply compare stderr to output files.
     config.comment_defaults.base().require_annotations = None.into();
