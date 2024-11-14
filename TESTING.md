@@ -65,3 +65,43 @@ no expected diagnostics.
 [pallet-multisig-stderr]: https://github.com/davidsemakula/pallet-verifier/blob/master/tests/ui/sdk/multisig/Cargo.stderr
 [driver-int-cast-overflow-stdout]: https://github.com/davidsemakula/pallet-verifier/blob/master/tests/ui/driver/tractable-skeleton-int-cast-overflow.stdout
 [driver-int-cast-overflow-stderr]: https://github.com/davidsemakula/pallet-verifier/blob/master/tests/ui/driver/tractable-skeleton-int-cast-overflow.stderr
+
+## The custom benchmark
+
+`pallet-verifier` includes a simple [custom benchmark][benchmark-src] used to test its accuracy and speed on 
+a few production pallets from the [Polkadot SDK][polkadot-sdk].
+
+[benchmark-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/benches/bencher.rs
+
+You can run the benchmark by running the following command from the project root:
+
+```shell
+cargo bench
+```
+
+The [benchmark][benchmark-src] works by invoking `pallet-verifier` on 2 versions/variants of 
+each production FRAME pallet in the [benchmark suite][benchmark-src-dir]: 
+- An "sdk version" copied from the [Polkadot SDK][polkadot-sdk] at [this commit][polkadot-sdk-commit] 
+  (e.g. [see this][benchmark-multisig-sdk-dir])
+- An "edited version" that either introduces an issue or fixes an issue (e.g. [see this][benchmark-multisig-edit-dir])
+
+It then compares the returned diagnostics, to [fixtures that describe the expected results][benchmark-fixtures] 
+([see also][benchmark-fixtures-types]), and reports metrics including:
+- the number "expected" and "actual/found" diagnostics
+- the number of ["true positives", "false positives", "false negatives"][benchmark-compare-results]
+- the total execution time
+
+at different levels of granularity i.e for: 
+- each dispatchable or public associated function 
+- each pallet version/variant (both "sdk" and "edited")
+- the entire benchmark suite
+
+[benchmark-src-dir]: https://github.com/davidsemakula/pallet-verifier/blob/master/benches/
+[polkadot-sdk-commit]: https://github.com/paritytech/polkadot-sdk/tree/515fcc952cd52504ab7d3866a83adb9bf0f8e56b
+[benchmark-multisig-sdk-dir]: https://github.com/davidsemakula/pallet-verifier/tree/master/benches/multisig/sdk
+[benchmark-multisig-edit-dir]: https://github.com/davidsemakula/pallet-verifier/tree/master/benches/multisig/edit
+[benchmark-fixtures]: https://github.com/davidsemakula/pallet-verifier/blob/91039a593af0907b2e704fa38c1f0db0138b7ede/benches/bencher.rs#L231-L333
+[benchmark-fixtures-types]: https://github.com/davidsemakula/pallet-verifier/blob/91039a593af0907b2e704fa38c1f0db0138b7ede/benches/bencher.rs#L394-L422
+[benchmark-compare-results]: https://github.com/davidsemakula/pallet-verifier/blob/91039a593af0907b2e704fa38c1f0db0138b7ede/benches/bencher.rs#L335-L392
+
+Check out the inline comments in the [benchmark runner][benchmark-src] for more details.
