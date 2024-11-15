@@ -234,6 +234,12 @@ fn compile_annotations_crate() -> Result<(PathBuf, PathBuf, String), ()> {
     if let Some(target) = cli_utils::arg_value("--target") {
         args.push(format!("--target={target}"));
     }
+    if let Some(error_format) = cli_utils::arg_value("--error-format") {
+        args.push(format!("--error-format={error_format}"));
+    }
+    if let Some(json_config) = cli_utils::arg_value("--json") {
+        args.push(format!("--json={json_config}"));
+    }
     let mut callbacks = DefaultCallbacks;
     let input_content = include_str!("../artifacts/mirai_annotations.rs");
     let mut source_map = FxHashMap::default();
