@@ -110,5 +110,10 @@ fn generic_config(config: &mut Config, cmd: &str, is_rustc_wrapper: bool) {
     let mut args = Args::test().unwrap();
     args.bless |= env::var("PALLET_VERIFIER_BLESS")
         .is_ok_and(|val| matches!(val.as_str(), "true" | "yes" | "y" | "1"));
+    // Disable color for `pallet-verifier` output.
+    config
+        .program
+        .envs
+        .push(("PALLET_VERIFIER_NO_COLOR".into(), Some("true".into())));
     config.with_args(&args);
 }

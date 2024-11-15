@@ -22,6 +22,7 @@ use mirai::{
     crate_visitor::CrateVisitor, known_names::KnownNamesCache, summaries::PersistentSummaryCache,
     type_visitor::TypeCache,
 };
+use owo_colors::OwoColorize;
 use tempfile::TempDir;
 
 use crate::{
@@ -93,7 +94,10 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
         compiler: &Compiler,
         queries: &'tcx rustc_interface::Queries<'tcx>,
     ) -> Compilation {
-        println!("Analyzing FRAME pallet with MIRAI ...");
+        println!(
+            "{} FRAME pallet with MIRAI ...",
+            "Analyzing".style(utils::highlight_style())
+        );
         let Some(mirai_config) = &self.mirai_config else {
             // Analysis callback was called before `config` callback,
             // so MIRAI configs are not yet initialized.
@@ -154,7 +158,10 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             // Creates "summaries" for "contracts" (if any) with MIRAI.
             // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#summaries>
             if let Some(contracts_mod_def_id) = contracts_mod_def_id {
-                println!("Creating summaries for FRAME and Substrate functions ...");
+                println!(
+                    "{} summaries for FRAME and Substrate functions ...",
+                    "Creating".style(utils::highlight_style())
+                );
                 // Collect "contract" `fn` ids.
                 let mut visitor = ContractsVisitor::new(tcx);
                 hir.visit_item_likes_in_module(contracts_mod_def_id, &mut visitor);
@@ -180,7 +187,10 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                         entry_points_info.sort_by_key(|(.., name)| name.to_ident_string());
                     }
                     for (local_def_id, _, name) in entry_points_info {
-                        println!("Analyzing {call_kind}: `{name}` ...",);
+                        println!(
+                            "{} {call_kind}: `{name}` ...",
+                            "Analyzing".style(utils::highlight_style())
+                        );
 
                         // Analyzes entry point with MIRAI and collects diagnostics.
                         let mut diagnostics = Vec::new();
@@ -241,13 +251,19 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
 
             // Analyze dispatchables.
             if !dispatchable_entry_points.is_empty() {
-                println!("Analyzing dispatchables ...");
+                println!(
+                    "{} dispatchables ...",
+                    "Analyzing".style(utils::highlight_style())
+                );
                 analyze_entry_points(dispatchable_entry_points, CallKind::Dispatchable);
             }
 
             // Analyze pub assoc `fn`s.
             if !pub_assoc_fn_entry_points.is_empty() {
-                println!("Analyzing pub assoc fns ...");
+                println!(
+                    "{} pub assoc fns ...",
+                    "Analyzing".style(utils::highlight_style())
+                );
                 analyze_entry_points(pub_assoc_fn_entry_points, CallKind::PubAssocFn);
             }
 

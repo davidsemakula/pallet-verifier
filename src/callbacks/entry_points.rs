@@ -26,6 +26,7 @@ use rustc_span::{
 };
 
 use itertools::Itertools;
+use owo_colors::OwoColorize;
 
 use crate::{providers, utils, CallKind, EntrysPointInfo, ENTRY_POINT_FN_PREFIX};
 
@@ -72,7 +73,10 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
         compiler: &rustc_interface::interface::Compiler,
         queries: &'tcx rustc_interface::Queries<'tcx>,
     ) -> rustc_driver::Compilation {
-        println!("Searching for FRAME pallet definition ...");
+        println!(
+            "{} for FRAME pallet definition ...",
+            "Searching".style(utils::highlight_style())
+        );
         let mut phase = Phase::Pallet;
         let mut entry_points = FxHashMap::default();
         let mut use_decls = FxHashSet::default();
@@ -90,7 +94,10 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
             phase = Phase::FnDefs;
             let mut dispatchable_local_def_ids = FxHashSet::default();
             if !dispatchable_names.is_empty() {
-                println!("Searching for dispatchable function definitions ...");
+                println!(
+                    "{} for dispatchable function definitions ...",
+                    "Searching".style(utils::highlight_style())
+                );
                 dispatchable_local_def_ids =
                     dispatchable_ids(&dispatchable_names, pallet_mod_local_def_id, tcx);
                 // Adds warnings for `Call` variants whose dispatchable function wasn't found.
@@ -117,7 +124,10 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
             }
 
             // Finds pallet associated function definitions.
-            println!("Searching for public associated function definitions ...");
+            println!(
+                "{} for public associated function definitions ...",
+                "Searching".style(utils::highlight_style())
+            );
             let pub_fn_local_def_ids = pallet_pub_fn_ids(pallet_struct_local_def_id, tcx);
             if dispatchable_local_def_ids.is_empty() && pub_fn_local_def_ids.is_empty() {
                 return;
@@ -125,7 +135,10 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
 
             // Finds pallet associated function calls.
             phase = Phase::Calls;
-            println!("Searching for pallet associated function calls ...");
+            println!(
+                "{} for pallet associated function calls ...",
+                "Searching".style(utils::highlight_style())
+            );
             let mut concrete_calls = FxHashMap::default();
             let mut intra_calls: FxHashMap<LocalDefId, FxHashSet<LocalDefId>> =
                 FxHashMap::default();
@@ -162,7 +175,10 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
             }
 
             // Generates entry points for dispatchables and pub assoc fns.
-            println!("Generating tractable entry points for FRAME pallet ...");
+            println!(
+                "{} tractable entry points for FRAME pallet ...",
+                "Generating".style(utils::highlight_style())
+            );
             let mut used_items = FxHashSet::default();
             let mut param_ty_subs = FxHashMap::default();
             phase = Phase::EntryPoints;

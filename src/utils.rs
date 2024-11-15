@@ -62,3 +62,14 @@ pub fn mirai_annotation_fn(name: &str, tcx: TyCtxt) -> Option<DefId> {
             None
         })
 }
+
+/// Returns the highlight style for console text.
+pub fn highlight_style() -> owo_colors::Style {
+    let is_color_disabled = env::var("PALLET_VERIFIER_NO_COLOR")
+        .is_ok_and(|val| matches!(val.as_str(), "true" | "yes" | "y" | "1"));
+    if is_color_disabled {
+        owo_colors::style()
+    } else {
+        owo_colors::Style::new().green().bold()
+    }
+}
