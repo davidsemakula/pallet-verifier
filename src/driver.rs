@@ -20,7 +20,7 @@ use std::{
 
 use itertools::Itertools;
 
-use cli_utils::{ENV_DEP_CRATE, ENV_DEP_RENAMES};
+use cli_utils::{ENV_DEP_ANNOTATE_CRATE, ENV_DEP_FEATURE_CRATE, ENV_DEP_RENAMES};
 use pallet_verifier::{
     DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntrysPointInfo,
     VerifierCallbacks, VirtualFileLoader, CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
@@ -47,6 +47,12 @@ fn main() {
         args.remove(1);
     }
 
+    // The `PALLET_VERIFIER_DEP_FEATURE_CRATE` env var is only set when compiling a dependency crate
+    // that needs some unstable features to be enabled, so we invoke an appropriate compiler and exit.
+    if env::var(ENV_DEP_FEATURE_CRATE).is_ok() {
+        exit(compile_dependency(&args));
+    }
+
     // Compiles `mirai-annotations` crate and adds it as a dependency (if necessary).
     let mut annotations_source_info = None;
     if !has_mirai_annotations_dep() {
@@ -69,9 +75,9 @@ fn main() {
         ]);
     }
 
-    // The `PALLET_VERIFIER_DEP_CRATE` env var is only set when compiling/annotating a dependency crate,
-    // So we invoke an appropriate compiler and exit.
-    if env::var(ENV_DEP_CRATE).is_ok() {
+    // The `PALLET_VERIFIER_DEP_ANNOTATE_CRATE` env var is only set when compiling a dependency crate,
+    // that needs annotations,so we invoke an appropriate compiler and exit.
+    if env::var(ENV_DEP_ANNOTATE_CRATE).is_ok() {
         exit(compile_annotated_dependency(
             &args,
             annotations_source_info.clone(),
@@ -196,6 +202,25 @@ fn compile_annotated_dependency(
     }
 }
 
+/// Compiles dependencies.
+fn compile_dependency(args: &[String]) -> i32 {
+    let mut callbacks = DefaultCallbacks;
+    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
+    let target_path = analysis_target_path(args);
+    let crate_name = cli_utils::arg_value("--crate-name").expect("Expected a target crate");
+    let features = lang_features(&crate_name);
+    if features.is_some() {
+        let mut source_map = FxHashMap::default();
+        source_map.insert(target_path, (None, features, None, None));
+        let file_loader = VirtualFileLoader::new(source_map);
+        compiler.set_file_loader(Some(Box::new(file_loader)));
+    }
+    match compiler.run() {
+        Ok(_) => rustc_driver::EXIT_SUCCESS,
+        Err(_) => rustc_driver::EXIT_FAILURE,
+    }
+}
+
 /// Compiles `mirai-annotations` crate and returns output `rlib` path, the input path and content if successful.
 fn compile_annotations_crate() -> Result<(PathBuf, PathBuf, String), ()> {
     let input_path = Path::new("$virtual/pallet-verifier/mirai_annotations/src/lib.rs");
@@ -245,7 +270,7 @@ fn compile_annotations_crate() -> Result<(PathBuf, PathBuf, String), ()> {
     let mut source_map = FxHashMap::default();
     source_map.insert(
         input_path.to_path_buf(),
-        (Some(input_content.to_owned()), None, None),
+        (Some(input_content.to_owned()), None, None, None),
     );
     let file_loader = VirtualFileLoader::new(source_map);
     let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
@@ -265,26 +290,29 @@ fn analysis_file_loader(
     annotations_source_info: AnnotationsSourceInfo,
     include_annotated_deps: bool,
 ) -> VirtualFileLoader {
-    let mut extern_crates_opt = None;
+    let crate_name = cli_utils::arg_value("--crate-name").unwrap_or_default();
+    let mut extern_crates = None;
     if !has_mirai_annotations_dep()
         || fs::read_to_string(&target_path)
             .is_ok_and(|content| !content.contains("mirai_annotations"))
     {
-        let mut extern_crates = FxHashSet::default();
-        extern_crates.insert("mirai_annotations");
-        extern_crates_opt = Some(extern_crates);
+        extern_crates = Some(FxHashSet::from_iter(["mirai_annotations"]));
     }
     let mut analysis_source_map = FxHashMap::default();
     analysis_source_map.insert(
         target_path.clone(),
         (
             None,
-            extern_crates_opt.as_ref(),
+            lang_features(&crate_name),
+            extern_crates.clone(),
             (!virtual_mods.is_empty()).then_some(virtual_mods.iter().cloned().collect()),
         ),
     );
     if let Some((annotations_path, annotations_content)) = annotations_source_info {
-        analysis_source_map.insert(annotations_path, (Some(annotations_content), None, None));
+        analysis_source_map.insert(
+            annotations_path,
+            (Some(annotations_content), None, None, None),
+        );
     }
     if include_annotated_deps {
         let mut is_extern_val_next = false;
@@ -297,9 +325,6 @@ fn analysis_file_loader(
                 continue;
             }
             is_extern_val_next = false;
-            if !arg.starts_with("pallet_") {
-                continue;
-            }
             let Some((_, extern_path_str)) = arg.splitn(2, '=').collect_tuple() else {
                 continue;
             };
@@ -315,6 +340,13 @@ fn analysis_file_loader(
             let Some(filename) = filename else {
                 continue;
             };
+            let Some((dep_crate_name, _)) = filename.splitn(2, '-').collect_tuple() else {
+                continue;
+            };
+            let is_pallet_dep = arg.starts_with("pallet_");
+            if !is_pallet_dep && !cli_utils::requires_unstable_features(dep_crate_name) {
+                continue;
+            }
             let mut dep_info_path = extern_path.to_path_buf();
             dep_info_path.set_file_name(format!("{filename}.d"));
             let dep_info =
@@ -341,7 +373,19 @@ fn analysis_file_loader(
             } else {
                 lib_src_path.to_path_buf()
             };
-            analysis_source_map.insert(abs_lib_src_path, (None, extern_crates_opt.as_ref(), None));
+            analysis_source_map.insert(
+                abs_lib_src_path,
+                (
+                    None,
+                    lang_features(dep_crate_name),
+                    if is_pallet_dep {
+                        extern_crates.clone()
+                    } else {
+                        None
+                    },
+                    None,
+                ),
+            );
         }
     }
     VirtualFileLoader::new(analysis_source_map)
@@ -365,6 +409,22 @@ fn has_mirai_annotations_dep() -> bool {
                 .nth(idx - 1)
                 .is_some_and(|arg| arg == "--extern")
     })
+}
+
+/// Returns a list of language features (if any) to enable for given crate.
+fn lang_features(crate_name: &str) -> Option<FxHashSet<&'static str>> {
+    match crate_name {
+        // TODO: Remove when compiler is updated to >= 1.79
+        // Ref: <https://github.com/paritytech/parity-scale-codec/blob/master/Cargo.toml#L73C1-L73C13>
+        // Ref: <https://blog.rust-lang.org/2024/06/13/Rust-1.79.0.html#inline-const-expressions>
+        "parity_scale_codec" => Some(FxHashSet::from_iter(["inline_const"])),
+        // TODO: Remove when compiler is update to >= 1.80
+        // Ref: <https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html#lazycell-and-lazylock>
+        "sp_panic_handler" | "sp_trie" | "sp_core" | "sp_consensus_beefy" => {
+            Some(FxHashSet::from_iter(["lazy_cell"]))
+        }
+        _ => None,
+    }
 }
 
 /// Initializes loggers (if necessary).

@@ -12,8 +12,12 @@ use itertools::Itertools;
 /// Env var for tracking dependency renames from `Cargo.toml`.
 pub const ENV_DEP_RENAMES: &str = "PALLET_VERIFIER_DEP_RENAMES";
 
-/// Env var that's set if the crate being compiled/annotated is a dependency.
-pub const ENV_DEP_CRATE: &str = "PALLET_VERIFIER_DEP_CRATE";
+/// Env var that's set if the crate being compiled is a dependency that needs annotations.
+pub const ENV_DEP_ANNOTATE_CRATE: &str = "PALLET_VERIFIER_DEP_ANNOTATE_CRATE";
+
+/// Env var that's set if the crate being compiled is a dependency that needs some unstable features
+/// to be enabled.
+pub const ENV_DEP_FEATURE_CRATE: &str = "PALLET_VERIFIER_DEP_FEATURE_CRATE";
 
 /// Shows help and version messages (and exits, if necessary).
 ///
@@ -105,6 +109,14 @@ pub fn arg_value(name: &str) -> Option<String> {
         return Some(value.to_string());
     }
     args.next()
+}
+
+/// Returns true if the crate requires unstable features to be enabled.
+pub fn requires_unstable_features(crate_name: &str) -> bool {
+    matches!(
+        crate_name,
+        "parity_scale_codec" | "sp_panic_handler" | "sp_trie" | "sp_core" | "sp_consensus_beefy"
+    )
 }
 
 /// Checks if a `rustc` path is the first CLI argument.

@@ -20,6 +20,8 @@ pub struct VirtualFileLoader {
         (
             // base "virtual" content for root path.
             Option<String>,
+            // feature declarations.
+            Option<String>,
             // `extern crate` declarations.
             Option<String>,
             // "virtual" `mod` declarations.
@@ -37,10 +39,12 @@ impl VirtualFileLoader {
             // The root path.
             PathBuf,
             (
-                // "virtual" content for root path.
+                // base "virtual" content for root path.
                 Option<String>,
+                // names of features to enable.
+                Option<FxHashSet<&str>>,
                 // names of external crates to declare.
-                Option<&FxHashSet<&str>>,
+                Option<FxHashSet<&str>>,
                 // `name` -> `content` map for "virtual" modules.
                 Option<FxHashMap<&str, String>>,
             ),
@@ -49,7 +53,15 @@ impl VirtualFileLoader {
         // Composes root and module source "virtual" maps based on the given definition.
         let mut root_source_map = FxHashMap::default();
         let mut mod_source_map = FxHashMap::default();
-        for (root_path, (root_content, extern_crates, virtual_mods)) in source_map_def {
+        for (root_path, (root_content, features, extern_crates, virtual_mods)) in source_map_def {
+            let feature_decls = features
+                .filter(|features| !features.is_empty())
+                .map(|features| {
+                    features
+                        .iter()
+                        .map(|feature| format!("#![feature({feature})]"))
+                        .join("\n")
+                });
             let extern_crate_decls = extern_crates
                 .filter(|extern_crates| !extern_crates.is_empty())
                 .map(|extern_crates| {
@@ -71,7 +83,12 @@ impl VirtualFileLoader {
                 (!virtual_mod_decls.is_empty()).then_some(virtual_mod_decls.into_iter().join("\n"));
             root_source_map.insert(
                 root_path,
-                (root_content, extern_crate_decls, virtual_mod_decls_str),
+                (
+                    root_content,
+                    feature_decls,
+                    extern_crate_decls,
+                    virtual_mod_decls_str,
+                ),
             );
         }
 
@@ -93,7 +110,12 @@ impl VirtualFileLoader {
 
     /// Appends extra "virtual" content for the specified path to the given base content (if necessary).
     fn append_extra_virtual_content(&self, path: &Path, base_content: &mut String) {
-        if let Some((_, extern_crate_decls, virtual_mod_decls)) = self.root_source_map.get(path) {
+        if let Some((_, feature_decls, extern_crate_decls, virtual_mod_decls)) =
+            self.root_source_map.get(path)
+        {
+            if let Some(decls) = feature_decls.as_deref() {
+                *base_content = format!("{decls}\n{base_content}");
+            }
             if let Some(decls) = extern_crate_decls.as_deref() {
                 base_content.push_str(decls);
             }

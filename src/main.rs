@@ -8,7 +8,7 @@ use std::{
     process::{self, Command},
 };
 
-use cli_utils::{ENV_DEP_CRATE, ENV_DEP_RENAMES};
+use cli_utils::{ENV_DEP_ANNOTATE_CRATE, ENV_DEP_FEATURE_CRATE, ENV_DEP_RENAMES};
 
 const COMMAND: &str = "cargo verify-pallet";
 const ARG_POINTER_WIDTH: &str = "--pointer-width";
@@ -164,6 +164,11 @@ fn call_cargo() {
         }
     }
 
+    // Allows compilation of `parity-scale-codec >= 3.7.0` which requires `rustc >= 1.79`
+    // Ref: <https://github.com/paritytech/parity-scale-codec/blob/master/Cargo.toml#L73C1-L73C13>
+    // TODO: Remove when compiler is updated to >= 1.79
+    cmd.arg("--ignore-rust-version");
+
     // Forwards relevant CLI args (skips cargo, subcommand and pallet-verifier specific args).
     let mut skip_next = false;
     cmd.args(env::args().skip(2).filter(|arg| {
@@ -295,9 +300,22 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
         .filter(|crate_name| crate_name.starts_with("pallet"))
     {
         // Compiles `pallet` dependencies with `pallet-verifier`.
-        // The `PALLET_VERIFIER_DEP_CRATE` env var tells `pallet-verifier` that this a dependency.
+        // The `PALLET_VERIFIER_DEP_ANNOTATE_CRATE` env var tells `pallet-verifier` about it.
         if env::var("PALLET_VERIFIER_UI_TESTS").is_err() {
-            let vars = [(ENV_DEP_CRATE.to_string(), dep_name.to_owned())];
+            let vars = [(ENV_DEP_ANNOTATE_CRATE.to_string(), dep_name.to_owned())];
+            call_pallet_verifier(args, vars.into_iter());
+        } else {
+            // TODO: Disable this option when UI tests play nicely with this config.
+            cli_utils::call_rustc(Some(rustc_path), args);
+        }
+    } else if let Some(dep_name) = crate_name
+        .as_ref()
+        .filter(|crate_name| cli_utils::requires_unstable_features(crate_name))
+    {
+        // Compiles dependencies that require unstable features with `pallet-verifier`.
+        // The `PALLET_VERIFIER_DEP_FEATURE_CRATE` env var tells `pallet-verifier` about it.
+        if env::var("PALLET_VERIFIER_UI_TESTS").is_err() {
+            let vars = [(ENV_DEP_FEATURE_CRATE.to_string(), dep_name.to_owned())];
             call_pallet_verifier(args, vars.into_iter());
         } else {
             // TODO: Disable this option when UI tests play nicely with this config.
