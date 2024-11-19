@@ -8,10 +8,9 @@ use std::{
     process::{self, Command},
 };
 
-use cli_utils::{ENV_DEP_ANNOTATE_CRATE, ENV_DEP_FEATURE_CRATE, ENV_DEP_RENAMES};
+use cli_utils::{ARG_DEP_ANNOTATE, ARG_DEP_FEATURES, ARG_POINTER_WIDTH, ENV_DEP_RENAMES};
 
 const COMMAND: &str = "cargo verify-pallet";
-const ARG_POINTER_WIDTH: &str = "--pointer-width";
 
 /// Env var set to the name of the top-level package being analyzed
 /// (i.e. the package name in the `Cargo.toml` in the directory where `cargo verify-pallet`) is invoked.
@@ -295,28 +294,30 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
             Some(rustc_path),
             args.chain(["--cfg=no_diagnostic_namespace".to_string()]),
         );
-    } else if let Some(dep_name) = crate_name
+    } else if crate_name
         .as_ref()
-        .filter(|crate_name| crate_name.starts_with("pallet"))
+        .is_some_and(|crate_name| crate_name.starts_with("pallet"))
     {
-        // Compiles `pallet` dependencies with `pallet-verifier`.
-        // The `PALLET_VERIFIER_DEP_ANNOTATE_CRATE` env var tells `pallet-verifier` about it.
+        // Compiles and annotates `pallet` dependencies with `pallet-verifier`.
         if env::var("PALLET_VERIFIER_UI_TESTS").is_err() {
-            let vars = [(ENV_DEP_ANNOTATE_CRATE.to_string(), dep_name.to_owned())];
-            call_pallet_verifier(args, vars.into_iter());
+            call_pallet_verifier(
+                args.chain([ARG_DEP_ANNOTATE, "true"].map(ToString::to_string)),
+                std::iter::empty(),
+            );
         } else {
             // TODO: Disable this option when UI tests play nicely with this config.
             cli_utils::call_rustc(Some(rustc_path), args);
         }
-    } else if let Some(dep_name) = crate_name
+    } else if crate_name
         .as_ref()
-        .filter(|crate_name| cli_utils::requires_unstable_features(crate_name))
+        .is_some_and(|crate_name| cli_utils::requires_unstable_features(crate_name))
     {
         // Compiles dependencies that require unstable features with `pallet-verifier`.
-        // The `PALLET_VERIFIER_DEP_FEATURE_CRATE` env var tells `pallet-verifier` about it.
         if env::var("PALLET_VERIFIER_UI_TESTS").is_err() {
-            let vars = [(ENV_DEP_FEATURE_CRATE.to_string(), dep_name.to_owned())];
-            call_pallet_verifier(args, vars.into_iter());
+            call_pallet_verifier(
+                args.chain([ARG_DEP_FEATURES, "true"].map(ToString::to_string)),
+                std::iter::empty(),
+            );
         } else {
             // TODO: Disable this option when UI tests play nicely with this config.
             cli_utils::call_rustc(Some(rustc_path), args);

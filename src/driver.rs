@@ -20,7 +20,7 @@ use std::{
 
 use itertools::Itertools;
 
-use cli_utils::{ENV_DEP_ANNOTATE_CRATE, ENV_DEP_FEATURE_CRATE, ENV_DEP_RENAMES};
+use cli_utils::{ARG_DEP_ANNOTATE, ARG_DEP_FEATURES, ARG_POINTER_WIDTH, ENV_DEP_RENAMES};
 use pallet_verifier::{
     DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntrysPointInfo,
     VerifierCallbacks, VirtualFileLoader, CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
@@ -46,10 +46,23 @@ fn main() {
     if is_rustc_wrapper_mode {
         args.remove(1);
     }
+    // Removes `pallet-verifier` specific args.
+    let mut skip_next = false;
+    args.retain(|arg| {
+        let can_skip = skip_next
+            || is_equal_or_prefix(arg, ARG_POINTER_WIDTH)
+            || is_equal_or_prefix(arg, ARG_DEP_ANNOTATE)
+            || is_equal_or_prefix(arg, ARG_DEP_FEATURES);
+        skip_next = arg == ARG_POINTER_WIDTH || arg == ARG_DEP_ANNOTATE || arg == ARG_DEP_FEATURES;
+        !can_skip
+    });
+    fn is_equal_or_prefix(val: &str, pat: &str) -> bool {
+        val == pat || val.starts_with(pat)
+    }
 
-    // The `PALLET_VERIFIER_DEP_FEATURE_CRATE` env var is only set when compiling a dependency crate
-    // that needs some unstable features to be enabled, so we invoke an appropriate compiler and exit.
-    if env::var(ENV_DEP_FEATURE_CRATE).is_ok() {
+    // Compiles dependency crates that need some unstable features to be enabled,
+    // so we invoke an appropriate compiler and exit.
+    if cli_utils::is_arg_enabled(ARG_DEP_FEATURES) {
         exit(compile_dependency(&args));
     }
 
@@ -75,9 +88,8 @@ fn main() {
         ]);
     }
 
-    // The `PALLET_VERIFIER_DEP_ANNOTATE_CRATE` env var is only set when compiling a dependency crate,
-    // that needs annotations,so we invoke an appropriate compiler and exit.
-    if env::var(ENV_DEP_ANNOTATE_CRATE).is_ok() {
+    // Compiles dependency crates that need annotations, so we invoke an appropriate compiler and exit.
+    if cli_utils::is_arg_enabled(ARG_DEP_ANNOTATE) {
         exit(compile_annotated_dependency(
             &args,
             annotations_source_info.clone(),
@@ -258,12 +270,6 @@ fn compile_annotations_crate() -> Result<(PathBuf, PathBuf, String), ()> {
     .to_vec();
     if let Some(target) = cli_utils::arg_value("--target") {
         args.push(format!("--target={target}"));
-    }
-    if let Some(error_format) = cli_utils::arg_value("--error-format") {
-        args.push(format!("--error-format={error_format}"));
-    }
-    if let Some(json_config) = cli_utils::arg_value("--json") {
-        args.push(format!("--json={json_config}"));
     }
     let mut callbacks = DefaultCallbacks;
     let input_content = include_str!("../artifacts/mirai_annotations.rs");

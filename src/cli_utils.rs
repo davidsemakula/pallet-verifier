@@ -9,15 +9,16 @@ use std::{
 
 use itertools::Itertools;
 
+/// CLI arg that sets the target pointer width.
+/// Ref: <https://doc.rust-lang.org/reference/conditional-compilation.html#target_pointer_width>
+pub const ARG_POINTER_WIDTH: &str = "--pointer-width";
+/// CLI arg that tells `pallet-verifier` to compile a dependency with annotations.
+pub const ARG_DEP_ANNOTATE: &str = "--dep-with-annotations";
+/// CLI arg that tells `pallet-verifier` to compile a dependency with some unstable features enabled.
+pub const ARG_DEP_FEATURES: &str = "--dep-with-lang-features";
+
 /// Env var for tracking dependency renames from `Cargo.toml`.
 pub const ENV_DEP_RENAMES: &str = "PALLET_VERIFIER_DEP_RENAMES";
-
-/// Env var that's set if the crate being compiled is a dependency that needs annotations.
-pub const ENV_DEP_ANNOTATE_CRATE: &str = "PALLET_VERIFIER_DEP_ANNOTATE_CRATE";
-
-/// Env var that's set if the crate being compiled is a dependency that needs some unstable features
-/// to be enabled.
-pub const ENV_DEP_FEATURE_CRATE: &str = "PALLET_VERIFIER_DEP_FEATURE_CRATE";
 
 /// Shows help and version messages (and exits, if necessary).
 ///
@@ -109,6 +110,15 @@ pub fn arg_value(name: &str) -> Option<String> {
         return Some(value.to_string());
     }
     args.next()
+}
+
+/// Returns true is the CLI arg with given name is enabled
+/// (i.e. set to "true", "yes", "y" or "1").
+#[allow(dead_code)] // False positive.
+pub fn is_arg_enabled(name: &str) -> bool {
+    arg_value(name)
+        .as_deref()
+        .is_some_and(|val| matches!(val, "true" | "yes" | "y" | "1"))
 }
 
 /// Returns true if the crate requires unstable features to be enabled.
