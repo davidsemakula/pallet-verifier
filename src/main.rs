@@ -3,12 +3,15 @@
 mod cli_utils;
 
 use std::{
-    env,
-    path::{Path, PathBuf},
-    process::{self, Command},
+    env, fs,
+    path::Path,
+    process::{exit, Command},
 };
 
-use cli_utils::{ARG_DEP_ANNOTATE, ARG_DEP_FEATURES, ARG_POINTER_WIDTH, ENV_DEP_RENAMES};
+use cli_utils::{
+    ARG_AUTO_ANNOTATIONS_DEP, ARG_COMPILE_ANNOTATIONS, ARG_DEP_ANNOTATE, ARG_DEP_FEATURES,
+    ARG_POINTER_WIDTH, ENV_DEP_RENAMES,
+};
 
 const COMMAND: &str = "cargo verify-pallet";
 
@@ -18,6 +21,8 @@ const ENV_PKG_NAME: &str = "PALLET_VERIFIER_PKG_NAME";
 /// Env var set to the name current `rustc` target (if set).
 /// Ref: <https://doc.rust-lang.org/rustc/targets/index.html>
 const ENV_TARGET: &str = "PALLET_VERIFIER_TARGET";
+/// Env var for tracking path for compiled `mirai-annotations` crate artifact.
+pub const ENV_ANNOTATIONS_RLIB_PATH: &str = "PALLET_VERIFIER_ANNOTATIONS_RLIB_PATH";
 
 fn main() {
     // Shows help and version messages (and exits, if necessary).
@@ -46,7 +51,7 @@ fn main() {
             let args = env::args().skip(2);
             if is_primary_package && is_analysis_target() && !is_build_script() {
                 // Analyzes "primary" package with `pallet-verifier`.
-                call_pallet_verifier(args, std::iter::empty());
+                call_pallet_verifier(args, std::iter::empty(), true);
             } else if is_build_script() {
                 // Compiles build scripts.
                 compile_build_script(sub_command, args);
@@ -57,7 +62,7 @@ fn main() {
         }
         _ => {
             eprintln!("Expected a valid cargo subcommand as the first argument.");
-            process::exit(1);
+            exit(1);
         }
     }
 }
@@ -107,15 +112,17 @@ fn call_cargo() {
         Some("64") => 64,
         _ => {
             eprintln!("Expected a valid `--pointer-width=32|64`");
-            process::exit(1);
+            exit(1);
         }
     };
+    let mut target_platform = None;
     if pointer_width == 32 && cfg!(not(target_pointer_width = "32")) {
         cmd.arg("--target=wasm32-wasi");
         cmd.env(ENV_TARGET, "wasm32-wasi");
+        target_platform = Some("wasm32-wasi");
     } else if pointer_width == 64 && cfg!(not(target_pointer_width = "64")) {
         eprintln!("Unsupported host for 64-bit analysis");
-        process::exit(1);
+        exit(1);
     }
     let pointer_width_str = pointer_width.to_string();
     cmd.env("PALLET_VERIFIER_TARGET_POINTER_WIDTH", &pointer_width_str);
@@ -129,6 +136,7 @@ fn call_cargo() {
     let metadata = metadata_cmd.exec();
 
     // Sets cargo `--target-dir` arg if it's not already set.
+    let mut metadata_target_dir = None;
     if cli_utils::arg_value("--target-dir").is_none()
         && env::var("CARGO_TARGET_DIR").is_err()
         && env::var("CARGO_BUILD_TARGET_DIR").is_err()
@@ -138,6 +146,7 @@ fn call_cargo() {
             .map(|metadata| metadata.target_directory.as_str())
             .unwrap_or("target");
         cmd.arg(format!("--target-dir={target_dir}/pallet_verifier"));
+        metadata_target_dir = Some(target_dir);
     }
 
     // Persists some package metadata.
@@ -163,6 +172,38 @@ fn call_cargo() {
         }
     }
 
+    // Compiles `mirai-annotations` crate, and persists the path to the compiled artifact.
+    let mut annotation_args = vec![format!("{ARG_COMPILE_ANNOTATIONS}=true")];
+    let annotations_out_dir = cli_utils::arg_value("--target-dir")
+        .or_else(|| env::var("CARGO_TARGET_DIR").ok())
+        .as_deref()
+        .or(metadata_target_dir)
+        .map(|target_dir| {
+            let mut out_dir = Path::new(target_dir).join("pallet_verifier");
+            if let Some(target_platform) = target_platform.as_ref() {
+                out_dir.push(target_platform);
+            }
+            out_dir.push("debug/deps");
+            out_dir
+        })
+        .unwrap_or_else(|| {
+            env::current_dir()
+                .expect("Expected valid current dir")
+                .join("target/pallet-verifier/debug/deps")
+        });
+    if !annotations_out_dir.exists() {
+        fs::create_dir_all(&annotations_out_dir)
+            .expect("Failed to create output directory for annotations");
+    }
+    annotation_args.push(format!("--out-dir={}", annotations_out_dir.display()));
+    if let Some(target_platform) = target_platform {
+        annotation_args.push(format!("--target={target_platform}"));
+    }
+    call_pallet_verifier(annotation_args.into_iter(), std::iter::empty(), false);
+    let annotations_rlib_path =
+        annotations_out_dir.join("libmirai_annotations-pallet-verifier.rlib");
+    env::set_var(ENV_ANNOTATIONS_RLIB_PATH, annotations_rlib_path);
+
     // Allows compilation of `parity-scale-codec >= 3.7.0` which requires `rustc >= 1.79`
     // Ref: <https://github.com/paritytech/parity-scale-codec/blob/master/Cargo.toml#L73C1-L73C13>
     // TODO: Remove when compiler is updated to >= 1.79
@@ -184,6 +225,7 @@ fn call_cargo() {
 fn call_pallet_verifier(
     args: impl Iterator<Item = String>,
     vars: impl Iterator<Item = (String, String)>,
+    include_annotations: bool,
 ) {
     // Builds `pallet-verifier` command (specifically for the standalone executable).
     let mut path = env::current_exe()
@@ -195,6 +237,18 @@ fn call_pallet_verifier(
     let mut cmd = Command::new(path);
     cmd.args(args);
     cmd.envs(vars);
+
+    // Add `mirai-annotations` crate as a dependency (if necessary).
+    // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--extern-specify-where-an-external-library-is-located>
+    if include_annotations && !cli_utils::has_mirai_annotations_dep() {
+        let annotations_rlib_path = env::var(ENV_ANNOTATIONS_RLIB_PATH)
+            .expect("Expected a path to `mirai-annotations` compiled artifact");
+        cmd.args([
+            "--extern".to_owned(),
+            format!("mirai_annotations={annotations_rlib_path}"),
+            format!("{ARG_AUTO_ANNOTATIONS_DEP}=true"),
+        ]);
+    }
 
     // Explicitly sets dynamic/shared library path to match `pallet-verifier`.
     let mut add_dy_lib_path = |dylib_path: &str| {
@@ -210,14 +264,19 @@ fn call_pallet_verifier(
         add_dy_lib_path(dl_path);
     } else {
         // Composes path from sysroot.
-        let mut sys_root_cmd = cli_utils::rustc(env::args().nth(1), ["--print", "sysroot"]);
+        let rustc_path = env::args()
+            .nth(1)
+            .filter(|arg| cli_utils::is_rustc_path(arg));
+        let mut sys_root_cmd = cli_utils::rustc(rustc_path, ["--print", "sysroot"]);
+        if let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") {
+            sys_root_cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+        }
         if let Some(out) = sys_root_cmd
             .output()
             .ok()
             .filter(|out| out.status.success())
         {
-            let mut sys_root_path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-            sys_root_path.push("lib");
+            let sys_root_path = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("lib");
             add_dy_lib_path(&sys_root_path.to_string_lossy());
         }
     }
@@ -232,7 +291,7 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
     let crate_name = cli_utils::arg_value("--crate-name");
     if is_wasm && is_wasmtime_package() {
         // Don't compile `wasmtime` (and related `wasmtime-*` packages) for `wasm` targets.
-        process::exit(0);
+        exit(0);
     } else if is_wasm
         && crate_name
             .as_ref()
@@ -299,29 +358,21 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
         .is_some_and(|crate_name| crate_name.starts_with("pallet"))
     {
         // Compiles and annotates `pallet` dependencies with `pallet-verifier`.
-        if env::var("PALLET_VERIFIER_UI_TESTS").is_err() {
-            call_pallet_verifier(
-                args.chain([ARG_DEP_ANNOTATE, "true"].map(ToString::to_string)),
-                std::iter::empty(),
-            );
-        } else {
-            // TODO: Disable this option when UI tests play nicely with this config.
-            cli_utils::call_rustc(Some(rustc_path), args);
-        }
+        call_pallet_verifier(
+            args.chain([ARG_DEP_ANNOTATE, "true"].map(ToString::to_string)),
+            std::iter::empty(),
+            true,
+        );
     } else if crate_name
         .as_ref()
         .is_some_and(|crate_name| cli_utils::requires_unstable_features(crate_name))
     {
         // Compiles dependencies that require unstable features with `pallet-verifier`.
-        if env::var("PALLET_VERIFIER_UI_TESTS").is_err() {
-            call_pallet_verifier(
-                args.chain([ARG_DEP_FEATURES, "true"].map(ToString::to_string)),
-                std::iter::empty(),
-            );
-        } else {
-            // TODO: Disable this option when UI tests play nicely with this config.
-            cli_utils::call_rustc(Some(rustc_path), args);
-        }
+        call_pallet_verifier(
+            args.chain([ARG_DEP_FEATURES, "true"].map(ToString::to_string)),
+            std::iter::empty(),
+            false,
+        );
     } else {
         // Compiles dependencies with `rustc`.
         cli_utils::call_rustc(Some(rustc_path), args);

@@ -117,9 +117,11 @@ impl VirtualFileLoader {
                 *base_content = format!("{decls}\n{base_content}");
             }
             if let Some(decls) = extern_crate_decls.as_deref() {
+                base_content.push('\n');
                 base_content.push_str(decls);
             }
             if let Some(decls) = virtual_mod_decls.as_deref() {
+                base_content.push('\n');
                 base_content.push_str(decls);
             }
         }

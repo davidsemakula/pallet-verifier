@@ -4,7 +4,7 @@ use std::{
     cmp::Ordering,
     collections::HashMap,
     env,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command,
     time::{Duration, Instant},
 };
@@ -101,7 +101,13 @@ fn main() {
             cmd.arg("--message-format=json");
 
             // Sets output directory.
-            let out_dir = Path::new(env::var("CARGO_TARGET_DIR").as_deref().unwrap_or("target"))
+            let out_dir = env::var("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    env::current_dir()
+                        .expect("Expected valid current dir")
+                        .join("target")
+                })
                 .join("bench");
             cmd.arg("--target-dir");
             cmd.arg(out_dir);
@@ -110,9 +116,6 @@ fn main() {
             let manifest_path = PathBuf::from(format!("{bench_path}/{fixture_kind}/Cargo.toml"));
             cmd.arg("--manifest-path");
             cmd.arg(manifest_path);
-
-            // Use test friendly configs.
-            cmd.env("PALLET_VERIFIER_UI_TESTS", "true");
 
             // Retrieves output.
             let start_time = Instant::now();

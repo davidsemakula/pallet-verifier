@@ -2,7 +2,12 @@
 
 extern crate mirai_annotations;
 
-use std::{env, ffi::OsString, fs, path::Path};
+use std::{
+    env,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use ui_test::{status_emitter::Text, Args, Config, Format, OutputConflictHandling};
 
@@ -82,26 +87,29 @@ fn generic_config(config: &mut Config, cmd: &str, is_rustc_wrapper: bool) {
             None
         });
         if let Some(mirai_annotations_path) = mirai_annotations_path {
-            let incremental_path = target_path.join("incremental");
             config.program.args.extend([
                 "--extern".into(),
                 format!("mirai_annotations={}", mirai_annotations_path.display()).into(),
-                format!("-Ldependency={}", deps_path.display()).into(),
-                format!("-Cincremental={}", incremental_path.display()).into(),
             ]);
         }
     } else {
-        config.program.envs.extend([
-            ("RUSTFLAGS".into(), Some(flags.join(" ").into())),
-            ("PALLET_VERIFIER_UI_TESTS".into(), Some("true".into())),
-        ]);
+        config
+            .program
+            .envs
+            .push(("RUSTFLAGS".into(), Some(flags.join(" ").into())));
         config
             .fill_host_and_target()
             .expect("Expected valid host and target triples");
     }
     // Sets output directory.
-    let out_dir =
-        Path::new(env::var("CARGO_TARGET_DIR").as_deref().unwrap_or("target")).join("ui_test");
+    let out_dir = env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            env::current_dir()
+                .expect("Expected valid current dir")
+                .join("target")
+        })
+        .join("ui_test");
     config.out_dir = out_dir;
     // Sets UI test to simply compare stderr to output files.
     config.comment_defaults.base().require_annotations = None.into();

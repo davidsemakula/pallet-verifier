@@ -4,7 +4,7 @@ use std::{
     env,
     ffi::OsStr,
     path::Path,
-    process::{self, Command},
+    process::{exit, Command},
 };
 
 use itertools::Itertools;
@@ -12,6 +12,10 @@ use itertools::Itertools;
 /// CLI arg that sets the target pointer width.
 /// Ref: <https://doc.rust-lang.org/reference/conditional-compilation.html#target_pointer_width>
 pub const ARG_POINTER_WIDTH: &str = "--pointer-width";
+/// CLI arg that tells `pallet-verifier` to compile the `mirai-annotations` crate.
+pub const ARG_COMPILE_ANNOTATIONS: &str = "--compile-annotations";
+/// CLI arg that tells `pallet-verifier` whether the `mirai-annotations` dependency was auto added.
+pub const ARG_AUTO_ANNOTATIONS_DEP: &str = "--auto-annotations-dep";
 /// CLI arg that tells `pallet-verifier` to compile a dependency with annotations.
 pub const ARG_DEP_ANNOTATE: &str = "--dep-with-annotations";
 /// CLI arg that tells `pallet-verifier` to compile a dependency with some unstable features enabled.
@@ -35,7 +39,7 @@ pub fn handle_meta_args(command: &str) {
         } else {
             help(command);
         }
-        process::exit(0);
+        exit(0);
     } else if env::args().any(|arg| arg == "--version" || arg == "-V") {
         if is_rustc_wrapper_mode() {
             call_wrapped_rustc();
@@ -43,14 +47,14 @@ pub fn handle_meta_args(command: &str) {
             let version_info = rustc_tools_util::get_version_info!();
             println!("{version_info}");
         }
-        process::exit(0);
+        exit(0);
     } else if env::args().any(|arg| arg == "-vV") {
         if is_rustc_wrapper_mode() {
             call_wrapped_rustc();
         } else {
             call_rustc(None, env::args());
         }
-        process::exit(0);
+        exit(0);
     }
 }
 
@@ -86,7 +90,7 @@ pub fn exec_cmd(cmd: &mut Command) {
         .wait()
         .expect("Failed to wait for cmd");
     if !exit_status.success() {
-        process::exit(exit_status.code().unwrap_or(-1));
+        exit(exit_status.code().unwrap_or(-1));
     }
 }
 
@@ -119,6 +123,18 @@ pub fn is_arg_enabled(name: &str) -> bool {
     arg_value(name)
         .as_deref()
         .is_some_and(|val| matches!(val, "true" | "yes" | "y" | "1"))
+}
+
+/// Returns true if the `mirai-annotations` crate is already included as a dependency
+/// in the original CLI args.
+#[allow(dead_code)] // False positive.
+pub fn has_mirai_annotations_dep() -> bool {
+    env::args().enumerate().any(|(idx, arg)| {
+        arg.starts_with("mirai_annotations")
+            && env::args()
+                .nth(idx - 1)
+                .is_some_and(|arg| arg == "--extern")
+    })
 }
 
 /// Returns true if the crate requires unstable features to be enabled.
