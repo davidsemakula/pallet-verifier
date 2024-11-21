@@ -207,7 +207,7 @@ const MIRAI_ANNOTATIONS_INPUT_PATH: &str = "$virtual/pallet-verifier/mirai_annot
 /// `mirai-annotations` source code.
 const MIRAI_ANNOTATIONS_CONTENT: &str = include_str!("../artifacts/mirai_annotations.rs");
 
-/// Compiles `mirai-annotations` crate and returns output `rlib` path, the input path and content if successful.
+/// Compiles `mirai-annotations` crate.
 fn compile_annotations_crate() -> i32 {
     let input_path = Path::new(MIRAI_ANNOTATIONS_INPUT_PATH);
     let mut out_dir = cli_utils::arg_value("--out-dir")

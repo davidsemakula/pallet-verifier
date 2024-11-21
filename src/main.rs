@@ -4,7 +4,7 @@ mod cli_utils;
 
 use std::{
     env, fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{exit, Command},
 };
 
@@ -21,8 +21,13 @@ const ENV_PKG_NAME: &str = "PALLET_VERIFIER_PKG_NAME";
 /// Env var set to the name current `rustc` target (if set).
 /// Ref: <https://doc.rust-lang.org/rustc/targets/index.html>
 const ENV_TARGET: &str = "PALLET_VERIFIER_TARGET";
-/// Env var for tracking path for compiled `mirai-annotations` crate artifact.
-pub const ENV_ANNOTATIONS_RLIB_PATH: &str = "PALLET_VERIFIER_ANNOTATIONS_RLIB_PATH";
+/// Env var for tracking path for compiled `mirai-annotations` crate artifact for the "host" platform.
+const ENV_ANNOTATIONS_RLIB_PATH_HOST: &str = "PALLET_VERIFIER_ANNOTATIONS_RLIB_PATH_HOST";
+/// Env var for tracking path for compiled `mirai-annotations` crate artifact for the "target" platform.
+const ENV_ANNOTATIONS_RLIB_PATH_TARGET: &str = "PALLET_VERIFIER_ANNOTATIONS_RLIB_PATH_TARGET";
+
+/// filename of compiled `mirai-annotations` crate artifact.
+const ANNOTATIONS_RLIB_FILENAME: &str = "libmirai_annotations-pallet-verifier.rlib";
 
 fn main() {
     // Shows help and version messages (and exits, if necessary).
@@ -172,37 +177,50 @@ fn call_cargo() {
         }
     }
 
-    // Compiles `mirai-annotations` crate, and persists the path to the compiled artifact.
-    let mut annotation_args = vec![format!("{ARG_COMPILE_ANNOTATIONS}=true")];
-    let annotations_out_dir = cli_utils::arg_value("--target-dir")
+    // Compiles `mirai-annotations` crate, and persists the path(s) to the compiled artifact(s).
+    let compile_annotations_arg = format!("{ARG_COMPILE_ANNOTATIONS}=true");
+    let base_annotations_out_dir = cli_utils::arg_value("--target-dir")
         .or_else(|| env::var("CARGO_TARGET_DIR").ok())
         .as_deref()
         .or(metadata_target_dir)
-        .map(|target_dir| {
-            let mut out_dir = Path::new(target_dir).join("pallet_verifier");
-            if let Some(target_platform) = target_platform.as_ref() {
-                out_dir.push(target_platform);
-            }
-            out_dir.push("debug/deps");
-            out_dir
-        })
+        .map(PathBuf::from)
         .unwrap_or_else(|| {
             env::current_dir()
                 .expect("Expected valid current dir")
-                .join("target/pallet-verifier/debug/deps")
-        });
-    if !annotations_out_dir.exists() {
-        fs::create_dir_all(&annotations_out_dir)
-            .expect("Failed to create output directory for annotations");
-    }
-    annotation_args.push(format!("--out-dir={}", annotations_out_dir.display()));
-    if let Some(target_platform) = target_platform {
-        annotation_args.push(format!("--target={target_platform}"));
-    }
+                .join("target")
+        })
+        .join("pallet_verifier");
+    let annotations_out_dir = create_deps_out_dir(&base_annotations_out_dir);
+    let annotation_args = vec![
+        compile_annotations_arg.clone(),
+        format!("--out-dir={}", annotations_out_dir.display()),
+    ];
     call_pallet_verifier(annotation_args.into_iter(), std::iter::empty(), false);
-    let annotations_rlib_path =
-        annotations_out_dir.join("libmirai_annotations-pallet-verifier.rlib");
-    env::set_var(ENV_ANNOTATIONS_RLIB_PATH, annotations_rlib_path);
+    let annotations_rlib_path = annotations_out_dir.join(ANNOTATIONS_RLIB_FILENAME);
+    env::set_var(ENV_ANNOTATIONS_RLIB_PATH_HOST, &annotations_rlib_path);
+    let annotations_rlib_path_target = match target_platform {
+        Some(target_platform) => {
+            // Compiles and persists artifact for "target" platform.
+            let annotations_out_dir_target =
+                create_deps_out_dir(&base_annotations_out_dir.join(target_platform));
+            let annotation_args_target = vec![
+                compile_annotations_arg,
+                format!("--out-dir={}", annotations_out_dir_target.display()),
+                format!("--target={target_platform}"),
+            ];
+            call_pallet_verifier(
+                annotation_args_target.into_iter(),
+                std::iter::empty(),
+                false,
+            );
+            annotations_out_dir_target.join(ANNOTATIONS_RLIB_FILENAME)
+        }
+        None => annotations_rlib_path,
+    };
+    env::set_var(
+        ENV_ANNOTATIONS_RLIB_PATH_TARGET,
+        annotations_rlib_path_target,
+    );
 
     // Allows compilation of `parity-scale-codec >= 3.7.0` which requires `rustc >= 1.79`
     // Ref: <https://github.com/paritytech/parity-scale-codec/blob/master/Cargo.toml#L73C1-L73C13>
@@ -241,7 +259,11 @@ fn call_pallet_verifier(
     // Add `mirai-annotations` crate as a dependency (if necessary).
     // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--extern-specify-where-an-external-library-is-located>
     if include_annotations && !cli_utils::has_mirai_annotations_dep() {
-        let annotations_rlib_path = env::var(ENV_ANNOTATIONS_RLIB_PATH)
+        let annotations_env_name = match cli_utils::arg_value("--target") {
+            Some(_) => ENV_ANNOTATIONS_RLIB_PATH_TARGET,
+            None => ENV_ANNOTATIONS_RLIB_PATH_HOST,
+        };
+        let annotations_rlib_path = env::var(annotations_env_name)
             .expect("Expected a path to `mirai-annotations` compiled artifact");
         cmd.args([
             "--extern".to_owned(),
@@ -424,4 +446,13 @@ fn is_wasm_target() -> bool {
 /// Checks if the current `cargo` package is the `wastime`.
 fn is_wasmtime_package() -> bool {
     env::var("CARGO_PKG_NAME").is_ok_and(|name| name.starts_with("wasmtime"))
+}
+
+/// Creates an output directory for dependencies inside the given target.
+fn create_deps_out_dir(target_dir: &Path) -> PathBuf {
+    let out_dir = target_dir.join("debug/deps");
+    if !out_dir.exists() {
+        fs::create_dir_all(&out_dir).expect("Failed to create output directory for annotations");
+    }
+    out_dir
 }
