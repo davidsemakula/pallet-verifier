@@ -249,23 +249,23 @@ pub mod sp_io {
         noop_result!(changes_root, Option<Vec<u8>>);
     }
 
-    pub mod hashing {
-        noop_result!(blake2_128, [u8; 16]);
-        noop_result!(blake2_256, [u8; 32]);
-
-        noop_result!(keccak_256, [u8; 32]);
-        noop_result!(keccak_512, [u8; 64]);
-
-        noop_result!(sha2_256, [u8; 32]);
-
-        noop_result!(twox_64, [u8; 8]);
-        noop_result!(twox_128, [u8; 16]);
-        noop_result!(twox_256, [u8; 32]);
-    }
-
     pub mod logging {
         noop!(log);
     }
+}
+
+pub mod sp_crypto_hashing {
+    noop_result!(blake2_128, [u8; 16]);
+    noop_result!(blake2_256, [u8; 32]);
+
+    noop_result!(keccak_256, [u8; 32]);
+    noop_result!(keccak_512, [u8; 64]);
+
+    noop_result!(sha2_256, [u8; 32]);
+
+    noop_result!(twox_64, [u8; 8]);
+    noop_result!(twox_128, [u8; 16]);
+    noop_result!(twox_256, [u8; 32]);
 }
 
 pub mod sp_npos_elections {
