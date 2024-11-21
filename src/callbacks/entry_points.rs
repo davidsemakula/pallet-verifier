@@ -392,6 +392,16 @@ impl<'compilation> EntryPointsCallbacks<'compilation> {
                 .values()
                 .map(|(content, ..)| content)
                 .join("\n\n");
+            let reverse_renames = self
+                .dep_renames
+                .as_ref()
+                .map(|renames| {
+                    renames
+                        .iter()
+                        .map(|(name, rename)| format!("use {rename} as {name};"))
+                        .join("\n")
+                })
+                .unwrap_or_default();
             format!(
                 r"
 #![allow(unused)]
@@ -400,6 +410,7 @@ impl<'compilation> EntryPointsCallbacks<'compilation> {
 #![allow(deprecated)]
 
 use crate::*;
+{reverse_renames}
 {use_decls}
 
 {item_defs}
