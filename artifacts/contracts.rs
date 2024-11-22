@@ -94,6 +94,10 @@ pub mod core {
                 noop_result_custom_ty!(next);
             }
         }
+
+        pub mod sort {
+            noop!(merge_sort);
+        }
     }
 }
 

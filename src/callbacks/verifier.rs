@@ -471,23 +471,18 @@ fn emit_diagnostics(
                 let is_pointer_alloc_issue = || {
                     msg.contains("pointer") && msg.contains("memory") && msg.contains("deallocated")
                 };
-                let is_iter_arg_validity_related = || {
+                let is_std_arg_validity_related = || {
                     let is_iter_related = || {
                         diagnostic.children.iter().any(|sub_diag| {
                             sub_diag.span.primary_span().is_some_and(|span| {
-                                let is_std_or_core = source_map
-                                    .span_to_location_info(span)
-                                    .0
-                                    .is_some_and(|source_file| {
+                                source_map.span_to_location_info(span).0.is_some_and(
+                                    |source_file| {
                                         matches!(
                                             tcx.crate_name(source_file.cnum).as_str(),
-                                            "std" | "core"
+                                            "std" | "core" | "alloc"
                                         )
-                                    });
-                                is_std_or_core
-                                    && source_map
-                                        .span_to_snippet(span)
-                                        .is_ok_and(|snippet| snippet.contains("Iterator::"))
+                                    },
+                                )
                             })
                         })
                     };
@@ -500,7 +495,7 @@ fn emit_diagnostics(
                     || is_truthy_assume()
                     || is_unreachable_assume()
                     || is_pointer_alloc_issue()
-                    || is_iter_arg_validity_related()
+                    || is_std_arg_validity_related()
             });
         if is_noisy {
             diagnostic.cancel();
