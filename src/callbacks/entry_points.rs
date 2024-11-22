@@ -1752,7 +1752,9 @@ fn process_rvalue(
                         process_type(&arg_ty, used_items);
                     }
                 }
-                AggregateKind::Closure(def_id, args) | AggregateKind::Coroutine(def_id, args) => {
+                AggregateKind::Closure(def_id, args)
+                | AggregateKind::Coroutine(def_id, args)
+                | AggregateKind::CoroutineClosure(def_id, args) => {
                     used_items.insert(*def_id);
                     for arg_ty in args.iter().filter_map(GenericArg::as_type) {
                         process_type(&arg_ty, used_items);
