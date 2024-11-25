@@ -141,7 +141,7 @@ and [determines which diagnostics to either "suppress" or "emit"][diagnostics-fi
 based on our domain-specific knowledge.
 
 [verifier-callback-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/callbacks/verifier.rs
-[diagnostics-filter-src]: https://github.com/davidsemakula/pallet-verifier/blob/b8b59354a49432b277c8a311a4a637fc724b08f9/src/callbacks/verifier.rs#L305-L502
+[diagnostics-filter-src]: https://github.com/davidsemakula/pallet-verifier/blob/9051f6200d85b5b5359a12d7da68163fa83090b1/src/callbacks/verifier.rs#L321-L549
 
 **NOTE:** `pallet-verifier` leverages a custom [FileLoader][rust-file-loader] (see [implementation][virtual-file-loader-src]) 
 to "virtually" add "analysis-only" external crate declarations and module definitions 

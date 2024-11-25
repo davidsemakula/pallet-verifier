@@ -29,6 +29,9 @@
 On `macOS`, the `Clang` binary from `Xcode` doesn't support `WebAssembly`, so you'll need to install 
 [`clang/llvm` via `homebrew`](https://formulae.brew.sh/formula/llvm) and add it to your `PATH`.
 
+**NOTE:** On platforms where [`gcc`](https://gcc.gnu.org/) is the default `C` compiler (e.g. Debian and Ubuntu), 
+make sure the [`gcc-multilib`](https://packages.debian.org/sid/gcc-multilib) package is also installed.
+
 ### Installing `pallet-verifier`
 
 ```shell
