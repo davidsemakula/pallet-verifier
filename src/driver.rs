@@ -164,10 +164,7 @@ fn analyze_with_mirai(
         true,
     );
     compiler.set_file_loader(Some(Box::new(file_loader)));
-    match compiler.run() {
-        Ok(_) => rustc_driver::EXIT_SUCCESS,
-        Err(_) => rustc_driver::EXIT_FAILURE,
-    }
+    rustc_driver::catch_with_exit_code(|| compiler.run())
 }
 
 /// Compiles annotated dependencies.
@@ -177,10 +174,7 @@ fn compile_annotated_dependency(args: &[String]) -> i32 {
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(target_path, &[], false);
     compiler.set_file_loader(Some(Box::new(file_loader)));
-    match compiler.run() {
-        Ok(_) => rustc_driver::EXIT_SUCCESS,
-        Err(_) => rustc_driver::EXIT_FAILURE,
-    }
+    rustc_driver::catch_with_exit_code(|| compiler.run())
 }
 
 /// Compiles dependencies.
@@ -196,10 +190,7 @@ fn compile_dependency(args: &[String]) -> i32 {
         let file_loader = VirtualFileLoader::new(source_map);
         compiler.set_file_loader(Some(Box::new(file_loader)));
     }
-    match compiler.run() {
-        Ok(_) => rustc_driver::EXIT_SUCCESS,
-        Err(_) => rustc_driver::EXIT_FAILURE,
-    }
+    rustc_driver::catch_with_exit_code(|| compiler.run())
 }
 
 /// [VirtualFileLoader] input path for `mirai-annotations` crate source.
@@ -259,10 +250,7 @@ fn compile_annotations_crate() -> i32 {
     let file_loader = VirtualFileLoader::new(source_map);
     let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
     compiler.set_file_loader(Some(Box::new(file_loader)));
-    match compiler.run() {
-        Ok(_) => rustc_driver::EXIT_SUCCESS,
-        Err(_) => rustc_driver::EXIT_FAILURE,
-    }
+    rustc_driver::catch_with_exit_code(|| compiler.run())
 }
 
 /// Creates "virtual" `FileLoader` for "analysis-only" external crates and "virtual" modules
