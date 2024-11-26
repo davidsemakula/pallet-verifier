@@ -19,6 +19,7 @@ use rustc_span::{
     source_map::{dummy_spanned, Spanned},
     Span, Symbol,
 };
+use rustc_target::abi::VariantIdx;
 use rustc_type_ir::UintTy;
 
 use itertools::Itertools;
@@ -330,7 +331,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 .iterator_assoc_item_def_id("rposition")
                 .expect("Expected DefId for `std::iter::Iterator::rposition`");
             if def_id == iterator_position_def_id || def_id == iterator_rposition_def_id {
-                self.process_iterator_position(args, destination, location);
+                self.process_iterator_position(args, destination, target.as_ref(), location);
             }
 
             // Handles calls to collection `len` methods.
@@ -351,7 +352,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 )
             }) && is_slice_assoc_item(def_id, self.tcx)
             {
-                self.process_binary_search(args, destination, location);
+                self.process_binary_search(args, destination, target.as_ref(), location);
             }
         }
     }
@@ -567,6 +568,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         &mut self,
         args: &[Spanned<Operand<'tcx>>],
         destination: &Place<'tcx>,
+        target: Option<&BasicBlock>,
         location: Location,
     ) {
         // Finds place for `std::iter::Iterator::position` operand/arg.
@@ -632,15 +634,46 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Finds `Option::Some` target blocks for switches based on the discriminant of
-        // return value of `std::iter::Iterator::position` in successor blocks.
-        for target_bb in
-            collect_some_discr_switch_targets(*destination, location.block, self.basic_blocks)
-        {
+        // Tracks `Option::Some` switch target info of return value of
+        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition`.
+        // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
+        // `Result::Ok` transformations - see [`track_switch_target_transformations`] for details).
+        let mut switch_target_place = *destination;
+        let mut switch_target_bb = location.block;
+        let mut switch_target_variant_name = "Some".to_string();
+        let mut switch_target_variant_idx = variant_idx(LangItem::OptionSome, self.tcx);
+        if let Some(target_bb) = target {
+            track_switch_target_transformations(
+                &mut switch_target_place,
+                &mut switch_target_bb,
+                &mut switch_target_variant_name,
+                &mut switch_target_variant_idx,
+                *target_bb,
+                self.basic_blocks,
+                self.tcx,
+            );
+        }
+
+        // Finds `Option::Some` (or `ControlFlow::Continue` if transformed with `std::ops::Try::branch`,
+        // or `Result::Ok` if transformed with `Option::ok_or` e.t.c) target blocks
+        // for switches based on the discriminant of return value of
+        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition` in successor blocks.
+        for target_bb in collect_switch_targets_for_discr_value(
+            switch_target_place,
+            switch_target_variant_idx.as_u32() as u128,
+            switch_target_bb,
+            self.basic_blocks,
+        ) {
             for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
-                // Finds `Option::Some` downcast to `usize` places (if any).
-                let Some(some_place) = some_downcast_to_usize_place(*destination, stmt, self.tcx)
-                else {
+                // Finds `Option::Some` (or `Result::Ok` or `ControlFlow::Continue`, if transformed)
+                // downcast to `usize` places (if any).
+                let Some(downcast_place) = variant_downcast_to_usize_place(
+                    switch_target_place,
+                    &switch_target_variant_name,
+                    switch_target_variant_idx,
+                    stmt,
+                    self.tcx,
+                ) else {
                     continue;
                 };
 
@@ -650,7 +683,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                         block: target_bb,
                         statement_index: stmt_idx + 1,
                     },
-                    some_place,
+                    downcast_place,
                     collection_place,
                     region,
                     len_call_def_id,
@@ -697,6 +730,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         &mut self,
         args: &[Spanned<Operand<'tcx>>],
         destination: &Place<'tcx>,
+        target: Option<&BasicBlock>,
         location: Location,
     ) {
         // Finds place for slice `binary_search` operand/arg.
@@ -747,15 +781,45 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Finds `Result::Ok` target blocks for switches based on the discriminant of
-        // return value of slice `binary_search` in successor blocks.
-        for target_bb in
-            collect_ok_discr_switch_targets(*destination, location.block, self.basic_blocks)
-        {
+        // Tracks `Result::Ok` switch target info of return value of slice `binary_search` methods.
+        // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
+        // `Option::Some` transformations - see [`track_switch_target_transformations`] for details).
+        let mut switch_target_place = *destination;
+        let mut switch_target_bb = location.block;
+        let mut switch_target_variant_name = "Ok".to_string();
+        let mut switch_target_variant_idx = variant_idx(LangItem::ResultOk, self.tcx);
+        if let Some(target_bb) = target {
+            track_switch_target_transformations(
+                &mut switch_target_place,
+                &mut switch_target_bb,
+                &mut switch_target_variant_name,
+                &mut switch_target_variant_idx,
+                *target_bb,
+                self.basic_blocks,
+                self.tcx,
+            );
+        }
+
+        // Finds `Result::Ok` (or `ControlFlow::Continue` if transformed with `std::ops::Try::branch`,
+        // or `Option::Some` if transformed with `Result::ok` e.t.c) target blocks
+        // for switches based on the discriminant of return value of slice `binary_search`
+        // in successor blocks.
+        for target_bb in collect_switch_targets_for_discr_value(
+            switch_target_place,
+            switch_target_variant_idx.as_u32() as u128,
+            switch_target_bb,
+            self.basic_blocks,
+        ) {
             for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
-                // Finds `Result::Ok` downcast to `usize` places (if any).
-                let Some(ok_place) = ok_downcast_to_usize_place(*destination, stmt, self.tcx)
-                else {
+                // Finds `Result::Ok` (or `Option::Some` or `ControlFlow::Continue`, if transformed)
+                // downcast to `usize` places (if any).
+                let Some(downcast_place) = variant_downcast_to_usize_place(
+                    switch_target_place,
+                    &switch_target_variant_name,
+                    switch_target_variant_idx,
+                    stmt,
+                    self.tcx,
+                ) else {
                     continue;
                 };
 
@@ -766,7 +830,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 };
                 self.annotations.push(Annotation::Len(
                     annotation_location,
-                    ok_place,
+                    downcast_place,
                     collection_place,
                     region,
                     len_call_def_id,
@@ -798,7 +862,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     let gen_args = self.tcx.mk_args(&[gen_ty, slice_len_host_param_value]);
                     self.annotations.push(Annotation::Len(
                         annotation_location,
-                        ok_place,
+                        downcast_place,
                         *binary_search_arg_place,
                         *region,
                         slice_len_def_id,
@@ -1438,24 +1502,187 @@ fn is_enumerate_index<'tcx>(
     false
 }
 
-/// Collects target basic blocks (if any) for the `Option::Some` variant of a switch on
-/// `Option` discriminant of given place.
-fn collect_some_discr_switch_targets<'tcx>(
-    place: Place<'tcx>,
-    anchor_block: BasicBlock,
-    basic_blocks: &BasicBlocks<'tcx>,
-) -> FxHashSet<BasicBlock> {
-    collect_switch_targets_for_discr_value(place, 1, anchor_block, basic_blocks)
+/// Returns the `VariantIdx` for a `LangItem`.
+///
+/// # Panics
+///
+/// Panics if the `LangItem` is not a Variant.
+fn variant_idx(lang_item: LangItem, tcx: TyCtxt) -> VariantIdx {
+    let variant_def_id = tcx.lang_items().get(lang_item).expect("Expected lang item");
+    let adt_def_id = tcx.parent(variant_def_id);
+    let adt_def = tcx.adt_def(adt_def_id);
+    adt_def.variant_index_with_id(variant_def_id)
 }
 
-/// Collects target basic blocks (if any) for the `Result::Ok` variant of a switch on
-/// `Result` discriminant of given place.
-fn collect_ok_discr_switch_targets<'tcx>(
-    place: Place<'tcx>,
-    anchor_block: BasicBlock,
+// Tracks switch target info through "safe" transformations
+// (i.e. one that don't change the target variant's value) between
+// `Option::Some`, `Result::Ok` and `ControlFlow::Continue`
+// (e.g. via `std::ops::Try::branch` calls, `Option::ok_or`, `Result::ok`, `Result::map_err`
+// and `Option::inspect` calls e.t.c).
+fn track_switch_target_transformations<'tcx>(
+    switch_target_place: &mut Place<'tcx>,
+    switch_target_bb: &mut BasicBlock,
+    switch_target_variant_name: &mut String,
+    switch_target_variant_idx: &mut VariantIdx,
+    target_bb: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
-) -> FxHashSet<BasicBlock> {
-    collect_switch_targets_for_discr_value(place, 0, anchor_block, basic_blocks)
+    tcx: TyCtxt,
+) {
+    let mut next_target_bb = Some(target_bb);
+    while let Some(target_bb) = next_target_bb {
+        let target_bb_data = &basic_blocks[target_bb];
+        if let Some((try_branch_destination, try_branch_target_bb)) =
+            try_branch_destination(*switch_target_place, target_bb_data, tcx)
+        {
+            *switch_target_place = try_branch_destination;
+            *switch_target_bb = target_bb;
+            *switch_target_variant_name = "Continue".to_string();
+            *switch_target_variant_idx = variant_idx(LangItem::ControlFlowContinue, tcx);
+            next_target_bb = try_branch_target_bb;
+        } else if let Some((transformer_destination, transformer_target_bb)) =
+            safe_option_transform_destination(*switch_target_place, target_bb_data, tcx)
+        {
+            *switch_target_place = transformer_destination;
+            *switch_target_bb = target_bb;
+            *switch_target_variant_name = "Some".to_string();
+            *switch_target_variant_idx = variant_idx(LangItem::OptionSome, tcx);
+            next_target_bb = transformer_target_bb;
+        } else if let Some((transformer_destination, transformer_target_bb)) =
+            safe_result_transform_destination(*switch_target_place, target_bb_data, tcx)
+        {
+            *switch_target_place = transformer_destination;
+            *switch_target_bb = target_bb;
+            *switch_target_variant_name = "Ok".to_string();
+            *switch_target_variant_idx = variant_idx(LangItem::ResultOk, tcx);
+            next_target_bb = transformer_target_bb;
+        } else {
+            next_target_bb = None;
+        }
+    }
+}
+
+/// Returns destination place and target block (if any) of an `std::ops::Try::branch` call
+/// (i.e. `?` operator) where the given place is the first argument.
+fn try_branch_destination<'tcx>(
+    place: Place<'tcx>,
+    bb_data: &BasicBlockData<'tcx>,
+    tcx: TyCtxt,
+) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
+    let terminator = bb_data.terminator.as_ref()?;
+    let TerminatorKind::Call {
+        func,
+        args,
+        destination,
+        target,
+        ..
+    } = &terminator.kind
+    else {
+        return None;
+    };
+    let (def_id, ..) = func.const_fn_def()?;
+    let try_branch_def_id = tcx
+        .lang_items()
+        .get(LangItem::TryTraitBranch)
+        .expect("Expected `std::ops::Try::branch` lang item");
+    if def_id != try_branch_def_id {
+        return None;
+    }
+    let first_arg_place = args.first().and_then(|arg| match &arg.node {
+        Operand::Copy(place) | Operand::Move(place) => Some(place),
+        Operand::Constant(_) => None,
+    })?;
+    if *first_arg_place != place {
+        return None;
+    }
+
+    Some((*destination, *target))
+}
+
+/// Returns destination place and target block (if any) of a transformation into `Option` that doesn't change
+/// the `Option::Some` variant value, where the given place is the first argument.
+///
+/// (e.g. via `Option::inspect`, `Result::ok` calls e.t.c).
+fn safe_option_transform_destination<'tcx>(
+    place: Place<'tcx>,
+    bb_data: &BasicBlockData<'tcx>,
+    tcx: TyCtxt,
+) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
+    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
+        matches!(crate_name, "std" | "core")
+            && ((adt_name == "Option" && matches!(fn_name, "inspect" | "as_ref" | "as_deref"))
+                || (adt_name == "Result" && matches!(fn_name, "ok")))
+    }
+    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
+}
+
+/// Returns destination place and target block (if any) of a transformation into `Result`
+/// that doesn't change the `Result::Ok` variant value, where the given place is the first argument.
+///
+/// (e.g. via `Result::map_err`, `Option::ok_or` calls e.t.c).
+fn safe_result_transform_destination<'tcx>(
+    place: Place<'tcx>,
+    bb_data: &BasicBlockData<'tcx>,
+    tcx: TyCtxt,
+) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
+    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
+        matches!(crate_name, "std" | "core")
+            && ((adt_name == "Result"
+                && matches!(
+                    fn_name,
+                    "map_err" | "inspect" | "inspect_err" | "as_ref" | "as_derref"
+                ))
+                || (adt_name == "Option" && matches!(fn_name, "ok_or" | "ok_or_else")))
+    }
+    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
+}
+
+/// Returns destination place and target block (if any) of a "safe" transformation
+/// where the given place is the first argument of the "transformer" call.
+///
+/// See [`safe_option_transform_destination`] and [`safe_result_transform_destination`] docs
+/// for details about the target "safe" transformations.
+fn safe_transform_destination<'tcx>(
+    place: Place<'tcx>,
+    bb_data: &BasicBlockData<'tcx>,
+    crate_adt_and_fn_name_check: fn(&str, &str, &str) -> bool,
+    tcx: TyCtxt,
+) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
+    let terminator = bb_data.terminator.as_ref()?;
+    let TerminatorKind::Call {
+        func,
+        args,
+        destination,
+        target,
+        ..
+    } = &terminator.kind
+    else {
+        return None;
+    };
+    let (def_id, ..) = func.const_fn_def()?;
+    let fn_name = tcx.item_name(def_id);
+    let crate_name = tcx.crate_name(def_id.krate);
+
+    let first_arg = args.first()?;
+    let first_arg_place = match first_arg.node {
+        Operand::Copy(place) | Operand::Move(place) => Some(place),
+        Operand::Constant(_) => None,
+    }?;
+    if first_arg_place != place {
+        return None;
+    }
+
+    let assoc_item = tcx.opt_associated_item(def_id)?;
+    let impl_def_id = assoc_item.impl_container(tcx)?;
+    let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
+    let ImplSubject::Inherent(ty) = impl_subject else {
+        return None;
+    };
+    let adt_def = ty.ty_adt_def()?;
+    let adt_name = tcx.item_name(adt_def.did());
+
+    let is_safe_transform =
+        crate_adt_and_fn_name_check(crate_name.as_str(), adt_name.as_str(), fn_name.as_str());
+    is_safe_transform.then_some((*destination, *target))
 }
 
 /// Collects target basic blocks (if any) for the given value of a switch on discriminant of given place.
@@ -1545,29 +1772,11 @@ fn switch_target_for_discr_value<'tcx>(
     })
 }
 
-/// Returns place (if any) for the `Option::Some` downcast to `usize` of given place.
-fn some_downcast_to_usize_place<'tcx>(
-    place: Place,
-    stmt: &Statement<'tcx>,
-    tcx: TyCtxt<'tcx>,
-) -> Option<Place<'tcx>> {
-    variant_downcast_to_usize_place(place, "Some", 1, stmt, tcx)
-}
-
-/// Returns place (if any) for the `Result::Ok` downcast to `usize` of given place.
-fn ok_downcast_to_usize_place<'tcx>(
-    place: Place,
-    stmt: &Statement<'tcx>,
-    tcx: TyCtxt<'tcx>,
-) -> Option<Place<'tcx>> {
-    variant_downcast_to_usize_place(place, "Ok", 0, stmt, tcx)
-}
-
 /// Returns place (if any) for the variant downcast to `usize` of given place.
 fn variant_downcast_to_usize_place<'tcx>(
     place: Place,
     variant_name: &str,
-    variant_idx: u32,
+    variant_idx: VariantIdx,
     stmt: &Statement<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<Place<'tcx>> {
@@ -1587,7 +1796,7 @@ fn variant_downcast_to_usize_place<'tcx>(
     {
         if (op_variant_name.is_none()
             || op_variant_name.is_some_and(|name| name.as_str() == variant_name))
-            && op_variant_idx.as_u32() == variant_idx
+            && op_variant_idx == variant_idx
             && field_idx.as_u32() == 0
             && field_ty == Ty::new_uint(tcx, UintTy::Usize)
         {
