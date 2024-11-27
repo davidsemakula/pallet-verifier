@@ -53,16 +53,46 @@ fn main() {
                         env::var("CARGO_PKG_NAME").is_ok_and(|cargo_pkg| target_pkg == cargo_pkg)
                     })
             };
-            let args = env::args().skip(2);
             if is_primary_package && is_analysis_target() && !is_build_script() {
                 // Analyzes "primary" package with `pallet-verifier`.
-                call_pallet_verifier(args, std::iter::empty(), true);
-            } else if is_build_script() {
-                // Compiles build scripts.
-                compile_build_script(sub_command, args);
+                call_pallet_verifier(env::args().skip(2), std::iter::empty(), true);
             } else {
-                // Compiles dependencies.
-                compile_dependency(sub_command, args);
+                // Adds some extra compilation flags for dependencies and build scripts (if necessary).
+                let mut extra_args = Vec::new();
+                let mut is_print = false;
+                let mut has_check_cfg = false;
+                let mut has_unstable_options = false;
+                let mut has_cap_lints = false;
+                env::args().for_each(|arg| {
+                    if arg.contains("--print") {
+                        is_print = true;
+                    } else if arg.contains("--check-cfg") {
+                        has_check_cfg = true;
+                    } else if arg.contains("unstable-options") {
+                        has_unstable_options = true;
+                    } else if arg.contains("--cap-lints") {
+                        has_cap_lints = true;
+                    }
+                });
+                if !is_print {
+                    // Enables the `unstable-options` flag (if necessary).
+                    if has_check_cfg && !has_unstable_options {
+                        extra_args.push("-Zunstable-options".to_owned());
+                    }
+                    // Silence all lints for dependencies and build scripts.
+                    // Ref: <https://doc.rust-lang.org/rustc/lints/levels.html#capping-lints>
+                    if !has_cap_lints {
+                        extra_args.push("--cap-lints=allow".to_string());
+                    }
+                }
+
+                // Compiles dependencies and build scripts.
+                let args = env::args().skip(2).chain(extra_args);
+                if is_build_script() {
+                    compile_build_script(sub_command, args);
+                } else {
+                    compile_dependency(sub_command, args);
+                }
             }
         }
         _ => {
@@ -375,10 +405,9 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
             Some(rustc_path),
             args.chain(["--cfg=no_diagnostic_namespace".to_string()]),
         );
-    } else if crate_name
-        .as_ref()
-        .is_some_and(|crate_name| crate_name.starts_with("pallet"))
-    {
+    } else if crate_name.as_ref().is_some_and(|crate_name| {
+        crate_name.starts_with("pallet") && !is_unsupported_annotation_target()
+    }) {
         // Compiles and annotates `pallet` dependencies with `pallet-verifier`.
         call_pallet_verifier(
             args.chain([ARG_DEP_ANNOTATE, "true"].map(ToString::to_string)),
@@ -420,6 +449,7 @@ fn compile_build_script(rustc_path: String, args: impl Iterator<Item = String>) 
             }),
         );
     } else {
+        // Compiles build scripts with `rustc`.
         cli_utils::call_rustc(Some(rustc_path), args);
     }
 }
@@ -455,4 +485,17 @@ fn create_deps_out_dir(target_dir: &Path) -> PathBuf {
         fs::create_dir_all(&out_dir).expect("Failed to create output directory for annotations");
     }
     out_dir
+}
+
+/// Checks if the `rustc` target (if set) is a target that isn't supported for annotations.
+///
+/// This typically happens when a build script manually compiles an artifact and explicitly
+/// sets a `rustc` target that doesn't match the compilation target set by `pallet-verifier`
+/// (e.g. see build script for `pallet-contracts-fixtures`).
+fn is_unsupported_annotation_target() -> bool {
+    cli_utils::arg_value("--target").is_some_and(|target| {
+        let pallet_verifier_target = env::var(ENV_TARGET);
+        pallet_verifier_target.is_err()
+            || pallet_verifier_target.is_ok_and(|pv_target| pv_target != target)
+    })
 }
