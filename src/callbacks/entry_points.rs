@@ -1714,9 +1714,9 @@ fn process_rvalue(
             process_operand(operand, locals, used_items, item_defs);
         }
         Rvalue::Repeat(operand, _) => {
+            // TODO: Improve handling of more complex const expressions for array length
+            // (e.g. if they reference other constants)?
             process_operand(operand, locals, used_items, item_defs);
-
-            // TODO: Handle const expression for array length.
         }
         Rvalue::Ref(_, _, place)
         | Rvalue::AddressOf(_, place)
@@ -1725,8 +1725,9 @@ fn process_rvalue(
         | Rvalue::Discriminant(place) => {
             locals.insert(place.local);
         }
-        // TODO: Handle thread local references.
-        Rvalue::ThreadLocalRef(_) => todo!(),
+        Rvalue::ThreadLocalRef(def_id) => {
+            used_items.insert(*def_id);
+        }
         Rvalue::Cast(_, operand, ty) | Rvalue::ShallowInitBox(operand, ty) => {
             process_operand(operand, locals, used_items, item_defs);
             process_type(ty, used_items);
