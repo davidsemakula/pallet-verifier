@@ -300,7 +300,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         self.iterator_assoc_items.get(&Symbol::intern(name))
     }
 
-    /// Analyses and annotates `Iterator` terminators.
+    /// Analyzes and annotates `Iterator` terminators.
     fn process_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
         if let TerminatorKind::Call {
             func,

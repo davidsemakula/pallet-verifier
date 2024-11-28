@@ -4,7 +4,7 @@
 [FRAME pallets][FRAME] using [static program analysis][static-analysis] techniques like [data-flow analysis][data-flow],
 [abstract interpretation][abs-int] and [symbolic execution][symbex].
 
-[FRAME pallets][FRAME] are modules that are used to build/compose [Substrate]-based blockchains.
+[FRAME pallets][FRAME] are modules used to build/compose [Substrate]-based blockchains.
 
 [FRAME]: https://docs.substrate.io/learn/runtime-development/#frame
 [Substrate]: https://docs.substrate.io/

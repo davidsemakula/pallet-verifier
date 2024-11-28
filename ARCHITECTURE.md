@@ -5,7 +5,7 @@
 [FRAME pallets][FRAME] using [static program analysis][static-analysis] techniques like [data-flow analysis][data-flow],
 [abstract interpretation][abs-int] and [symbolic execution][symbex].
 
-[FRAME pallets][FRAME] are modules that are used to build/compose [Substrate]-based blockchains.
+[FRAME pallets][FRAME] are modules used to build/compose [Substrate]-based blockchains.
 
 [FRAME]: https://docs.substrate.io/learn/runtime-development/#frame
 [Substrate]: https://docs.substrate.io/
@@ -129,9 +129,15 @@ that can't be inferred from source code alone, to improve the accuracy of the ve
 
 **NOTE:** [Annotations][annotations] require the [mirai-annotations crate][annotations] to be a dependency of the target
 [FRAME] pallet that `pallet-verifier` is invoked on, however, it's improbable that this will be the case in the wild, 
-so the [custom rustc driver][rustc-driver-src] detects when the [mirai-annotations][annotations] dependency is missing, 
-and automatically compiles it and "non-invasively" adds it as a dependency 
-(i.e. without modifying the actual source code and/or `Cargo.toml` manifest of the target [FRAME] pallet).
+so `pallet-verifier` [detects when the `mirai-annotations` crate dependency is missing][annotations-detect-src],
+[automatically compiles it][annotations-compile-src] ([see also][annotations-compile-trigger-src]) 
+and ["non-invasively" adds it as a dependency][annotations-add-src] (i.e. without modifying the "actual" source code 
+and/or `Cargo.toml` manifest of the target [FRAME] pallet).
+
+[annotations-detect-src]: https://github.com/davidsemakula/pallet-verifier/blob/844a49f85f434442202f724c2b5a8aecd0cf9d84/src/cli_utils.rs#L128-L138
+[annotations-compile-src]: https://github.com/davidsemakula/pallet-verifier/blob/844a49f85f434442202f724c2b5a8aecd0cf9d84/src/driver.rs#L196-L254
+[annotations-compile-trigger-src]: https://github.com/davidsemakula/pallet-verifier/blob/844a49f85f434442202f724c2b5a8aecd0cf9d84/src/main.rs#L180-L223
+[annotations-add-src]: https://github.com/davidsemakula/pallet-verifier/blob/844a49f85f434442202f724c2b5a8aecd0cf9d84/src/main.rs#L259-L273
 
 ### Verification / Abstract Interpretation
 

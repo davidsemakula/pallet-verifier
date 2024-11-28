@@ -121,7 +121,7 @@ fn main() {
     ));
 }
 
-/// Compiles and analyses target crate (presumably a FRAME pallet) to generate "tractable" entry points.
+/// Compiles and analyzes target crate (presumably a FRAME pallet) to generate "tractable" entry points.
 /// Returns a tuple of the raw entry point content (as a `String`),
 /// as well some entry points metadata (as [`EntryPointsInfo`]) if successful.
 fn generate_entry_points(args: &[String]) -> Result<(String, EntrysPointInfo), ()> {
