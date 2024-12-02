@@ -170,21 +170,7 @@ fn call_cargo() {
     }
     let metadata = metadata_cmd.exec();
 
-    // Sets cargo `--target-dir` arg if it's not already set.
-    let mut metadata_target_dir = None;
-    if cli_utils::arg_value("--target-dir").is_none()
-        && env::var("CARGO_TARGET_DIR").is_err()
-        && env::var("CARGO_BUILD_TARGET_DIR").is_err()
-    {
-        let target_dir = metadata
-            .as_ref()
-            .map(|metadata| metadata.target_directory.as_str())
-            .unwrap_or("target");
-        cmd.arg(format!("--target-dir={target_dir}/pallet_verifier"));
-        metadata_target_dir = Some(target_dir);
-    }
-
-    // Persists some package metadata.
+    // Set target package (if necessary), and persists some package metadata.
     let root_package = metadata
         .as_ref()
         .ok()
@@ -207,20 +193,40 @@ fn call_cargo() {
         }
     }
 
+    // Sets cargo `--target-dir` arg if it's not already set.
+    let current_dir = env::current_dir().expect("Expected valid current dir");
+    let target_dir = if let Some(target_dir) = cli_utils::arg_value("--target-dir") {
+        PathBuf::from(target_dir)
+    } else {
+        let mut target_dir = env::var("CARGO_TARGET_DIR")
+            .ok()
+            .or_else(|| env::var("CARGO_BUILD_TARGET_DIR").ok())
+            .as_deref()
+            .or_else(|| {
+                metadata
+                    .as_ref()
+                    .map(|metadata| metadata.target_directory.as_str())
+                    .ok()
+            })
+            .map(PathBuf::from)
+            .unwrap_or_else(|| current_dir.join("target"));
+        target_dir.push("pallet_verifier");
+        let is_workspace_member = metadata.as_ref().is_ok_and(|metadata| {
+            metadata.workspace_root != current_dir
+                && current_dir.starts_with(&metadata.workspace_root)
+        });
+        if is_workspace_member {
+            if let Some(root_package) = root_package {
+                target_dir.push(&root_package.name);
+            }
+        }
+        cmd.arg(format!("--target-dir={}", target_dir.display()));
+        target_dir
+    };
+
     // Compiles `mirai-annotations` crate, and persists the path(s) to the compiled artifact(s).
     let compile_annotations_arg = format!("{ARG_COMPILE_ANNOTATIONS}=true");
-    let base_annotations_out_dir = cli_utils::arg_value("--target-dir")
-        .or_else(|| env::var("CARGO_TARGET_DIR").ok())
-        .as_deref()
-        .or(metadata_target_dir)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            env::current_dir()
-                .expect("Expected valid current dir")
-                .join("target")
-        })
-        .join("pallet_verifier");
-    let annotations_out_dir = create_deps_out_dir(&base_annotations_out_dir);
+    let annotations_out_dir = create_deps_out_dir(&target_dir);
     let annotation_args = vec![
         compile_annotations_arg.clone(),
         format!("--out-dir={}", annotations_out_dir.display()),
@@ -231,8 +237,7 @@ fn call_cargo() {
     let annotations_rlib_path_target = match target_platform {
         Some(target_platform) => {
             // Compiles and persists artifact for "target" platform.
-            let annotations_out_dir_target =
-                create_deps_out_dir(&base_annotations_out_dir.join(target_platform));
+            let annotations_out_dir_target = create_deps_out_dir(&target_dir.join(target_platform));
             let annotation_args_target = vec![
                 compile_annotations_arg,
                 format!("--out-dir={}", annotations_out_dir_target.display()),

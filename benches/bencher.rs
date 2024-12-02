@@ -100,8 +100,8 @@ fn main() {
             // Ref: <https://doc.rust-lang.org/rustc/json.html>
             cmd.arg("--message-format=json");
 
-            // Sets output directory.
-            let out_dir = env::var("CARGO_TARGET_DIR")
+            // Sets cargo `--target-dir` arg.
+            let mut target_dir = env::var("CARGO_TARGET_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| {
                     env::current_dir()
@@ -109,8 +109,9 @@ fn main() {
                         .join("target")
                 })
                 .join("bench");
+            target_dir.push(format!("{pallet_name}/{fixture_kind}"));
             cmd.arg("--target-dir");
-            cmd.arg(out_dir);
+            cmd.arg(target_dir);
 
             // Set target crate by manifest path.
             let manifest_path = PathBuf::from(format!("{bench_path}/{fixture_kind}/Cargo.toml"));
@@ -419,7 +420,6 @@ struct ExpectedDiagostic {
 
 /// Kind of the test fixture.
 enum FixtureKind {
-    //
     SDK,
     Edit,
 }
