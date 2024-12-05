@@ -13,6 +13,8 @@ use itertools::Itertools;
 
 /// A `FileLoader` that "virtually" adds "analysis-only" external crates, module definitions
 /// and unstable feature flags to a crate.
+///
+/// A [`VirtualFileLoader`] is created via [`VirtualFileLoaderBuilder`].
 pub struct VirtualFileLoader {
     file_loader: RealFileLoader,
     // Source map for "virtual" contents for root paths.
@@ -20,7 +22,7 @@ pub struct VirtualFileLoader {
         // The root path.
         PathBuf,
         (
-            // base "virtual" content for root path.
+            // base "virtual" content for path.
             Option<String>,
             // feature declarations.
             Option<String>,
@@ -35,72 +37,6 @@ pub struct VirtualFileLoader {
 }
 
 impl VirtualFileLoader {
-    /// Creates a "virtual" file loader.
-    pub fn new(
-        source_map_def: FxHashMap<
-            // The root path.
-            PathBuf,
-            (
-                // base "virtual" content for root path.
-                Option<String>,
-                // names of features to enable.
-                Option<FxHashSet<&str>>,
-                // names of external crates to declare.
-                Option<FxHashSet<&str>>,
-                // `name` -> `content` map for "virtual" modules.
-                Option<FxHashMap<&str, String>>,
-            ),
-        >,
-    ) -> Self {
-        // Composes root and module source "virtual" maps based on the given definition.
-        let mut root_source_map = FxHashMap::default();
-        let mut mod_source_map = FxHashMap::default();
-        for (root_path, (root_content, features, extern_crates, virtual_mods)) in source_map_def {
-            let feature_decls = features
-                .filter(|features| !features.is_empty())
-                .map(|features| {
-                    features
-                        .iter()
-                        .map(|feature| format!("#![feature({feature})]"))
-                        .join("\n")
-                });
-            let extern_crate_decls = extern_crates
-                .filter(|extern_crates| !extern_crates.is_empty())
-                .map(|extern_crates| {
-                    extern_crates
-                        .iter()
-                        .map(|extern_crate| format!("extern crate {extern_crate};"))
-                        .join("\n")
-                });
-            let mut virtual_mod_decls = FxHashSet::default();
-            if let Some(virtual_mods) = virtual_mods {
-                for (name, content) in virtual_mods {
-                    let mut mod_path = root_path.clone();
-                    mod_path.set_file_name(format!("{name}.rs"));
-                    mod_source_map.insert(mod_path, content);
-                    virtual_mod_decls.insert(format!("mod {name};"));
-                }
-            }
-            let virtual_mod_decls_str =
-                (!virtual_mod_decls.is_empty()).then_some(virtual_mod_decls.into_iter().join("\n"));
-            root_source_map.insert(
-                root_path,
-                (
-                    root_content,
-                    feature_decls,
-                    extern_crate_decls,
-                    virtual_mod_decls_str,
-                ),
-            );
-        }
-
-        Self {
-            file_loader: RealFileLoader,
-            root_source_map,
-            mod_source_map,
-        }
-    }
-
     /// Returns "virtual" content for the specified path.
     fn base_virtual_content(&self, path: &Path) -> Option<&String> {
         let virtual_root_content = self
@@ -166,6 +102,142 @@ impl rustc_span::source_map::FileLoader for VirtualFileLoader {
             Ok(unsafe { bytes.assume_init() })
         } else {
             self.file_loader.read_binary_file(path)
+        }
+    }
+}
+
+/// Builder for [`VirtualFileLoader`].
+#[derive(Default)]
+pub struct VirtualFileLoaderBuilder<'builder>(
+    FxHashMap<
+        // The root path.
+        PathBuf,
+        (
+            // base "virtual" content for root path.
+            Option<String>,
+            // names of unstable features to enable.
+            Option<FxHashSet<&'builder str>>,
+            // names of external crates to declare.
+            Option<FxHashSet<&'builder str>>,
+            // `name` -> `content` map for "virtual" modules.
+            Option<FxHashMap<&'builder str, String>>,
+        ),
+    >,
+);
+
+impl<'builder> VirtualFileLoaderBuilder<'builder> {
+    /// Adds a path and it's "virtual" content(s).
+    pub fn add_path(
+        &mut self,
+        // target path.
+        path: PathBuf,
+        // base "virtual" content for path.
+        root_content: Option<String>,
+        // names of external crates to declare.
+        extern_crates: Option<FxHashSet<&'builder str>>,
+        // `name` -> `content` map for "virtual" modules.
+        virtual_mods: Option<FxHashMap<&'builder str, String>>,
+        // names of unstable features to enable.
+        unstable_features: Option<FxHashSet<&'builder str>>,
+    ) {
+        self.0.insert(
+            path,
+            (root_content, unstable_features, extern_crates, virtual_mods),
+        );
+    }
+
+    /// Adds a path with "virtual" root content.
+    pub fn add_root_content(
+        &mut self,
+        // target path.
+        path: PathBuf,
+        // base "virtual" content for root path.
+        root_content: String,
+    ) {
+        self.add_path(path, Some(root_content), None, None, None);
+    }
+
+    /// Adds a path with "virtual" external crates.
+    pub fn add_extern_crates(
+        &mut self,
+        // target path.
+        path: PathBuf,
+        // names of external crates to declare.
+        extern_crates: FxHashSet<&'builder str>,
+    ) {
+        self.add_path(path, None, Some(extern_crates), None, None);
+    }
+
+    /// Adds a path with "virtual" modules.
+    pub fn add_virtual_mods(
+        &mut self,
+        // target path.
+        path: PathBuf,
+        // `name` -> `content` map for "virtual" modules.
+        virtual_mods: FxHashMap<&'builder str, String>,
+    ) {
+        self.add_path(path, None, None, Some(virtual_mods), None);
+    }
+
+    /// Adds a path with "virtual" unstable feature flags to enable.
+    pub fn enable_unstable_features(
+        &mut self,
+        // target path.
+        path: PathBuf,
+        // names of unstable features to enable.
+        unstable_features: FxHashSet<&'builder str>,
+    ) {
+        self.add_path(path, None, None, None, Some(unstable_features));
+    }
+
+    /// Creates a [`VirtualFileLoader`].
+    pub fn build(self) -> VirtualFileLoader {
+        // Composes root and module source "virtual" maps based on the given definition.
+        let mut root_source_map = FxHashMap::default();
+        let mut mod_source_map = FxHashMap::default();
+        for (root_path, (root_content, features, extern_crates, virtual_mods)) in self.0 {
+            let feature_decls = features
+                .filter(|features| !features.is_empty())
+                .map(|features| {
+                    features
+                        .iter()
+                        .map(|feature| format!("#![feature({feature})]"))
+                        .join("\n")
+                });
+            let extern_crate_decls = extern_crates
+                .filter(|extern_crates| !extern_crates.is_empty())
+                .map(|extern_crates| {
+                    extern_crates
+                        .iter()
+                        .map(|extern_crate| format!("extern crate {extern_crate};"))
+                        .join("\n")
+                });
+            let mut virtual_mod_decls = FxHashSet::default();
+            if let Some(virtual_mods) = virtual_mods {
+                for (name, content) in virtual_mods {
+                    let mut mod_path = root_path.clone();
+                    mod_path.set_file_name(format!("{name}.rs"));
+                    mod_source_map.insert(mod_path, content);
+                    virtual_mod_decls.insert(format!("mod {name};"));
+                }
+            }
+            let virtual_mod_decls_str =
+                (!virtual_mod_decls.is_empty()).then_some(virtual_mod_decls.into_iter().join("\n"));
+            root_source_map.insert(
+                root_path,
+                (
+                    root_content,
+                    feature_decls,
+                    extern_crate_decls,
+                    virtual_mod_decls_str,
+                ),
+            );
+        }
+
+        VirtualFileLoader {
+            file_loader: RealFileLoader,
+            root_source_map,
+            mod_source_map,
         }
     }
 }

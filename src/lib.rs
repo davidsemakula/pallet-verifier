@@ -41,7 +41,7 @@ mod utils;
 pub use callbacks::{
     DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, VerifierCallbacks,
 };
-pub use file_loader::VirtualFileLoader;
+pub use file_loader::{VirtualFileLoader, VirtualFileLoaderBuilder};
 
 /// Name of generated `mod` for entry points.
 pub const ENTRY_POINTS_MOD_NAME: &str = "__pallet_verifier_entry_points";

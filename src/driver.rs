@@ -8,7 +8,7 @@ extern crate rustc_session;
 
 mod cli_utils;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 use std::{
     env,
@@ -26,7 +26,8 @@ use cli_utils::{
 };
 use pallet_verifier::{
     DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntrysPointInfo,
-    VerifierCallbacks, VirtualFileLoader, CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
+    VerifierCallbacks, VirtualFileLoader, VirtualFileLoaderBuilder, CONTRACTS_MOD_NAME,
+    ENTRY_POINTS_MOD_NAME,
 };
 
 const COMMAND: &str = "pallet-verifier";
@@ -184,10 +185,10 @@ fn compile_dependency(args: &[String]) -> i32 {
     let target_path = analysis_target_path(args);
     let crate_name = cli_utils::arg_value("--crate-name").expect("Expected a target crate");
     let features = lang_features(&crate_name);
-    if features.is_some() {
-        let mut source_map = FxHashMap::default();
-        source_map.insert(target_path, (None, features, None, None));
-        let file_loader = VirtualFileLoader::new(source_map);
+    if let Some(features) = features {
+        let mut file_loader_builder = VirtualFileLoaderBuilder::default();
+        file_loader_builder.enable_unstable_features(target_path, features);
+        let file_loader = file_loader_builder.build();
         compiler.set_file_loader(Some(Box::new(file_loader)));
     }
     rustc_driver::catch_with_exit_code(|| compiler.run())
@@ -242,12 +243,9 @@ fn compile_annotations_crate() -> i32 {
     }
     let mut callbacks = DefaultCallbacks;
     let input_content = MIRAI_ANNOTATIONS_CONTENT;
-    let mut source_map = FxHashMap::default();
-    source_map.insert(
-        input_path.to_path_buf(),
-        (Some(input_content.to_owned()), None, None, None),
-    );
-    let file_loader = VirtualFileLoader::new(source_map);
+    let mut file_loader_builder = VirtualFileLoaderBuilder::default();
+    file_loader_builder.add_root_content(input_path.to_path_buf(), input_content.to_owned());
+    let file_loader = file_loader_builder.build();
     let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
     compiler.set_file_loader(Some(Box::new(file_loader)));
     rustc_driver::catch_with_exit_code(|| compiler.run())
@@ -269,20 +267,18 @@ fn analysis_file_loader(
     if is_auto_added_annotations_dep || missing_annotations_extern_decl {
         extern_crates = Some(FxHashSet::from_iter(["mirai_annotations"]));
     }
-    let mut analysis_source_map = FxHashMap::default();
-    analysis_source_map.insert(
+    let mut file_loader_builder = VirtualFileLoaderBuilder::default();
+    file_loader_builder.add_path(
         target_path.clone(),
-        (
-            None,
-            lang_features(&crate_name),
-            extern_crates.clone(),
-            (!virtual_mods.is_empty()).then_some(virtual_mods.iter().cloned().collect()),
-        ),
+        None,
+        extern_crates.clone(),
+        (!virtual_mods.is_empty()).then_some(virtual_mods.iter().cloned().collect()),
+        lang_features(&crate_name),
     );
     if is_auto_added_annotations_dep {
-        analysis_source_map.insert(
+        file_loader_builder.add_root_content(
             PathBuf::from(MIRAI_ANNOTATIONS_INPUT_PATH),
-            (Some(MIRAI_ANNOTATIONS_CONTENT.to_owned()), None, None, None),
+            MIRAI_ANNOTATIONS_CONTENT.to_owned(),
         );
     }
     if include_annotated_deps {
@@ -344,22 +340,20 @@ fn analysis_file_loader(
             } else {
                 lib_src_path.to_path_buf()
             };
-            analysis_source_map.insert(
+            file_loader_builder.add_path(
                 abs_lib_src_path,
-                (
-                    None,
-                    lang_features(dep_crate_name),
-                    if is_pallet_dep {
-                        extern_crates.clone()
-                    } else {
-                        None
-                    },
-                    None,
-                ),
+                None,
+                if is_pallet_dep {
+                    extern_crates.clone()
+                } else {
+                    None
+                },
+                None,
+                lang_features(dep_crate_name),
             );
         }
     }
-    VirtualFileLoader::new(analysis_source_map)
+    file_loader_builder.build()
 }
 
 // Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
