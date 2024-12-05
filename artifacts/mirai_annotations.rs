@@ -1,4 +1,4 @@
-// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/annotations/src/lib.rs>
+// Ref: <https://github.com/endorlabs/MIRAI/blob/main/annotations/src/lib.rs>
 //
 // Copyright (c) Facebook, Inc. and its affiliates.
 //

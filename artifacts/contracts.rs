@@ -1,6 +1,6 @@
 //! MIRAI "contracts" for some FRAME, Substrate and standard library functions for "more tractable" analysis.
 //!
-//! Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
+//! Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
 
 #![allow(unused)]
 #![allow(nonstandard_style)]

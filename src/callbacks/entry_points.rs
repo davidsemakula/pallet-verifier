@@ -1,4 +1,6 @@
-//! `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions.
+//! `rustc` callbacks and utilities for generating tractable "entry points"
+//! for dispatchable functions/extrinsics and public associated functions of inherent implementations
+//! of FRAME pallets.
 //!
 //! See [`EntryPointsCallbacks`] doc.
 
@@ -30,11 +32,16 @@ use owo_colors::OwoColorize;
 
 use crate::{providers, utils, CallKind, EntrysPointInfo, ENTRY_POINT_FN_PREFIX};
 
-/// `rustc` callbacks and utilities for generating tractable "entry points" for FRAME dispatchable functions.
+/// `rustc` callbacks and utilities for generating tractable "entry points"
+/// for dispatchable functions/extrinsics and public associated functions of inherent implementations
+/// of FRAME pallets.
+///
+/// Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#entry-points>
 ///
 /// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.call.html>
 ///
-/// Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#entry-points>
+/// Ref: <https://doc.rust-lang.org/reference/items/implementations.html#inherent-implementations>
+
 pub struct EntryPointsCallbacks<'compilation> {
     /// Map from generated entry point `fn` names and their definitions, a stable `DefPathHash`
     /// of the target pallet `fn` and it's [`CallKind`].
@@ -2058,8 +2065,8 @@ fn tractable_param_hir_type<'tcx>(
             .chain(fq_item_paths.into_iter().map(|(path, span)| (span, path)))
             .chain(
                 // We use 1000 arbitrarily, but the idea is that expressions don't end up exceeding MIRAI's k-limits.
-                // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#k-limits>
-                // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/k_limits.rs>
+                // Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#k-limits>
+                // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/k_limits.rs>
                 int_const_generic_params
                     .into_iter()
                     .map(|(config_expr, _)| (config_expr.span, "1000".to_string())),

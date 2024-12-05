@@ -55,8 +55,8 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
         });
 
         // Initializes MIRAI config.
-        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L75-L92>
-        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L143-L149>
+        // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L75-L92>
+        // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L143-L149>
         let file_name = config
             .input
             .source_name()
@@ -70,8 +70,8 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                 .expect("Expected a valid temp directory."),
         );
         // Sets MIRAI options similar to MIRAI CLI defaults.
-        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/options.rs#L14-L72>
-        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L143-L149>
+        // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/options.rs#L14-L72>
+        // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L143-L149>
         let max_time_body = 60;
         // Between 300 and 600 seconds.
         let max_time_crate = ((5 + self.entry_points.len()) * max_time_body as usize)
@@ -112,7 +112,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
 
         queries.global_ctxt().unwrap().enter(|tcx| {
             // Creates MIRAI crate visitor.
-            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L130-L174>
+            // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L130-L174>
             let call_graph_config = mirai_config.options.call_graph_config.to_owned();
             let mut crate_visitor = CrateVisitor {
                 buffered_diagnostics: Vec::new(),
@@ -156,7 +156,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             });
 
             // Creates "summaries" for "contracts" (if any) with MIRAI.
-            // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#summaries>
+            // Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#summaries>
             if let Some(contracts_mod_def_id) = contracts_mod_def_id {
                 println!(
                     "{} summaries for FRAME and Substrate functions ...",
@@ -275,16 +275,16 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
 }
 
 /// MIRAI configuration.
-/// Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L29-L39>
+/// Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L29-L39>
 #[derive(Debug)]
 struct MiraiConfig {
     // MIRAI options.
-    // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/options.rs#L74-L86>
+    // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/options.rs#L74-L86>
     options: mirai::options::Options,
     /// The relative path of the file being analyzed.
     file_name: String,
     /// A path to the directory where the summary cache should be stored.
-    // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L144-L149>
+    // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L144-L149>
     summary_store_path: String,
 }
 
@@ -292,8 +292,8 @@ struct MiraiConfig {
 //
 // i.e. Runs the abstract interpreter over the function body and produce a summary of its effects and collect any diagnostics.
 //
-// Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/crate_visitor.rs#L126-L127>
-// Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/crate_visitor.rs#L171-L194>
+// Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/crate_visitor.rs#L126-L127>
+// Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/crate_visitor.rs#L171-L194>
 fn analyze<'analysis>(
     def_id: DefId,
     crate_visitor: &mut CrateVisitor<'analysis, '_>,
@@ -313,7 +313,7 @@ fn analyze<'analysis>(
     let summary = body_visitor.visit_body(&[]);
     if is_contract {
         // Caches local "contract" "summaries".
-        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/crate_visitor.rs#L184-L191>
+        // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/crate_visitor.rs#L184-L191>
         crate_visitor.summary_cache.set_summary_for(def_id, summary);
     }
 }
@@ -437,8 +437,8 @@ fn emit_diagnostics(
         // Ignores noisy diagnostics about foreign functions with missing MIR bodies, incomplete analysis e.t.c.
         // Also ignores `mirai_annotations::assume!` related diagnostics because those are likely
         // from our analysis code.
-        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
-        // Ref: <https://github.com/facebookexperimental/MIRAI/blob/main/documentation/Overview.md#incomplete-analysis>
+        // Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
+        // Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#incomplete-analysis>
         let is_noisy = diagnostic
             .messages
             .first()

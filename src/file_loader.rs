@@ -1,4 +1,5 @@
-//! A `FileLoader` that "virtually" adds "analysis-only" external crates and modules to a crate.
+//! A `FileLoader` that "virtually" adds "analysis-only" external crates, module definitions
+//! and unstable feature flags to a crate.
 
 #![allow(clippy::type_complexity)]
 
@@ -10,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use itertools::Itertools;
 
-/// A `FileLoader` that "virtually" adds "analysis-only" external crates and modules to a crate.
+/// A `FileLoader` that "virtually" adds "analysis-only" external crates, module definitions
+/// and unstable feature flags to a crate.
 pub struct VirtualFileLoader {
     file_loader: RealFileLoader,
     // Source map for "virtual" contents for root paths.
