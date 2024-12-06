@@ -41,7 +41,6 @@ use crate::{providers, utils, CallKind, EntrysPointInfo, ENTRY_POINT_FN_PREFIX};
 /// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.call.html>
 ///
 /// Ref: <https://doc.rust-lang.org/reference/items/implementations.html#inherent-implementations>
-
 pub struct EntryPointsCallbacks<'compilation> {
     /// Map from generated entry point `fn` names and their definitions, a stable `DefPathHash`
     /// of the target pallet `fn` and it's [`CallKind`].
@@ -266,6 +265,7 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                             config_trait_local_def_id,
                             impl_ty_args,
                             impl_ty_param_to_arg_map,
+                            tcx,
                         ))
                     } else {
                         None
@@ -457,6 +457,7 @@ enum Phase {
 /// Generic info for specializing entry points.
 struct Generics<'tcx> {
     config_trait_local_def_id: LocalDefId,
+    config_super_traits: Vec<DefId>,
     ty_args: Vec<Ty<'tcx>>,
     ty_param_impls: FxHashMap<Symbol, Ty<'tcx>>,
 }
@@ -467,9 +468,21 @@ impl<'tcx> Generics<'tcx> {
         config_trait_local_def_id: LocalDefId,
         ty_args: Vec<Ty<'tcx>>,
         ty_param_impls: FxHashMap<Symbol, Ty<'tcx>>,
+        tcx: TyCtxt,
     ) -> Self {
+        let config_super_traits = tcx
+            .explicit_predicates_of(config_trait_local_def_id)
+            .predicates
+            .iter()
+            .filter_map(|(clause, _)| {
+                clause
+                    .as_trait_clause()
+                    .map(|trait_clause| trait_clause.skip_binder().trait_ref.def_id)
+            })
+            .collect();
         Self {
             config_trait_local_def_id,
+            config_super_traits,
             ty_args,
             ty_param_impls,
         }
@@ -2037,8 +2050,12 @@ fn tractable_param_hir_type<'tcx>(
     {
         let offset = ty.span.lo().to_usize();
         let mut offset_shift = 0;
-        let config_trait_item_names =
-            trait_assoc_item_names(generics.config_trait_local_def_id, tcx);
+        let is_trait_assoc_item = |trait_def_id, name| {
+            tcx.associated_items(trait_def_id)
+                .filter_by_name_unhygienic(name)
+                .next()
+                .is_some()
+        };
         let replacements = ty_generic_params
             .into_iter()
             .map(|(param_ty, arg_ty, generic_param_name)| {
@@ -2046,17 +2063,30 @@ fn tractable_param_hir_type<'tcx>(
                     .expect("Expected tractable generic args");
                 if generic_param_name == config_param_name {
                     if let Some(segment) = config_related_types.get(&param_ty.span) {
-                        let related_ty_name = segment.ident.as_str();
-                        let is_ty_name_in_config_trait = config_trait_item_names
-                            .as_ref()
-                            .is_some_and(|names| names.contains(related_ty_name));
-                        if is_ty_name_in_config_trait {
+                        let related_ty_name = segment.ident.name;
+                        if is_trait_assoc_item(
+                            generics.config_trait_local_def_id.to_def_id(),
+                            related_ty_name,
+                        ) {
                             arg_ty_path = format!(
                                 "<{arg_ty_path} as crate::{}>",
                                 tcx.def_path_str(generics.config_trait_local_def_id)
                             );
                         } else {
-                            arg_ty_path = format!("<{arg_ty_path} as frame_system::Config>");
+                            let mut config_super_trait_path = None;
+                            for config_super_trait_def_id in &generics.config_super_traits {
+                                if is_trait_assoc_item(*config_super_trait_def_id, related_ty_name)
+                                {
+                                    config_super_trait_path =
+                                        Some(tcx.def_path_str(config_super_trait_def_id));
+                                }
+                            }
+                            arg_ty_path = format!(
+                                "<{arg_ty_path} as {}>",
+                                config_super_trait_path
+                                    .as_deref()
+                                    .unwrap_or("frame_system::Config")
+                            );
                         }
                     }
                 }
@@ -2206,26 +2236,6 @@ fn adt_for_impl(impl_: &rustc_hir::Impl) -> Option<DefId> {
         }
     }
     None
-}
-
-/// Returns names of associated items of a trait.
-fn trait_assoc_item_names(
-    trait_local_def_id: LocalDefId,
-    tcx: TyCtxt<'_>,
-) -> Option<FxHashSet<&str>> {
-    let trait_node = tcx.hir_node_by_def_id(trait_local_def_id);
-    let rustc_hir::Node::Item(trait_item) = trait_node else {
-        return None;
-    };
-    let rustc_hir::ItemKind::Trait(.., trait_item_refs) = trait_item.kind else {
-        return None;
-    };
-    Some(
-        trait_item_refs
-            .iter()
-            .map(|item| item.ident.as_str())
-            .collect(),
-    )
 }
 
 /// Checks if an item (given it's `DefId`) is "visible" from the crate root.
