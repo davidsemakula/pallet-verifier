@@ -471,8 +471,8 @@ fn emit_diagnostics(
                 let is_pointer_alloc_issue = || {
                     msg.contains("pointer") && msg.contains("memory") && msg.contains("deallocated")
                 };
-                let is_std_arg_validity_related = || {
-                    let is_iter_related = || {
+                let is_arg_validity_related = || {
+                    let is_from_std = || {
                         diagnostic.children.iter().any(|sub_diag| {
                             sub_diag.span.primary_span().is_some_and(|span| {
                                 source_map.span_to_location_info(span).0.is_some_and(
@@ -486,8 +486,20 @@ fn emit_diagnostics(
                             })
                         })
                     };
+                    let is_in_fn_like_macro = || {
+                        diagnostic.span.primary_span().is_some_and(|span| {
+                            source_map.span_to_snippet(span).is_ok_and(|snippet| {
+                                snippet
+                                    .splitn(2, "!(")
+                                    .collect_tuple()
+                                    .is_some_and(|(name, _)| {
+                                        name.chars().any(|c| c.is_alphanumeric() || c == '_')
+                                    })
+                            })
+                        })
+                    };
                     (msg.contains("invalid args") || msg.contains("dummy argument"))
-                        && is_iter_related()
+                        && (is_from_std() || is_in_fn_like_macro())
                 };
                 is_missing_mir()
                     || msg.contains("incomplete analysis")
@@ -495,7 +507,7 @@ fn emit_diagnostics(
                     || is_truthy_assume()
                     || is_unreachable_assume()
                     || is_pointer_alloc_issue()
-                    || is_std_arg_validity_related()
+                    || is_arg_validity_related()
             });
         if is_noisy {
             diagnostic.cancel();

@@ -42,6 +42,18 @@ pub mod alloc {
     pub mod alloc {
         noop_result!(exchange_malloc, *mut u8);
     }
+
+    pub mod collections {
+        pub mod btree {
+            pub mod map {
+                pub mod entry {
+                    pub mod implement_alloc_collections_btree_map_entry_VacantEntry_generic_par_K_generic_par_V_generic_par_A {
+                        noop_result_custom_ty!(insert);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub mod core {
