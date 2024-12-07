@@ -57,8 +57,8 @@ fn main() {
             if is_primary_package && is_analysis_target() && !is_build_script() && is_test_build() {
                 // Analyzes "primary" package with `pallet-verifier`.
                 // NOTE: Checking for presence of `--test` flag ensures that we don't invoke
-                // `pallet-verifier` on a cyclic dependency (i.e when the "primary" package
-                // is also a dependency of one or more of it's dependencies, typically under `[dev-dependencies]`).
+                // `pallet-verifier` on a cyclic dependency (i.e. when the "primary" package
+                // is also a dependency of one or more of its dependencies, typically under `[dev-dependencies]`).
                 call_pallet_verifier(env::args().skip(2), std::iter::empty(), true);
             } else {
                 // Adds some extra compilation flags for dependencies and build scripts (if necessary).

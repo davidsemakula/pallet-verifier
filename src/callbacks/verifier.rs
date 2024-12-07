@@ -493,7 +493,7 @@ fn emit_diagnostics(
                                     .splitn(2, "!(")
                                     .collect_tuple()
                                     .is_some_and(|(name, _)| {
-                                        name.chars().any(|c| c.is_alphanumeric() || c == '_')
+                                        !name.chars().any(|c| !c.is_alphanumeric() && c != '_')
                                     })
                             })
                         })
