@@ -57,8 +57,9 @@ fn main() {
             if is_primary_package && is_analysis_target() && !is_build_script() && is_test_build() {
                 // Analyzes "primary" package with `pallet-verifier`.
                 // NOTE: Checking for presence of `--test` flag ensures that we don't invoke
-                // `pallet-verifier` on a cyclic dependency (i.e. when the "primary" package
-                // is also a dependency of one or more of its dependencies, typically under `[dev-dependencies]`).
+                // `pallet-verifier` on a cyclic transitive dependency
+                // (i.e. when the "primary" package is also a dependency of one or more of its
+                // dependencies, typically under `[dev-dependencies]`).
                 call_pallet_verifier(env::args().skip(2), std::iter::empty(), true);
             } else {
                 // Adds some extra compilation flags for dependencies and build scripts (if necessary).
@@ -311,7 +312,7 @@ fn call_pallet_verifier(
         ]);
     }
 
-    // Explicitly sets dynamic/shared library path to match `pallet-verifier`.
+    // Explicitly sets dynamic/shared library path to match the compile time value.
     let mut add_dy_lib_path = |dylib_path: &str| {
         cmd.env("LD_LIBRARY_PATH", dylib_path);
         if cfg!(target_os = "macos") {
@@ -445,8 +446,7 @@ fn compile_build_script(rustc_path: String, args: impl Iterator<Item = String>) 
         // Compiles `wasmtime` build scripts (and those of related `wasmtime-*` packages) as no-op binaries.
         let out_dir = cli_utils::arg_value("--out-dir").expect("Expected an output directory arg");
         let dummy_build_file = Path::new(&out_dir).join("build.rs");
-        std::fs::write(&dummy_build_file, "fn main() {}")
-            .expect("Failed to create dummy build file");
+        fs::write(&dummy_build_file, "fn main() {}").expect("Failed to create dummy build file");
         cli_utils::call_rustc(
             Some(rustc_path),
             args.map(|arg| {
@@ -487,7 +487,7 @@ fn is_wasmtime_package() -> bool {
     env::var("CARGO_PKG_NAME").is_ok_and(|name| name.starts_with("wasmtime"))
 }
 
-/// Creates an output directory for dependencies inside the given target.
+/// Creates an output directory for dependencies inside the given target directory.
 fn create_deps_out_dir(target_dir: &Path) -> PathBuf {
     let out_dir = target_dir.join("debug/deps");
     if !out_dir.exists() {
@@ -496,7 +496,7 @@ fn create_deps_out_dir(target_dir: &Path) -> PathBuf {
     out_dir
 }
 
-/// Checks if the `rustc` target (if set) is a target that isn't supported for annotations.
+/// Checks if the `rustc` target (if set) is a target that is NOT supported for annotations.
 ///
 /// This typically happens when a build script manually compiles an artifact and explicitly
 /// sets a `rustc` target that doesn't match the compilation target set by `pallet-verifier`
