@@ -6,6 +6,8 @@
 
 [FRAME pallets][FRAME] are modules used to build/compose [Substrate]-based blockchains.
 
+- [Introductory blog post](https://davidsemakula.com/blog/introducing-pallet-verifier).
+
 [FRAME]: https://docs.substrate.io/learn/runtime-development/#frame
 [Substrate]: https://docs.substrate.io/
 [vulnerabilities]: https://secure-contracts.com/not-so-smart-contracts/substrate/
@@ -101,3 +103,7 @@ Licensed under either [MIT](/LICENSE-MIT) or [Apache-2.0](/LICENSE-APACHE) licen
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
+
+## Acknowledgements
+
+🌱 Funded by: the [Web3 Foundation](https://web3.foundation/).
