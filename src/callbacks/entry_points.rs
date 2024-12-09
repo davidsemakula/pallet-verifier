@@ -50,15 +50,21 @@ pub struct EntryPointsCallbacks<'compilation> {
     item_defs: FxHashSet<String>,
     // Map from crate name to it's rename (e.g. as defined in `Cargo.toml` or via `--extern` rustc flag).
     dep_renames: &'compilation Option<FxHashMap<String, String>>,
+    // Set optional dependency crate names (i.e. as defined in `Cargo.toml`).
+    optional_deps: &'compilation Option<FxHashSet<String>>,
 }
 
 impl<'compilation> EntryPointsCallbacks<'compilation> {
-    pub fn new(dep_renames: &'compilation Option<FxHashMap<String, String>>) -> Self {
+    pub fn new(
+        dep_renames: &'compilation Option<FxHashMap<String, String>>,
+        optional_deps: &'compilation Option<FxHashSet<String>>,
+    ) -> Self {
         Self {
             entry_points: FxHashMap::default(),
             use_decls: FxHashSet::default(),
             item_defs: FxHashSet::default(),
             dep_renames,
+            optional_deps,
         }
     }
 }
@@ -405,7 +411,13 @@ impl<'compilation> EntryPointsCallbacks<'compilation> {
                 .map(|renames| {
                     renames
                         .iter()
-                        .map(|(name, rename)| format!("use {rename} as {name};"))
+                        .filter_map(|(name, rename)| {
+                            let is_optional = self
+                                .optional_deps
+                                .as_ref()
+                                .is_some_and(|optional_deps| optional_deps.contains(name));
+                            (!is_optional).then_some(format!("use {rename} as {name};"))
+                        })
                         .join("\n")
                 })
                 .unwrap_or_default();

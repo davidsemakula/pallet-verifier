@@ -23,6 +23,8 @@ pub const ARG_DEP_FEATURES: &str = "--dep-with-lang-features";
 
 /// Env var for tracking dependency renames from `Cargo.toml`.
 pub const ENV_DEP_RENAMES: &str = "PALLET_VERIFIER_DEP_RENAMES";
+/// Env var for tracking names of optional dependency from `Cargo.toml`.
+pub const ENV_OPTIONAL_DEPS: &str = "PALLET_VERIFIER_OPTIONAL_DEPS";
 
 /// Shows help and version messages (and exits, if necessary).
 ///

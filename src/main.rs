@@ -3,6 +3,7 @@
 mod cli_utils;
 
 use std::{
+    collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     process::{exit, Command},
@@ -10,7 +11,7 @@ use std::{
 
 use cli_utils::{
     ARG_AUTO_ANNOTATIONS_DEP, ARG_COMPILE_ANNOTATIONS, ARG_DEP_ANNOTATE, ARG_DEP_FEATURES,
-    ARG_POINTER_WIDTH, ENV_DEP_RENAMES,
+    ARG_POINTER_WIDTH, ENV_DEP_RENAMES, ENV_OPTIONAL_DEPS,
 };
 
 const COMMAND: &str = "cargo verify-pallet";
@@ -184,7 +185,7 @@ fn call_cargo() {
         cmd.args(["-p", &root_package.name]);
         cmd.env(ENV_PKG_NAME, &root_package.name);
 
-        let dep_renames: std::collections::HashMap<_, _> = root_package
+        let dep_renames: HashMap<_, _> = root_package
             .dependencies
             .iter()
             .filter_map(|dep| {
@@ -195,6 +196,15 @@ fn call_cargo() {
             .collect();
         if let Ok(dep_renames_json) = serde_json::to_string(&dep_renames) {
             cmd.env(ENV_DEP_RENAMES, dep_renames_json);
+        }
+
+        let optional_deps: HashSet<_> = root_package
+            .dependencies
+            .iter()
+            .filter_map(|dep| dep.optional.then_some(dep.name.replace('-', "_")))
+            .collect();
+        if let Ok(optional_deps_json) = serde_json::to_string(&optional_deps) {
+            cmd.env(ENV_OPTIONAL_DEPS, optional_deps_json);
         }
     }
 

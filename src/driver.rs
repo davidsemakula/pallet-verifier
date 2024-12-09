@@ -22,7 +22,7 @@ use itertools::Itertools;
 
 use cli_utils::{
     ARG_AUTO_ANNOTATIONS_DEP, ARG_COMPILE_ANNOTATIONS, ARG_DEP_ANNOTATE, ARG_DEP_FEATURES,
-    ARG_POINTER_WIDTH, ENV_DEP_RENAMES,
+    ARG_POINTER_WIDTH, ENV_DEP_RENAMES, ENV_OPTIONAL_DEPS,
 };
 use pallet_verifier::{
     DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntrysPointInfo,
@@ -129,7 +129,12 @@ fn generate_entry_points(args: &[String]) -> Result<(String, EntrysPointInfo), (
     let dep_renames = env::var(ENV_DEP_RENAMES).ok().and_then(|dep_renames_json| {
         serde_json::from_str::<rustc_hash::FxHashMap<String, String>>(&dep_renames_json).ok()
     });
-    let mut callbacks = EntryPointsCallbacks::new(&dep_renames);
+    let optional_deps = env::var(ENV_OPTIONAL_DEPS)
+        .ok()
+        .and_then(|optional_deps_json| {
+            serde_json::from_str::<rustc_hash::FxHashSet<String>>(&optional_deps_json).ok()
+        });
+    let mut callbacks = EntryPointsCallbacks::new(&dep_renames, &optional_deps);
     let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(target_path, &[], true);
