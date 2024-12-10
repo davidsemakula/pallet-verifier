@@ -6,7 +6,7 @@
 
 [FRAME pallets][FRAME] are modules used to build/compose [Substrate]-based blockchains.
 
-- [Introductory blog post](https://davidsemakula.com/blog/introducing-pallet-verifier).
+- [Introductory blog post][blog-intro].
 
 [FRAME]: https://docs.substrate.io/learn/runtime-development/#frame
 [Substrate]: https://docs.substrate.io/
@@ -16,6 +16,7 @@
 [data-flow]: https://en.wikipedia.org/wiki/Data-flow_analysis
 [abs-int]: https://en.wikipedia.org/wiki/Abstract_interpretation
 [symbex]: https://en.wikipedia.org/wiki/Symbolic_execution
+[blog-intro]: https://davidsemakula.com/blog/introducing-pallet-verifier
 
 **NOTE:** 🚧 This project is still work in progress, check back over the next few weeks for regular updates.
 
@@ -82,7 +83,7 @@ cargo doc --no-deps --open
 
 ### Architecture Documentation
 
-To learn more about how `pallet-verifier` works under the hood, check out [ARCHITECTURE.md](/ARCHITECTURE.md).
+To learn more about how `pallet-verifier` works under the hood, check out [ARCHITECTURE.md](/ARCHITECTURE.md) ([see also][blog-intro]).
 
 ## Testing
 

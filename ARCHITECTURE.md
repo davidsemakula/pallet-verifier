@@ -62,12 +62,48 @@ will also be targeted in the future.
 [randomness]: https://secure-contracts.com/not-so-smart-contracts/substrate/randomness/
 [validate-unsigned]: https://secure-contracts.com/not-so-smart-contracts/substrate/validate_unsigned/
 
-**NOTE:** `pallet-verifier` assumes a 32 bit [target pointer width][rustc-target-pointer-width] by default
+Additionally, unlike [linting tools][lint] which simply detect problematic [syntactic][syntax] patterns
+(e.g. [clippy], [dylint] e.t.c), `pallet-verifier` (using [MIRAI]) goes beyond this by performing a
+[flow, path and context-sentitive][analysis-sensitivity] analysis (see also [this][MIRAI-use] and [this][MIRAI-abs-int])
+which evaluates the [reachability] of problematic code paths/program states before issuing warnings.
+As a concrete example, `pallet-verifier` will not issue a warning for the following code block,
+because the branch condition precludes an arithmetic overflow.
+
+```rust
+fn bounded_increment(x: u8, bound: u8) -> u8 {
+  if x < bound {
+    x + 1 // this cannot overflow because `bound <= u8::MAX`
+  } else {
+    bound
+  }
+}
+```
+
+[lint]: https://en.wikipedia.org/wiki/Lint_(software)
+[clippy]: https://github.com/rust-lang/rust-clippy
+[dylint]: https://github.com/trailofbits/dylint
+[syntax]: https://en.wikipedia.org/wiki/Syntax_(programming_languages)
+[analysis-sensitivity]: https://en.wikipedia.org/wiki/Data-flow_analysis#Sensitivities
+[MIRAI-use]: https://github.com/endorlabs/MIRAI/blob/main/README.md#who-should-use-mirai
+[reachability]: https://en.wikipedia.org/wiki/Reachability_analysis
+
+Lastly, `pallet-verifier` assumes a 32 bit [target pointer width][rustc-target-pointer-width] by default
 (i.e. the same pointer width as the `wasm32` and `riscv32` targets), however, this can be overridden using
 the `--pointer-width` argument which accepts a value of either `32` or `64` (e.g. `cargo verify-pallet --pointer-width 64`).
-However, the 64 bit target pointer width option is currently only supported on 64 bit host machines.
+The target pointer width is especially relevant for [integer cast/`as` conversions][as-conversions] involving
+pointer-sized integer types (i.e. `usize` and `isize`). As a concrete example, the integer cast operation below is
+safe in 32 bit execution environments but can overflow in 64 bit execution environments
+
+```rust
+fn convert(val: usize) -> u32 {
+    val as u32
+}
+```
+
+**NOTE:** the 64 bit target pointer width option is currently only supported on 64 bit host machines.
 
 [rustc-target-pointer-width]: https://doc.rust-lang.org/reference/conditional-compilation.html#target_pointer_width
+[as-conversions]: https://doc.rust-lang.org/reference/expressions/operator-expr.html#type-cast-expressions
 
 ## Implementation Details
 
@@ -89,18 +125,11 @@ The [custom rustc driver][rustc-driver-src] operates in two conceptual phases:
 [MIRAI-entrypoint]: https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#entry-points
 [annotations]: https://crates.io/crates/mirai-annotations
 
-### Entry point generation and invariant annotation
+### Entry point generation
 
-[Entry point][MIRAI-entrypoint] generation is implemented via a [custom rustc driver callback][enrty-point-callback-src], 
-while annotations (and assertions) are implemented/added by overriding the [`optimized-mir` query][optimized-mir-query] 
-using a [custom provider][MIR-provider-src] that adds [custom MIR passes][MIR-pass] 
-(e.g. [a pass that finds all integer `as` conversions that are either narrowing or lossy, and adds overflow checks to them][int-cast-overflow-src]).
+[Entry point][MIRAI-entrypoint] generation is implemented via a [custom rustc driver callback][enrty-point-callback-src].
 
 [enrty-point-callback-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/callbacks/entry_points.rs
-[optimized-mir-query]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.optimized_mir
-[MIR-pass]: https://rustc-dev-guide.rust-lang.org/mir/passes.html
-[MIR-provider-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers.rs
-[int-cast-overflow-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers/int_cast_overflow.rs
 
 Automatic "tractable" entry point generation is necessary because [FRAME] is inherently a [generic] framework, 
 as it makes extensive use of [Rust generic types and traits][rust-generics], however, when performing 
@@ -108,10 +137,12 @@ verification/abstract interpretation with [MIRAI],
 ["it is not possible for a generic or higher order function to serve as an entry point"][MIRAI-entrypoint], because 
 ["it is necessary for MIRAI to resolve and analyze all functions that can be reached from an entry point"][MIRAI-entrypoint]
 (see also [this][monomorphization] and [this][lowering-MIR]).
-So `pallet-verifier` automatically generates "tractable" entry points as direct calls to [dispatchable functions/extrinsics][call] 
-(and public associated functions of [inherent implementations][inherent-impls]) using concrete types from unit tests 
-as substitutions for generic types, while keeping the call arguments ["abstract"][MIRAI-abstract-value]
-(in contrast to calls from unit tests which use ["concrete"][MIRAI-abstract-value] call arguments).
+So `pallet-verifier` automatically generates "tractable" entry points as singular direct calls to 
+[dispatchable functions/extrinsics][call] (and public associated functions of [inherent implementations][inherent-impls]) 
+using concrete types from unit tests as substitutions for generic types, while keeping the call arguments 
+["abstract"][MIRAI-abstract-value] (in contrast to unit tests, which use 
+["concrete"][MIRAI-abstract-value] call arguments, and may also exercise a single target function multiple times, 
+leading to under-approximation of program semantics and/or inefficient use of resources during abstract interpretation).
 
 [generic]: https://en.wikipedia.org/wiki/Generic_programming
 [rust-generics]: https://doc.rust-lang.org/book/ch10-00-generics.html
@@ -119,9 +150,20 @@ as substitutions for generic types, while keeping the call arguments ["abstract"
 [lowering-MIR]: https://rustc-dev-guide.rust-lang.org/backend/lowering-mir.html
 [MIRAI-abstract-value]: https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#abstract-values
 
+### Invariant annotations
+
+Annotations are implemented/added by overriding the [`optimized-mir` query][optimized-mir-query] using a 
+[custom provider][MIR-provider-src] that adds [custom MIR passes][MIR-pass]
+(e.g. [a pass that finds all integer `as` conversions that are either narrowing or lossy, and adds overflow checks to them][int-cast-overflow-src]).
+
+[optimized-mir-query]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.optimized_mir
+[MIR-pass]: https://rustc-dev-guide.rust-lang.org/mir/passes.html
+[MIR-provider-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers.rs
+[int-cast-overflow-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers/int_cast_overflow.rs
+
 [Annotations][annotations] are necessary for either adding checks that aren't included by the default Rust compiler 
-(e.g. [overflow checks for narrowing and/or lossy integer cast/`as` conversions][overflow-rfc-updates] 
-(see also [this][overflow-rfc-remove-as] and [this][as-conversions-lossy])), or [declaring invariants][annotations] 
+(e.g. [overflow checks for narrowing and/or lossy integer cast/`as` conversions][overflow-rfc-updates] - see also 
+[this][overflow-rfc-remove-as] and [this][as-conversions-lossy]), or [declaring invariants][annotations] 
 that can't be inferred from source code alone, to improve the accuracy of the verifier and reduce false positives 
 (e.g. [iterator invariant annotations][iterator-annotations-src]).
 
