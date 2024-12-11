@@ -110,6 +110,12 @@ pub mod core {
         pub mod sort {
             noop!(merge_sort);
         }
+
+        pub mod implement_slice_generic_par_T {
+            noop_result!(binary_search, Result<usize, usize>);
+            noop_result!(binary_search_by, Result<usize, usize>);
+            noop_result!(binary_search_by_key, Result<usize, usize>);
+        }
     }
 }
 
