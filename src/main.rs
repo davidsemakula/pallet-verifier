@@ -177,12 +177,25 @@ fn call_cargo() {
     let metadata = metadata_cmd.exec();
 
     // Set target package (if necessary), and persists some package metadata.
+    let pkg_arg = cli_utils::arg_value("-p").or_else(|| cli_utils::arg_value("--package"));
     let root_package = metadata
         .as_ref()
         .ok()
-        .and_then(|metadata| metadata.root_package());
+        .and_then(|metadata| metadata.root_package())
+        .or_else(|| {
+            pkg_arg.as_ref().and_then(|pkg_name| {
+                metadata.as_ref().ok().and_then(|metadata| {
+                    metadata
+                        .workspace_packages()
+                        .into_iter()
+                        .find(|package| &package.name == pkg_name)
+                })
+            })
+        });
     if let Some(root_package) = root_package {
-        cmd.args(["-p", &root_package.name]);
+        if pkg_arg.is_none() {
+            cmd.args(["-p", &root_package.name]);
+        }
         cmd.env(ENV_PKG_NAME, &root_package.name);
 
         let dep_renames: HashMap<_, _> = root_package
@@ -227,8 +240,16 @@ fn call_cargo() {
             .unwrap_or_else(|| current_dir.join("target"));
         target_dir.push("pallet_verifier");
         let is_workspace_member = metadata.as_ref().is_ok_and(|metadata| {
-            metadata.workspace_root != current_dir
-                && current_dir.starts_with(&metadata.workspace_root)
+            if metadata.workspace_root == current_dir {
+                pkg_arg.as_ref().is_some_and(|pkg_name| {
+                    metadata
+                        .workspace_packages()
+                        .iter()
+                        .any(|package| &package.name == pkg_name)
+                })
+            } else {
+                current_dir.starts_with(&metadata.workspace_root)
+            }
         });
         if is_workspace_member {
             if let Some(root_package) = root_package {
