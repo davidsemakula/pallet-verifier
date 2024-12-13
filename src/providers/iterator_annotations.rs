@@ -2,7 +2,7 @@
 
 use rustc_abi::Size;
 use rustc_const_eval::interpret::Scalar;
-use rustc_data_structures::graph::{dominators::Dominators, WithSuccessors};
+use rustc_data_structures::graph::{dominators::Dominators, WithStartNode, WithSuccessors};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{def::DefKind, LangItem};
 use rustc_middle::{
@@ -10,7 +10,7 @@ use rustc_middle::{
         visit::Visitor, BasicBlock, BasicBlockData, BasicBlocks, BinOp, Body, BorrowKind,
         CallSource, Const, ConstValue, HasLocalDecls, LocalDecl, LocalDecls, Location, MirPass,
         Operand, Place, PlaceElem, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
-        UnwindAction,
+        UnwindAction, RETURN_PLACE,
     },
     ty::{GenericArg, ImplSubject, List, Region, ScalarInt, Ty, TyCtxt, TyKind, TypeAndMut},
 };
@@ -641,7 +641,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let mut switch_target_variant_name = "Some".to_string();
         let mut switch_target_variant_idx = variant_idx(LangItem::OptionSome, self.tcx);
         if let Some(target_bb) = target {
-            track_primary_switch_target_transformations(
+            track_safe_primary_opt_result_variant_transformations(
                 &mut switch_target_place,
                 &mut switch_target_bb,
                 &mut switch_target_variant_name,
@@ -778,15 +778,90 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
+        // Tracks collection length/size bound invariants.
+        let mut invariants = Vec::new();
+
+        // Tracks `Result::unwrap_or_else` destination place invariants where
+        // the `unwrap_or_else` second arg is an identity function or closure
+        // (e.g. `std::convert::identity` or `|x| x`) and Result is the return value of
+        // slice `binary_search` methods.
+        // Also tracks/allows "safe" transformations before `unwrap_or_else` call
+        // (e.g. via `Result::inspect`, `Result::inspect_err` e.t.c).
+        // See [`track_safe_result_transformations`] for details.
+        if let Some(target_bb) = target {
+            let mut unwrap_arg_place = *destination;
+            let mut unwrap_arg_def_bb = location.block;
+            track_safe_result_transformations(
+                &mut unwrap_arg_place,
+                &mut unwrap_arg_def_bb,
+                *target_bb,
+                self.basic_blocks,
+                self.tcx,
+            );
+            let unwrap_place_info =
+                call_target(&self.basic_blocks[unwrap_arg_def_bb]).and_then(|next_target| {
+                    // Retrieves `Result::unwrap_else` destination place and next target block (if any).
+                    let next_bb_data = &self.basic_blocks[next_target];
+                    fn crate_adt_and_fn_name_check(
+                        crate_name: &str,
+                        adt_name: &str,
+                        fn_name: &str,
+                    ) -> bool {
+                        matches!(crate_name, "std" | "core")
+                            && adt_name == "Result"
+                            && fn_name == "unwrap_or_else"
+                    }
+                    let (unwrap_dest_place, post_unwrap_target) = safe_transform_destination(
+                        unwrap_arg_place,
+                        next_bb_data,
+                        crate_adt_and_fn_name_check,
+                        self.tcx,
+                    )?;
+                    let next_target_bb = post_unwrap_target?;
+
+                    // Checks that second arg is an identity function or closure and, if true,
+                    // returns unwrap destination place and next target.
+                    // See [`is_identity_fn`] and [`is_identity_closure`] for details.
+                    let unwrap_terminator = next_bb_data.terminator.as_ref()?;
+                    let TerminatorKind::Call {
+                        args: unwrap_args, ..
+                    } = &unwrap_terminator.kind
+                    else {
+                        return None;
+                    };
+                    let unwrap_second_arg = unwrap_args.get(1)?;
+                    let is_identity = is_identity_fn(&unwrap_second_arg.node, self.tcx)
+                        || is_identity_closure(&unwrap_second_arg.node, self.tcx);
+                    is_identity.then_some((unwrap_dest_place, next_target_bb))
+                });
+
+            if let Some((unwrap_place, post_unwrap_target)) = unwrap_place_info {
+                // Declares collection length/size invariant for unwrap place.
+                let annotation_location = Location {
+                    block: post_unwrap_target,
+                    statement_index: 0,
+                };
+                invariants.push((
+                    annotation_location,
+                    unwrap_place,
+                    // index <= collection length/size for `Result::unwrap_or_else`
+                    // where the second arg is an identity function or closure
+                    // (e.g. `std::convert::identity` or `|x| x`).
+                    BinOp::Le,
+                ));
+            }
+        }
+
         // Tracks `Result::Ok` switch target info of return value of slice `binary_search` methods.
         // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
-        // `Option::Some` transformations - see [`track_switch_target_transformations`] for details).
+        // `Option::Some` transformations)
+        // See [`track_safe_primary_opt_result_variant_transformations`] for details.
         let mut switch_target_place = *destination;
         let mut switch_target_bb = location.block;
         let mut switch_target_variant_name = "Ok".to_string();
         let mut switch_target_variant_idx = variant_idx(LangItem::ResultOk, self.tcx);
         if let Some(target_bb) = target {
-            track_primary_switch_target_transformations(
+            track_safe_primary_opt_result_variant_transformations(
                 &mut switch_target_place,
                 &mut switch_target_bb,
                 &mut switch_target_variant_name,
@@ -799,14 +874,14 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Tracks `Result::Err` switch target info of return value of slice `binary_search` methods.
         // Also tracks variant "safe" transformations (e.g. to `Option::Some`, then optionally to
-        // `ControlFlow::Continue` and `Option::Some` transformations
-        //  - see [`track_result_err_switch_target_transformations`] for details).
+        // `ControlFlow::Continue` and `Option::Some` transformations).
+        // See [`track_safe_result_err_transformations`] for details.
         let mut switch_target_place_alt = *destination;
         let mut switch_target_bb_alt = location.block;
         let mut switch_target_variant_name_alt = "Err".to_string();
         let mut switch_target_variant_idx_alt = variant_idx(LangItem::ResultErr, self.tcx);
         if let Some(target_bb) = target {
-            track_result_err_switch_target_transformations(
+            track_safe_result_err_transformations(
                 &mut switch_target_place_alt,
                 &mut switch_target_bb_alt,
                 &mut switch_target_variant_name_alt,
@@ -837,7 +912,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             self.basic_blocks,
         );
 
-        // Composes collection length/size bound annotations
+        // Declares collection length/size bound invariants
         // for variant downcast to `usize` places (if any) for the switch targets.
         for (target_place, target_variant_name, target_variant_idx, cond_op, targets_blocks) in [
             // `Result::Ok` switch target info.
@@ -872,55 +947,60 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                         continue;
                     };
 
-                    // Adds a collection length/size bound annotation.
+                    // Declares a collection length/size bound invariant.
                     let annotation_location = Location {
                         block: target_bb,
                         statement_index: stmt_idx + 1,
                     };
-                    self.annotations.push(Annotation::Len(
-                        annotation_location,
-                        cond_op,
-                        downcast_place,
-                        collection_place,
-                        region,
-                        len_call_def_id,
-                        len_gen_args,
-                    ));
-
-                    // Adds a slice length/size bound annotation.
-                    let slice_len_def_id = self
-                        .tcx
-                        .lang_items()
-                        .get(LangItem::SliceLen)
-                        .expect("Expected `[T]::len` lang item");
-                    if let TyKind::Ref(region, slice_ty, _) =
-                        self.place_ty(*binary_search_arg_place).kind()
-                    {
-                        let slice_len_generics = self.tcx.generics_of(slice_len_def_id);
-                        let slice_len_host_param_def = slice_len_generics
-                            .params
-                            .first()
-                            .expect("Expected `host` generic param");
-                        let slice_len_host_param_value = slice_len_host_param_def
-                            .default_value(self.tcx)
-                            .expect("Expected `host` generic param default value")
-                            .skip_binder();
-                        let gen_ty = slice_ty
-                            .walk()
-                            .nth(1)
-                            .expect("Expected a generic arg for `[T]`");
-                        let gen_args = self.tcx.mk_args(&[gen_ty, slice_len_host_param_value]);
-                        self.annotations.push(Annotation::Len(
-                            annotation_location,
-                            cond_op,
-                            downcast_place,
-                            *binary_search_arg_place,
-                            *region,
-                            slice_len_def_id,
-                            gen_args,
-                        ));
-                    }
+                    invariants.push((annotation_location, downcast_place, cond_op));
                 }
+            }
+        }
+
+        // Composes collection length/size bound annotations for extracted invariants.
+        for (annotation_location, invariant_place, cond_op) in invariants {
+            // Adds a collection length/size bound annotation.
+            self.annotations.push(Annotation::Len(
+                annotation_location,
+                cond_op,
+                invariant_place,
+                collection_place,
+                region,
+                len_call_def_id,
+                len_gen_args,
+            ));
+
+            // Adds a slice length/size bound annotation.
+            let slice_len_def_id = self
+                .tcx
+                .lang_items()
+                .get(LangItem::SliceLen)
+                .expect("Expected `[T]::len` lang item");
+            if let TyKind::Ref(region, slice_ty, _) = self.place_ty(*binary_search_arg_place).kind()
+            {
+                let slice_len_generics = self.tcx.generics_of(slice_len_def_id);
+                let slice_len_host_param_def = slice_len_generics
+                    .params
+                    .first()
+                    .expect("Expected `host` generic param");
+                let slice_len_host_param_value = slice_len_host_param_def
+                    .default_value(self.tcx)
+                    .expect("Expected `host` generic param default value")
+                    .skip_binder();
+                let gen_ty = slice_ty
+                    .walk()
+                    .nth(1)
+                    .expect("Expected a generic arg for `[T]`");
+                let gen_args = self.tcx.mk_args(&[gen_ty, slice_len_host_param_value]);
+                self.annotations.push(Annotation::Len(
+                    annotation_location,
+                    cond_op,
+                    invariant_place,
+                    *binary_search_arg_place,
+                    *region,
+                    slice_len_def_id,
+                    gen_args,
+                ));
             }
         }
     }
@@ -1391,7 +1471,8 @@ fn collect_reachable_loop_successors(
     successors
 }
 
-/// Returns places (if any) of the destination and "other" operand for a unit increment assignment (i.e. `x += 1`).
+/// Returns places (if any) of the destination and "other" operand for a unit increment assignment
+/// (i.e. `x += 1`).
 fn unit_incr_assign_places<'tcx>(stmt: &Statement<'tcx>) -> Option<(Place<'tcx>, Place<'tcx>)> {
     let StatementKind::Assign(assign) = &stmt.kind else {
         return None;
@@ -1576,7 +1657,34 @@ fn variant_idx(lang_item: LangItem, tcx: TyCtxt) -> VariantIdx {
 // `Option::Some`, `Result::Ok` and `ControlFlow::Continue`
 // (e.g. via `std::ops::Try::branch` calls, `Option::ok_or`, `Result::ok`, `Result::map_err`
 // and `Option::inspect` calls e.t.c).
-fn track_primary_switch_target_transformations<'tcx>(
+fn track_safe_result_transformations<'tcx>(
+    switch_target_place: &mut Place<'tcx>,
+    switch_target_bb: &mut BasicBlock,
+    target_bb: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    tcx: TyCtxt,
+) {
+    let mut next_target_bb = Some(target_bb);
+    while let Some(target_bb) = next_target_bb {
+        let target_bb_data = &basic_blocks[target_bb];
+        if let Some((transformer_destination, transformer_target_bb)) =
+            safe_result_transform_destination(*switch_target_place, target_bb_data, tcx)
+        {
+            *switch_target_place = transformer_destination;
+            *switch_target_bb = target_bb;
+            next_target_bb = transformer_target_bb;
+        } else {
+            next_target_bb = None;
+        }
+    }
+}
+
+// Tracks switch target info through "safe" transformations
+// (i.e. ones that don't change the target variant's value) between
+// `Option::Some`, `Result::Ok` and `ControlFlow::Continue`
+// (e.g. via `std::ops::Try::branch` calls, `Option::ok_or`, `Result::ok`, `Result::map_err`
+// and `Option::inspect` calls e.t.c).
+fn track_safe_primary_opt_result_variant_transformations<'tcx>(
     switch_target_place: &mut Place<'tcx>,
     switch_target_bb: &mut BasicBlock,
     switch_target_variant_name: &mut String,
@@ -1618,98 +1726,13 @@ fn track_primary_switch_target_transformations<'tcx>(
     }
 }
 
-/// Returns destination place and target block (if any) of an `std::ops::Try::branch` call
-/// (i.e. `?` operator) where the given place is the first argument.
-fn try_branch_destination<'tcx>(
-    place: Place<'tcx>,
-    bb_data: &BasicBlockData<'tcx>,
-    tcx: TyCtxt,
-) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    let terminator = bb_data.terminator.as_ref()?;
-    let TerminatorKind::Call {
-        func,
-        args,
-        destination,
-        target,
-        ..
-    } = &terminator.kind
-    else {
-        return None;
-    };
-    let (def_id, ..) = func.const_fn_def()?;
-    let try_branch_def_id = tcx
-        .lang_items()
-        .get(LangItem::TryTraitBranch)
-        .expect("Expected `std::ops::Try::branch` lang item");
-    if def_id != try_branch_def_id {
-        return None;
-    }
-    let first_arg_place = args.first().and_then(|arg| match &arg.node {
-        Operand::Copy(place) | Operand::Move(place) => Some(place),
-        Operand::Constant(_) => None,
-    })?;
-    if *first_arg_place != place {
-        return None;
-    }
-
-    Some((*destination, *target))
-}
-
-/// Returns destination place and target block (if any) of a transformation into `Option` that doesn't change
-/// the `Option::Some` variant value, where the given place is the first argument.
-///
-/// (e.g. via `Option::inspect`, `Result::ok` calls e.t.c).
-fn safe_option_some_transform_destination<'tcx>(
-    place: Place<'tcx>,
-    bb_data: &BasicBlockData<'tcx>,
-    tcx: TyCtxt,
-) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
-        matches!(crate_name, "std" | "core")
-            && ((adt_name == "Option"
-                && matches!(
-                    fn_name,
-                    "copied" | "cloned" | "inspect" | "as_ref" | "as_deref"
-                ))
-                || (adt_name == "Result" && fn_name == "ok"))
-    }
-    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
-}
-
-/// Returns destination place and target block (if any) of a transformation into `Result`
-/// that doesn't change the `Result::Ok` variant value, where the given place is the first argument.
-///
-/// (e.g. via `Result::map_err`, `Option::ok_or` calls e.t.c).
-fn safe_result_ok_transform_destination<'tcx>(
-    place: Place<'tcx>,
-    bb_data: &BasicBlockData<'tcx>,
-    tcx: TyCtxt,
-) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
-        matches!(crate_name, "std" | "core")
-            && ((adt_name == "Result"
-                && matches!(
-                    fn_name,
-                    "map_err"
-                        | "copied"
-                        | "cloned"
-                        | "inspect"
-                        | "inspect_err"
-                        | "as_ref"
-                        | "as_derref"
-                ))
-                || (adt_name == "Option" && matches!(fn_name, "ok_or" | "ok_or_else")))
-    }
-    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
-}
-
 // Tracks switch target info through "safe" transformations
 // (i.e. ones that don't change the target variant's value) from
 // `Result::Err` to `Option::Some`, `Result::Ok` and `ControlFlow::Continue`
 // (e.g. via `Result::err`, and then optionally through
 // `std::ops::Try::branch` calls, `Option::ok_or`, `Result::map_err`
 // and `Option::inspect` calls e.t.c).
-fn track_result_err_switch_target_transformations<'tcx>(
+fn track_safe_result_err_transformations<'tcx>(
     switch_target_place: &mut Place<'tcx>,
     switch_target_bb: &mut BasicBlock,
     switch_target_variant_name: &mut String,
@@ -1755,7 +1778,7 @@ fn track_result_err_switch_target_transformations<'tcx>(
     }
 
     if let Some(opt_some_target_bb) = opt_some_target_bb {
-        track_primary_switch_target_transformations(
+        track_safe_primary_opt_result_variant_transformations(
             switch_target_place,
             switch_target_bb,
             switch_target_variant_name,
@@ -1765,6 +1788,122 @@ fn track_result_err_switch_target_transformations<'tcx>(
             tcx,
         );
     }
+}
+
+/// Returns the target block for the given basic block's terminator call (if any).
+fn call_target(bb_data: &BasicBlockData) -> Option<BasicBlock> {
+    let terminator = bb_data.terminator.as_ref()?;
+    if let TerminatorKind::Call { target, .. } = &terminator.kind {
+        *target
+    } else {
+        None
+    }
+}
+
+/// Returns destination place and target block (if any) of an `std::ops::Try::branch` call
+/// (i.e. `?` operator) where the given place is the first argument.
+fn try_branch_destination<'tcx>(
+    place: Place<'tcx>,
+    bb_data: &BasicBlockData<'tcx>,
+    tcx: TyCtxt,
+) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
+    let terminator = bb_data.terminator.as_ref()?;
+    let TerminatorKind::Call {
+        func,
+        args,
+        destination,
+        target,
+        ..
+    } = &terminator.kind
+    else {
+        return None;
+    };
+    let (def_id, ..) = func.const_fn_def()?;
+    let try_branch_def_id = tcx
+        .lang_items()
+        .get(LangItem::TryTraitBranch)
+        .expect("Expected `std::ops::Try::branch` lang item");
+    if def_id != try_branch_def_id {
+        return None;
+    }
+    let first_arg_place = args.first().and_then(|arg| match &arg.node {
+        Operand::Copy(place) | Operand::Move(place) => Some(place),
+        Operand::Constant(_) => None,
+    })?;
+    if *first_arg_place != place {
+        return None;
+    }
+
+    Some((*destination, *target))
+}
+
+/// Returns destination place and target block (if any) of a transformation into `Option`
+/// that doesn't change the `Option::Some` variant value, where the given place is the first argument.
+///
+/// (e.g. via `Option::inspect`, `Result::ok` calls e.t.c).
+fn safe_option_some_transform_destination<'tcx>(
+    place: Place<'tcx>,
+    bb_data: &BasicBlockData<'tcx>,
+    tcx: TyCtxt,
+) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
+    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
+        matches!(crate_name, "std" | "core")
+            && ((adt_name == "Option"
+                && matches!(
+                    fn_name,
+                    "copied" | "cloned" | "inspect" | "as_ref" | "as_deref"
+                ))
+                || (adt_name == "Result" && fn_name == "ok"))
+    }
+    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
+}
+
+/// Returns destination place and target block (if any) of a transformation into `Result`
+/// that doesn't change the `Result::Ok` nor `Result::Err` variant values,
+/// where the given place is the first argument.
+///
+/// (e.g. via `Result::inspect`, `Result::inspect_err` calls e.t.c).
+fn safe_result_transform_destination<'tcx>(
+    place: Place<'tcx>,
+    bb_data: &BasicBlockData<'tcx>,
+    tcx: TyCtxt,
+) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
+    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
+        matches!(crate_name, "std" | "core")
+            && adt_name == "Result"
+            && matches!(
+                fn_name,
+                "copied" | "cloned" | "inspect" | "inspect_err" | "as_ref" | "as_deref"
+            )
+    }
+    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
+}
+
+/// Returns destination place and target block (if any) of a transformation into `Result`
+/// that doesn't change the `Result::Ok` variant value, where the given place is the first argument.
+///
+/// (e.g. via `Result::map_err`, `Option::ok_or` calls e.t.c).
+fn safe_result_ok_transform_destination<'tcx>(
+    place: Place<'tcx>,
+    bb_data: &BasicBlockData<'tcx>,
+    tcx: TyCtxt,
+) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
+    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
+        matches!(crate_name, "std" | "core")
+            && ((adt_name == "Result"
+                && matches!(
+                    fn_name,
+                    "map_err"
+                        | "copied"
+                        | "cloned"
+                        | "inspect"
+                        | "inspect_err"
+                        | "as_ref"
+                        | "as_deref"
+                ))
+                || (adt_name == "Option" && matches!(fn_name, "ok_or" | "ok_or_else")))
+    }
+    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
 }
 
 /// Returns destination place and target block (if any) of a transformation into `Result`
@@ -1781,13 +1920,7 @@ fn safe_result_err_transform_destination<'tcx>(
             && (adt_name == "Result"
                 && matches!(
                     fn_name,
-                    "map"
-                        | "copied"
-                        | "cloned"
-                        | "inspect"
-                        | "inspect_err"
-                        | "as_ref"
-                        | "as_derref"
+                    "map" | "copied" | "cloned" | "inspect" | "inspect_err" | "as_ref" | "as_deref"
                 ))
     }
     safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
@@ -1815,10 +1948,6 @@ fn safe_transform_destination<'tcx>(
     else {
         return None;
     };
-    let (def_id, ..) = func.const_fn_def()?;
-    let fn_name = tcx.item_name(def_id);
-    let crate_name = tcx.crate_name(def_id.krate);
-
     let first_arg = args.first()?;
     let first_arg_place = match first_arg.node {
         Operand::Copy(place) | Operand::Move(place) => Some(place),
@@ -1827,6 +1956,10 @@ fn safe_transform_destination<'tcx>(
     if first_arg_place != place {
         return None;
     }
+
+    let (def_id, ..) = func.const_fn_def()?;
+    let fn_name = tcx.item_name(def_id);
+    let crate_name = tcx.crate_name(def_id.krate);
 
     let assoc_item = tcx.opt_associated_item(def_id)?;
     let impl_def_id = assoc_item.impl_container(tcx)?;
@@ -1840,6 +1973,60 @@ fn safe_transform_destination<'tcx>(
     let is_safe_transform =
         crate_adt_and_fn_name_check(crate_name.as_str(), adt_name.as_str(), fn_name.as_str());
     is_safe_transform.then_some((*destination, *target))
+}
+
+/// Returns true if the operand is the const identity function (i.e. `std::convert::identity`).
+///
+/// Ref: <https://doc.rust-lang.org/std/convert/fn.identity.html>
+fn is_identity_fn(operand: &Operand, tcx: TyCtxt) -> bool {
+    let Some((def_id, ..)) = operand.const_fn_def() else {
+        return false;
+    };
+    let fn_name = tcx.item_name(def_id);
+    let crate_name = tcx.crate_name(def_id.krate);
+    fn_name.as_str() == "identity" && matches!(crate_name.as_str(), "std" | "core")
+}
+
+/// Returns true if the operand is an identity closure (i.e. `|x| x`).
+fn is_identity_closure(operand: &Operand, tcx: TyCtxt) -> bool {
+    let Some(const_op) = operand.constant() else {
+        return false;
+    };
+    let const_op_ty = const_op.const_.ty();
+    let TyKind::Closure(def_id, _) = const_op_ty.kind() else {
+        return false;
+    };
+    let body = tcx.optimized_mir(def_id);
+    let blocks = &body.basic_blocks;
+    if blocks.len() != 1 {
+        return false;
+    }
+    let bb_data = &blocks[blocks.start_node()];
+    let Some(terminator) = &bb_data.terminator else {
+        return false;
+    };
+    if terminator.kind != TerminatorKind::Return {
+        return false;
+    }
+    let stmts = &bb_data.statements;
+    if stmts.len() != 1 {
+        return false;
+    }
+    let stmt = stmts.first().expect("Expected a stmt");
+    let StatementKind::Assign(assign) = &stmt.kind else {
+        return false;
+    };
+    let assign_place = assign.0;
+    let assign_rvalue = &assign.1;
+    if assign_place.local != RETURN_PLACE {
+        return false;
+    }
+    let Rvalue::Use(Operand::Copy(assign_rvalue_place) | Operand::Move(assign_rvalue_place)) =
+        assign_rvalue
+    else {
+        return false;
+    };
+    assign_rvalue_place.local.as_usize() <= body.arg_count
 }
 
 /// Collects target basic blocks (if any) for the given value of a switch on discriminant of given place.
