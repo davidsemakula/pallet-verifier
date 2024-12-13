@@ -1,4 +1,4 @@
-# Pallet Verifier
+# pallet-verifier
 
 `pallet-verifier` is a tool for detecting [common security vulnerabilities][vulnerabilities] and [insecure patterns] in
 [FRAME pallets][FRAME] using [static program analysis][static-analysis] techniques like [data-flow analysis][data-flow],

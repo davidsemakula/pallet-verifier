@@ -1,4 +1,4 @@
-# Pallet Verifier
+# Architecture
 
 ## Introduction
 `pallet-verifier` is a tool for detecting [common security vulnerabilities][vulnerabilities] and [insecure patterns] in

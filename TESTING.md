@@ -1,4 +1,4 @@
-# Pallet Verifier: Testing Guide
+# Testing Guide
 
 ## Setup
 
