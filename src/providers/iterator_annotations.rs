@@ -4,7 +4,7 @@ use rustc_abi::Size;
 use rustc_const_eval::interpret::Scalar;
 use rustc_data_structures::graph::{dominators::Dominators, WithStartNode, WithSuccessors};
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustc_hir::{def::DefKind, LangItem};
+use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
         visit::Visitor, BasicBlock, BasicBlockData, BasicBlocks, BinOp, Body, BorrowKind,
@@ -12,11 +12,14 @@ use rustc_middle::{
         Operand, Place, PlaceElem, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
         UnwindAction, RETURN_PLACE,
     },
-    ty::{GenericArg, ImplSubject, List, Region, ScalarInt, Ty, TyCtxt, TyKind, TypeAndMut},
+    ty::{
+        AssocKind, GenericArg, ImplSubject, List, Region, ScalarInt, Ty, TyCtxt, TyKind, TypeAndMut,
+    },
 };
 use rustc_span::{
     def_id::DefId,
     source_map::{dummy_spanned, Spanned},
+    symbol::Ident,
     Span, Symbol,
 };
 use rustc_target::abi::VariantIdx;
@@ -69,7 +72,7 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
 
         // Adds iterator annotations.
         for annotation in annotations {
-            let location = annotation.location();
+            let location = *annotation.location();
             let Some(basic_block) = body.basic_blocks.get(location.block) else {
                 continue;
             };
@@ -124,92 +127,113 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
                 Annotation::Len(
                     _,
                     cond_op,
-                    dest_place,
+                    op_place,
                     collection_place,
                     collection_region,
-                    collection_len_def_id,
-                    collection_len_gen_args,
+                    collection_len_builder_calls,
                 ) => {
-                    // Sets collection ref place.
-                    let collection_place_ty = collection_place.ty(body.local_decls(), tcx).ty;
-                    let collection_ref_place = if collection_place_ty.is_ref() {
-                        collection_place
-                    } else {
-                        // Creates collection ref statement.
-                        let collection_ty = collection_place.ty(body.local_decls(), tcx).ty;
-                        let collection_ref_ty = Ty::new_ref(
-                            tcx,
-                            collection_region,
-                            TypeAndMut {
-                                ty: collection_ty,
-                                mutbl: rustc_ast::Mutability::Not,
-                            },
-                        );
-                        let collection_ref_local_decl =
-                            LocalDecl::with_source_info(collection_ref_ty, source_info);
-                        let collection_ref_local = body.local_decls.push(collection_ref_local_decl);
-                        let collection_ref_place = Place::from(collection_ref_local);
-                        let collection_ref_rvalue =
-                            Rvalue::Ref(collection_region, BorrowKind::Shared, collection_place);
-                        let collection_ref_stmt = Statement {
-                            source_info,
-                            kind: StatementKind::Assign(Box::new((
-                                collection_ref_place,
-                                collection_ref_rvalue,
-                            ))),
+                    // Initializes variables for tracking state of collection length/size "builder" calls.
+                    let mut current_block = location.block;
+                    let mut current_statements = predecessors;
+                    let mut current_arg_place = collection_place;
+                    let mut final_len_bound_place = None;
+                    for (len_builder_def_id, len_builder_gen_args, len_builder_ty) in
+                        collection_len_builder_calls
+                    {
+                        // Sets arg ref place.
+                        let current_arg_ty = current_arg_place.ty(body.local_decls(), tcx).ty;
+                        let current_arg_ref_place = if current_arg_ty.is_ref() {
+                            current_arg_place
+                        } else {
+                            // Creates arg ref statement.
+                            let current_arg_ref_ty = Ty::new_ref(
+                                tcx,
+                                collection_region,
+                                TypeAndMut {
+                                    ty: current_arg_ty,
+                                    mutbl: rustc_ast::Mutability::Not,
+                                },
+                            );
+                            let current_arg_ref_local_decl =
+                                LocalDecl::with_source_info(current_arg_ref_ty, source_info);
+                            let current_arg_ref_local =
+                                body.local_decls.push(current_arg_ref_local_decl);
+                            let current_arg_ref_place = Place::from(current_arg_ref_local);
+                            let current_arg_ref_rvalue = Rvalue::Ref(
+                                collection_region,
+                                BorrowKind::Shared,
+                                current_arg_place,
+                            );
+                            let current_arg_ref_stmt = Statement {
+                                source_info,
+                                kind: StatementKind::Assign(Box::new((
+                                    current_arg_ref_place,
+                                    current_arg_ref_rvalue,
+                                ))),
+                            };
+                            current_statements.push(current_arg_ref_stmt);
+                            current_arg_ref_place
                         };
-                        predecessors.push(collection_ref_stmt);
-                        collection_ref_place
-                    };
 
-                    // Creates collection length/size annotation block.
-                    let annotation_block_data = BasicBlockData::new(None);
-                    let annotation_block = body.basic_blocks_mut().push(annotation_block_data);
+                        // Creates an empty next block.
+                        let next_block_data = BasicBlockData::new(None);
+                        let next_block = body.basic_blocks_mut().push(next_block_data);
 
-                    // Creates collection length/size call.
-                    let collection_len_local_decl =
-                        LocalDecl::with_source_info(usize_ty, source_info);
-                    let collection_len_local = body.local_decls.push(collection_len_local_decl);
-                    let collection_len_place = Place::from(collection_len_local);
-                    let collection_len_handle = Operand::function_handle(
-                        tcx,
-                        collection_len_def_id,
-                        collection_len_gen_args,
-                        Span::default(),
-                    );
-                    let collection_len_call = Terminator {
-                        source_info,
-                        kind: TerminatorKind::Call {
-                            func: collection_len_handle,
-                            args: vec![dummy_spanned(Operand::Move(collection_ref_place))],
-                            destination: collection_len_place,
-                            target: Some(annotation_block),
-                            unwind: UnwindAction::Unreachable,
-                            call_source: CallSource::Misc,
-                            fn_span: Span::default(),
-                        },
-                    };
+                        // Creates collection length/size "builder" call.
+                        let len_builder_local_decl =
+                            LocalDecl::with_source_info(len_builder_ty, source_info);
+                        let len_builder_local = body.local_decls.push(len_builder_local_decl);
+                        let len_builder_destination_place = Place::from(len_builder_local);
+                        let len_builder_handle = Operand::function_handle(
+                            tcx,
+                            len_builder_def_id,
+                            len_builder_gen_args,
+                            Span::default(),
+                        );
+                        let len_builder_call = Terminator {
+                            source_info,
+                            kind: TerminatorKind::Call {
+                                func: len_builder_handle,
+                                args: vec![dummy_spanned(Operand::Move(current_arg_ref_place))],
+                                destination: len_builder_destination_place,
+                                target: Some(next_block),
+                                unwind: UnwindAction::Unreachable,
+                                call_source: CallSource::Misc,
+                                fn_span: Span::default(),
+                            },
+                        };
 
-                    // Updates current block statements and terminator.
-                    let basic_blocks = body.basic_blocks_mut();
-                    basic_blocks[location.block].statements = predecessors;
-                    basic_blocks[location.block].terminator = Some(collection_len_call);
+                        // Updates current block statements and terminator.
+                        let basic_blocks = body.basic_blocks_mut();
+                        basic_blocks[current_block].statements = current_statements;
+                        basic_blocks[current_block].terminator = Some(len_builder_call);
 
-                    // Creates collection length/size bound statement.
-                    let arg_rvalue = Rvalue::BinaryOp(
-                        cond_op,
-                        Box::new((
-                            Operand::Copy(dest_place),
-                            Operand::Copy(collection_len_place),
-                        )),
-                    );
-                    let arg_stmt = Statement {
-                        source_info,
-                        kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
-                    };
+                        // Next iteration.
+                        current_block = next_block;
+                        current_statements = Vec::new();
+                        current_arg_place = len_builder_destination_place;
+                        final_len_bound_place = Some(len_builder_destination_place);
+                    }
+
+                    // Creates collection length/size bound statement
+                    // (if a length/size call was successfully constructed).
+                    if let Some(final_len_bound_place) = final_len_bound_place {
+                        let arg_rvalue = Rvalue::BinaryOp(
+                            cond_op,
+                            Box::new((
+                                Operand::Copy(op_place),
+                                Operand::Copy(final_len_bound_place),
+                            )),
+                        );
+                        let arg_stmt = Statement {
+                            source_info,
+                            kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
+                        };
+                        current_statements.push(arg_stmt);
+                    }
 
                     // Returns target block and statements.
-                    (annotation_block, vec![arg_stmt])
+                    (current_block, current_statements)
                 }
             };
 
@@ -249,8 +273,7 @@ enum Annotation<'tcx> {
         Place<'tcx>,
         Place<'tcx>,
         Region<'tcx>,
-        DefId,
-        &'tcx List<GenericArg<'tcx>>,
+        Vec<(DefId, &'tcx List<GenericArg<'tcx>>, Ty<'tcx>)>,
     ),
 }
 
@@ -408,7 +431,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let iterator_subject_ty = self.place_ty(iterator_subject_place);
         let is_isize_bound = is_isize_bound_collection(iterator_subject_ty, self.tcx);
         let len_call_info = collection_len_call(iterator_subject_ty, self.tcx);
-        let len_bound_info = len_call_info.and_then(|(len_call_def_id, len_gen_args)| {
+        let len_bound_info = len_call_info.and_then(|len_call_info| {
             let collection_place_info = deref_place_recursive(
                 iterator_subject_place,
                 iterator_subject_bb,
@@ -421,9 +444,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     None
                 }
             });
-            collection_place_info.map(|(collection_place, region)| {
-                (collection_place, region, len_call_def_id, len_gen_args)
-            })
+            collection_place_info
+                .map(|(collection_place, region)| (collection_place, region, len_call_info))
         });
         if !is_isize_bound && len_bound_info.is_none() {
             return;
@@ -482,8 +504,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Composes collection length/size bound annotations for reachable loop successors (if any).
         if !loop_successors.is_empty() && !pre_loop_len_maxima_places.is_empty() {
-            if let Some((collection_place, region, len_call_def_id, len_gen_args)) = len_bound_info
-            {
+            if let Some((collection_place, region, len_call_info)) = len_bound_info {
                 for bb in loop_successors {
                     for len_maxima_place in &pre_loop_len_maxima_places {
                         // Describes a collection length/size bound annotation.
@@ -496,8 +517,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                             *len_maxima_place,
                             collection_place,
                             region,
-                            len_call_def_id,
-                            len_gen_args,
+                            len_call_info.clone(),
                         ));
                     }
                 }
@@ -557,7 +577,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Only continues if `Iterator` target has a known length/size returning function
         // and is passed by reference.
-        let Some((len_call_def_id, len_gen_args)) =
+        let Some(len_call_info) =
             collection_len_call(self.place_ty(iter_by_ref_deref_arg_place), self.tcx)
         else {
             return;
@@ -629,8 +649,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     downcast_place,
                     collection_place,
                     region,
-                    len_call_def_id,
-                    len_gen_args,
+                    len_call_info.clone(),
                 ));
             }
         }
@@ -703,7 +722,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Only continues if slice target has a known length/size returning function
         // and is passed by reference.
-        let Some((len_call_def_id, len_gen_args)) =
+        let Some(len_call_info) =
             collection_len_call(self.place_ty(slice_deref_arg_place), self.tcx)
         else {
             return;
@@ -909,8 +928,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 invariant_place,
                 collection_place,
                 region,
-                len_call_def_id,
-                len_gen_args,
+                len_call_info.clone(),
             ));
 
             // Adds a slice length/size bound annotation.
@@ -941,8 +959,11 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     invariant_place,
                     binary_search_arg_place,
                     *region,
-                    slice_len_def_id,
-                    gen_args,
+                    vec![(
+                        slice_len_def_id,
+                        gen_args,
+                        Ty::new_uint(self.tcx, UintTy::Usize),
+                    )],
                 ));
             }
         }
@@ -1172,7 +1193,8 @@ fn find_size_invariant_iterator_subject<'tcx>(
             basic_blocks,
             dominators,
         )?;
-        let iter_by_ref_ty_place = iter_by_ref_operand(&iter_by_ref_terminator, tcx)?;
+        let iter_by_ref_ty_place = iter_by_ref_operand(&iter_by_ref_terminator, tcx)
+            .or_else(|| into_iter_operand(&iter_by_ref_terminator, tcx))?;
         iterator_subject_place = iter_by_ref_ty_place;
         iterator_subject_bb = iter_by_ref_bb;
     }
@@ -1391,43 +1413,85 @@ fn deref_operand<'tcx>(terminator: &Terminator<'tcx>, tcx: TyCtxt<'tcx>) -> Opti
 fn collection_len_call<'tcx>(
     ty: Ty<'tcx>,
     tcx: TyCtxt<'tcx>,
-) -> Option<(DefId, &'tcx List<GenericArg<'tcx>>)> {
-    match ty.peel_refs().kind() {
-        TyKind::Adt(adt_def, gen_args) => {
-            let adt_def_id = adt_def.did();
-            let assoc_fn_def = |name: &str| {
-                tcx.inherent_impls(adt_def_id).ok().and_then(|impls_| {
-                    impls_.iter().find_map(|impl_def_id| {
-                        tcx.associated_item_def_ids(impl_def_id)
-                            .iter()
-                            .find(|assoc_item_def_id| {
-                                tcx.item_name(**assoc_item_def_id).as_str() == name
-                                    && tcx.def_kind(*assoc_item_def_id) == DefKind::AssocFn
-                            })
-                    })
-                })
-            };
+) -> Option<Vec<(DefId, &'tcx List<GenericArg<'tcx>>, Ty<'tcx>)>> {
+    let base_ty = ty.peel_refs();
+    let TyKind::Adt(adt_def, gen_args) = base_ty.kind() else {
+        return None;
+    };
+    let adt_def_id = adt_def.did();
 
-            match (
-                tcx.crate_name(adt_def_id.krate).as_str(),
-                tcx.item_name(adt_def_id).as_str(),
-            ) {
-                (
-                    "std" | "alloc",
-                    "Vec" | "VecDeque" | "LinkedList" | "BTreeSet" | "BTreeMap" | "BinaryHeap",
-                )
-                | ("std" | "hashbrown", "HashSet" | "HashMap")
-                | ("hashbrown", "HashTable")
-                | (
-                    "bounded_collections" | "frame_support",
-                    "BoundedVec" | "BoundedSlice" | "WeakBoundedVec" | "BoundedBTreeSet"
-                    | "BoundedBTreeMap",
-                ) => assoc_fn_def("len")
-                    .map(|def_id| (*def_id, *gen_args))
-                    .filter(|(def_id, _)| tcx.is_mir_available(def_id)),
-                _ => None,
-            }
-        }
+    // Finds associated function by name.
+    let assoc_fn_def = |name: &str| {
+        tcx.inherent_impls(adt_def_id).ok().and_then(|impls_| {
+            impls_.iter().find_map(|impl_def_id| {
+                tcx.associated_items(impl_def_id)
+                    .find_by_name_and_kind(tcx, Ident::from_str(name), AssocKind::Fn, *impl_def_id)
+                    .map(|assoc_item| assoc_item.def_id)
+                /*.and_then(|assoc_item| {
+                    tcx.is_mir_available(assoc_item.def_id).then_some(vec![(
+                        assoc_item.def_id,
+                        *gen_args,
+                        Ty::new_uint(tcx, UintTy::Usize),
+                    )])
+                })*/
+            })
+        })
+    };
+
+    // Finds associated function on `Deref` target.
+    let deref_target_assoc_fn = || {
+        let deref_trait_def_id = tcx
+            .lang_items()
+            .get(LangItem::Deref)
+            .expect("Expected `std::ops::Deref` lang item");
+        let deref_impl = tcx
+            .non_blanket_impls_for_ty(deref_trait_def_id, base_ty)
+            .next()?;
+        let deref_assoc_items = tcx.associated_items(deref_impl);
+        let deref_fn_assoc_item = deref_assoc_items.find_by_name_and_kind(
+            tcx,
+            Ident::from_str("deref"),
+            AssocKind::Fn,
+            deref_impl,
+        )?;
+        let deref_target_assoc_item = deref_assoc_items.find_by_name_and_kind(
+            tcx,
+            Ident::from_str("Target"),
+            AssocKind::Type,
+            deref_impl,
+        )?;
+        let deref_target_ty = tcx
+            .type_of(deref_target_assoc_item.def_id)
+            .instantiate(tcx, gen_args);
+
+        let deref_len_call_info = collection_len_call(deref_target_ty, tcx);
+        deref_len_call_info.map(|mut deref_len_call_info| {
+            deref_len_call_info.splice(
+                ..0,
+                [(deref_fn_assoc_item.def_id, *gen_args, deref_target_ty)],
+            );
+            deref_len_call_info
+        })
+    };
+
+    match (
+        tcx.crate_name(adt_def_id.krate).as_str(),
+        tcx.item_name(adt_def_id).as_str(),
+    ) {
+        (
+            "std" | "alloc",
+            "Vec" | "VecDeque" | "LinkedList" | "BTreeSet" | "BTreeMap" | "BinaryHeap",
+        )
+        | ("std" | "hashbrown", "HashSet" | "HashMap")
+        | ("hashbrown", "HashTable")
+        | (
+            "bounded_collections" | "frame_support",
+            "BoundedVec" | "BoundedSlice" | "WeakBoundedVec" | "BoundedBTreeSet"
+            | "BoundedBTreeMap",
+        ) => assoc_fn_def("len")
+            .filter(|def_id| tcx.is_mir_available(def_id))
+            .map(|def_id| vec![(def_id, *gen_args, Ty::new_uint(tcx, UintTy::Usize))])
+            .or_else(deref_target_assoc_fn),
         _ => None,
     }
 }
