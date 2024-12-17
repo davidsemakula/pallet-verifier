@@ -218,10 +218,15 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
                     // Creates collection length/size bound statement
                     // (if a length/size call was successfully constructed).
                     if let Some(final_len_bound_place) = final_len_bound_place {
+                        let deref_op_place = if op_place.ty(body.local_decls(), tcx).ty.is_ref() {
+                            tcx.mk_place_deref(op_place)
+                        } else {
+                            op_place
+                        };
                         let arg_rvalue = Rvalue::BinaryOp(
                             cond_op,
                             Box::new((
-                                Operand::Copy(op_place),
+                                Operand::Copy(deref_op_place),
                                 Operand::Copy(final_len_bound_place),
                             )),
                         );
@@ -1427,13 +1432,6 @@ fn collection_len_call<'tcx>(
                 tcx.associated_items(impl_def_id)
                     .find_by_name_and_kind(tcx, Ident::from_str(name), AssocKind::Fn, *impl_def_id)
                     .map(|assoc_item| assoc_item.def_id)
-                /*.and_then(|assoc_item| {
-                    tcx.is_mir_available(assoc_item.def_id).then_some(vec![(
-                        assoc_item.def_id,
-                        *gen_args,
-                        Ty::new_uint(tcx, UintTy::Usize),
-                    )])
-                })*/
             })
         })
     };
@@ -2167,7 +2165,7 @@ fn collect_switch_targets_for_discr_value<'tcx>(
             }
             already_visited.insert(bb);
 
-            // Finds `Option::Some` switch target (if any).
+            // Finds switch target (if any) for the discriminant with the given value.
             if let Some(target_bb) =
                 switch_target_for_discr_value(destination, value, &basic_blocks[bb])
             {
@@ -2223,7 +2221,7 @@ fn switch_target_for_discr_value<'tcx>(
 
 /// Returns place (if any) for the variant downcast to `usize` of given place.
 fn variant_downcast_to_usize_place<'tcx>(
-    place: Place,
+    place: Place<'tcx>,
     variant_name: &str,
     variant_idx: VariantIdx,
     stmt: &Statement<'tcx>,
@@ -2232,9 +2230,11 @@ fn variant_downcast_to_usize_place<'tcx>(
     let StatementKind::Assign(assign) = &stmt.kind else {
         return None;
     };
-    let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) = &assign.1 else {
-        return None;
-    };
+    let op_place = match &assign.1 {
+        Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place))
+        | Rvalue::Ref(_, _, op_place) => Some(op_place),
+        _ => None,
+    }?;
     if op_place.local != place.local {
         return None;
     }

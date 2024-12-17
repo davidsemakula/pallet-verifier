@@ -50,6 +50,10 @@ pub mod alloc {
                     pub mod implement_alloc_collections_btree_map_entry_VacantEntry_generic_par_K_generic_par_V_generic_par_A {
                         noop_result_custom_ty!(insert);
                     }
+
+                    pub mod implement_alloc_collections_btree_map_entry_OccupiedEntry_generic_par_K_generic_par_V_generic_par_A {
+                        noop_result_custom_ty!(remove_kv);
+                    }
                 }
             }
         }
