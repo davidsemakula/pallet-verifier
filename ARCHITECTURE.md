@@ -85,7 +85,7 @@ fn bounded_increment(x: u8, bound: u8) -> u8 {
 [syntax]: https://en.wikipedia.org/wiki/Syntax_(programming_languages)
 [analysis-sensitivity]: https://en.wikipedia.org/wiki/Data-flow_analysis#Sensitivities
 [MIRAI-use]: https://github.com/endorlabs/MIRAI/blob/main/README.md#who-should-use-mirai
-[reachability]: https://en.wikipedia.org/wiki/Reachability_analysis
+[reachability]: https://en.wikipedia.org/wiki/Reachability_problem
 
 Lastly, `pallet-verifier` assumes a 32 bit [target pointer width][rustc-target-pointer-width] by default
 (i.e. the same pointer width as the `wasm32` and `riscv32` targets), however, this can be overridden using

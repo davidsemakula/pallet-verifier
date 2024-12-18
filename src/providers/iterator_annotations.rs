@@ -359,6 +359,14 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 self.process_iterator_position(args, destination, target.as_ref(), location);
             }
 
+            // Handles calls to `std::iter::Iterator::count`.
+            let iterator_count_def_id = *self
+                .iterator_assoc_item_def_id("count")
+                .expect("Expected DefId for `std::iter::Iterator::count`");
+            if def_id == iterator_count_def_id {
+                self.process_iterator_count(args, destination, target.as_ref(), location);
+            }
+
             // Handles calls to collection `len` methods.
             if self
                 .tcx
@@ -488,7 +496,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     )
                 });
                 if let Some((_, op_place)) = inc_invariant_places {
-                    // Describes an `isize::MAX` bound annotation.
+                    // Declares an `isize::MAX` bound annotation.
                     if is_isize_bound {
                         self.annotations.push(Annotation::Isize(
                             Location {
@@ -512,7 +520,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             if let Some((collection_place, region, len_call_info)) = len_bound_info {
                 for bb in loop_successors {
                     for len_maxima_place in &pre_loop_len_maxima_places {
-                        // Describes a collection length/size bound annotation.
+                        // Declares a collection length/size bound annotation.
                         self.annotations.push(Annotation::Len(
                             Location {
                                 block: bb,
@@ -611,13 +619,13 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let mut switch_target_bb = location.block;
         let mut switch_target_variant_name = "Some".to_string();
         let mut switch_target_variant_idx = variant_idx(LangItem::OptionSome, self.tcx);
-        if let Some(target_bb) = target {
+        if let Some(target) = target {
             track_safe_primary_opt_result_variant_transformations(
                 &mut switch_target_place,
                 &mut switch_target_bb,
                 &mut switch_target_variant_name,
                 &mut switch_target_variant_idx,
-                *target_bb,
+                *target,
                 self.basic_blocks,
                 self.tcx,
             );
@@ -644,7 +652,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     continue;
                 };
 
-                // Describes a collection length/size bound annotation.
+                // Declares a collection length/size bound annotation.
                 self.annotations.push(Annotation::Len(
                     Location {
                         block: target_bb,
@@ -652,6 +660,121 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     },
                     BinOp::Lt,
                     downcast_place,
+                    collection_place,
+                    region,
+                    len_call_info.clone(),
+                ));
+            }
+        }
+    }
+
+    /// Analyzes and annotates calls to `std::iter::Iterator::next`.
+    fn process_iterator_count(
+        &mut self,
+        args: &[Spanned<Operand<'tcx>>],
+        destination: &Place<'tcx>,
+        target: Option<&BasicBlock>,
+        location: Location,
+    ) {
+        // Finds place for `std::iter::Iterator::next` operand/arg.
+        let iterator_next_arg = args.first().expect("Expected an arg for `Iterator::next`");
+        let Some(iterator_next_arg_place) = iterator_next_arg.node.place() else {
+            return;
+        };
+
+        // Only continues if the terminator has a target basic block.
+        let Some(target) = target else {
+            return;
+        };
+
+        // Finds place and basic block (if any) of innermost iterator subject to which
+        // no "growing" iterator adapters are applied.
+        let dominators = self.basic_blocks.dominators();
+        let Some((mut iterator_subject_place, mut iterator_subject_bb)) =
+            find_size_invariant_iterator_subject(
+                iterator_next_arg_place,
+                location.block,
+                self.basic_blocks,
+                self.local_decls,
+                dominators,
+                self.tcx,
+            )
+        else {
+            return;
+        };
+
+        // Length invariant annotation are added at the beginning of the next block.
+        let annotation_location = Location {
+            block: *target,
+            statement_index: 0,
+        };
+
+        // Finds place and basic block for a slice `Iterator` operand/arg (if any).
+        if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
+            // Adds a slice length/size bound annotation.
+            self.add_slice_len_annotation(
+                annotation_location,
+                BinOp::Eq,
+                *destination,
+                iterator_subject_place,
+            );
+
+            // Finds `Deref` arg/operand for slice.
+            let slice_def_call = find_pre_anchor_assign_terminator(
+                iterator_subject_place,
+                iterator_subject_bb,
+                location.block,
+                self.basic_blocks,
+                dominators,
+            );
+            let Some((slice_deref_arg_place, slice_deref_bb)) =
+                slice_def_call.and_then(|(terminator, bb)| {
+                    deref_operand(&terminator, self.tcx).map(|place| (place, bb))
+                })
+            else {
+                return;
+            };
+            iterator_subject_place = slice_deref_arg_place;
+            iterator_subject_bb = slice_deref_bb;
+        }
+
+        // Declares an `isize::MAX` bound annotation (if appropriate).
+        let iterator_subject_ty = self.place_ty(iterator_subject_place);
+        let is_isize_bound =
+            is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx);
+        if is_isize_bound {
+            self.annotations.push(Annotation::Isize(
+                Location {
+                    block: *target,
+                    statement_index: 0,
+                },
+                *destination,
+            ));
+        }
+
+        // Declares a collection length/size bound annotation (if appropriate).
+        let len_call_info = collection_len_call(iterator_subject_ty, self.tcx);
+        if let Some(len_call_info) = len_call_info {
+            let collection_place_info = deref_place_recursive(
+                iterator_subject_place,
+                iterator_subject_bb,
+                self.basic_blocks,
+            )
+            .or_else(|| {
+                if let TyKind::Ref(region, _, _) = iterator_subject_ty.kind() {
+                    Some((iterator_subject_place, *region))
+                } else {
+                    None
+                }
+            });
+            if let Some((collection_place, region)) = collection_place_info {
+                self.annotations.push(Annotation::Len(
+                    Location {
+                        block: *target,
+                        statement_index: 0,
+                    },
+                    BinOp::Eq,
+                    *destination,
                     collection_place,
                     region,
                     len_call_info.clone(),
@@ -682,7 +805,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Describes an `isize::MAX` bound annotation.
+        // Declares an `isize::MAX` bound annotation.
         self.annotations.push(Annotation::Isize(
             Location {
                 block: *target,
@@ -755,13 +878,13 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Also tracks/allows "safe" transformations before `unwrap_or_else` call
         // (e.g. via `Result::inspect`, `Result::inspect_err` e.t.c).
         // See [`track_safe_result_transformations`] for details.
-        if let Some(target_bb) = target {
+        if let Some(target) = target {
             let mut unwrap_arg_place = *destination;
             let mut unwrap_arg_def_bb = location.block;
             track_safe_result_transformations(
                 &mut unwrap_arg_place,
                 &mut unwrap_arg_def_bb,
-                *target_bb,
+                *target,
                 self.basic_blocks,
                 self.tcx,
             );
@@ -827,13 +950,13 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let mut switch_target_bb = location.block;
         let mut switch_target_variant_name = "Ok".to_string();
         let mut switch_target_variant_idx = variant_idx(LangItem::ResultOk, self.tcx);
-        if let Some(target_bb) = target {
+        if let Some(target) = target {
             track_safe_primary_opt_result_variant_transformations(
                 &mut switch_target_place,
                 &mut switch_target_bb,
                 &mut switch_target_variant_name,
                 &mut switch_target_variant_idx,
-                *target_bb,
+                *target,
                 self.basic_blocks,
                 self.tcx,
             );
@@ -847,13 +970,13 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let mut switch_target_bb_alt = location.block;
         let mut switch_target_variant_name_alt = "Err".to_string();
         let mut switch_target_variant_idx_alt = variant_idx(LangItem::ResultErr, self.tcx);
-        if let Some(target_bb) = target {
+        if let Some(target) = target {
             track_safe_result_err_transformations(
                 &mut switch_target_place_alt,
                 &mut switch_target_bb_alt,
                 &mut switch_target_variant_name_alt,
                 &mut switch_target_variant_idx_alt,
-                *target_bb,
+                *target,
                 self.basic_blocks,
                 self.tcx,
             );
@@ -937,41 +1060,18 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             ));
 
             // Adds a slice length/size bound annotation.
-            let slice_len_def_id = self
-                .tcx
-                .lang_items()
-                .get(LangItem::SliceLen)
-                .expect("Expected `[T]::len` lang item");
-            if let TyKind::Ref(region, slice_ty, _) = self.place_ty(binary_search_arg_place).kind()
-            {
-                let slice_len_generics = self.tcx.generics_of(slice_len_def_id);
-                let slice_len_host_param_def = slice_len_generics
-                    .params
-                    .first()
-                    .expect("Expected `host` generic param");
-                let slice_len_host_param_value = slice_len_host_param_def
-                    .default_value(self.tcx)
-                    .expect("Expected `host` generic param default value")
-                    .skip_binder();
-                let gen_ty = slice_ty
-                    .walk()
-                    .nth(1)
-                    .expect("Expected a generic arg for `[T]`");
-                let gen_args = self.tcx.mk_args(&[gen_ty, slice_len_host_param_value]);
-                self.annotations.push(Annotation::Len(
-                    annotation_location,
-                    cond_op,
-                    invariant_place,
-                    binary_search_arg_place,
-                    *region,
-                    vec![(
-                        slice_len_def_id,
-                        gen_args,
-                        Ty::new_uint(self.tcx, UintTy::Usize),
-                    )],
-                ));
-            }
+            self.add_slice_len_annotation(
+                annotation_location,
+                cond_op,
+                invariant_place,
+                binary_search_arg_place,
+            );
         }
+    }
+
+    /// Returns the DefId of an `Iterator` assoc item, given it's name.
+    fn iterator_assoc_item_def_id(&self, name: &str) -> Option<&DefId> {
+        self.iterator_assoc_items.get(&Symbol::intern(name))
     }
 
     /// Returns the type for the given place.
@@ -979,9 +1079,51 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         place.ty(self.local_decls, self.tcx).ty
     }
 
-    /// Returns the DefId of an `Iterator` assoc item, given it's name.
-    fn iterator_assoc_item_def_id(&self, name: &str) -> Option<&DefId> {
-        self.iterator_assoc_items.get(&Symbol::intern(name))
+    /// Adds a slice length/size bound annotation.
+    fn add_slice_len_annotation(
+        &mut self,
+        annotation_location: Location,
+        cond_op: BinOp,
+        invariant_place: Place<'tcx>,
+        slice_place: Place<'tcx>,
+    ) {
+        let TyKind::Ref(region, slice_ty, _) = self.place_ty(slice_place).kind() else {
+            return;
+        };
+        if !slice_ty.is_slice() {
+            return;
+        }
+        let slice_len_def_id = self
+            .tcx
+            .lang_items()
+            .get(LangItem::SliceLen)
+            .expect("Expected `[T]::len` lang item");
+        let slice_len_generics = self.tcx.generics_of(slice_len_def_id);
+        let slice_len_host_param_def = slice_len_generics
+            .params
+            .first()
+            .expect("Expected `host` generic param");
+        let slice_len_host_param_value = slice_len_host_param_def
+            .default_value(self.tcx)
+            .expect("Expected `host` generic param default value")
+            .skip_binder();
+        let gen_ty = slice_ty
+            .walk()
+            .nth(1)
+            .expect("Expected a generic arg for `[T]`");
+        let gen_args = self.tcx.mk_args(&[gen_ty, slice_len_host_param_value]);
+        self.annotations.push(Annotation::Len(
+            annotation_location,
+            cond_op,
+            invariant_place,
+            slice_place,
+            *region,
+            vec![(
+                slice_len_def_id,
+                gen_args,
+                Ty::new_uint(self.tcx, UintTy::Usize),
+            )],
+        ));
     }
 }
 
@@ -1165,7 +1307,9 @@ fn find_size_invariant_iterator_subject<'tcx>(
         basic_blocks,
         dominators,
     )?;
-    let mut iterator_subject_place = into_iter_operand(&terminator, tcx)?;
+    let mut iterator_subject_place = into_iter_operand(&terminator, tcx)
+        .or_else(|| iter_by_ref_operand(&terminator, tcx))
+        .or_else(|| iterator_adapter_operand(&terminator, tcx))?;
 
     // Finds place and basic block for the innermost "non-growing" `Iterator` adapter operand/arg (if any).
     track_size_invariant_iterator_transformations(
