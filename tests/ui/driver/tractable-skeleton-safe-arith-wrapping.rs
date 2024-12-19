@@ -1,32 +1,37 @@
 use std::marker::PhantomData;
 use std::num::Wrapping;
 
-pub trait Config {}
+pub mod pallet {
+    use super::*;
 
-pub enum Call<T: Config> {
-    __Ignore(PhantomData<T>),
-    do_something { val: Wrapping<u8> },
-}
+    pub trait Config {}
 
-pub struct Pallet<T: Config>(PhantomData<T>);
+    pub enum Call<T: Config> {
+        __Ignore(PhantomData<T>),
+        do_something { val: Wrapping<u8> },
+    }
 
-pub enum OriginFor<T> {
-    Simple,
-    Complex(T),
-}
+    pub struct Pallet<T: Config>(PhantomData<T>);
 
-impl<T: Config> Pallet<T> {
-    pub fn do_something(
-        origin: OriginFor<T>,
-        val: Wrapping<u8>,
-    ) {
-        val + Wrapping(1);
+    pub enum OriginFor<T> {
+        Simple,
+        Complex(T),
+    }
+
+    impl<T: Config> Pallet<T> {
+        pub fn do_something(
+            origin: OriginFor<T>,
+            val: Wrapping<u8>,
+        ) {
+            val + Wrapping(1);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::pallet::*;
 
     pub struct MyConfig;
     impl Config for MyConfig {}

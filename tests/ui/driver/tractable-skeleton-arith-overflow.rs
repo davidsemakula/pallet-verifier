@@ -1,31 +1,36 @@
 use std::marker::PhantomData;
 
-pub trait Config {}
+pub mod pallet {
+    use super::*;
 
-pub enum Call<T: Config> {
-    __Ignore(PhantomData<T>),
-    do_something { val: u8 },
-}
+    pub trait Config {}
 
-pub struct Pallet<T: Config>(PhantomData<T>);
+    pub enum Call<T: Config> {
+        __Ignore(PhantomData<T>),
+        do_something { val: u8 },
+    }
 
-pub enum OriginFor<T> {
-    Simple,
-    Complex(T),
-}
+    pub struct Pallet<T: Config>(PhantomData<T>);
 
-impl<T: Config> Pallet<T> {
-    pub fn do_something(
-        origin: OriginFor<T>,
-        val: u8,
-    ) {
-        val + 1; //~ WARN: add with overflow
+    pub enum OriginFor<T> {
+        Simple,
+        Complex(T),
+    }
+
+    impl<T: Config> Pallet<T> {
+        pub fn do_something(
+            origin: OriginFor<T>,
+            val: u8,
+        ) {
+            val + 1; //~ WARN: add with overflow
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::pallet::*;
 
     pub struct MyConfig;
     impl Config for MyConfig {}

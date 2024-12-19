@@ -269,7 +269,6 @@ impl<'tcx> MirPass<'tcx> for IteratorAnnotations {
 }
 
 /// Captures the required info for adding an `Iterator` related annotation.
-#[derive(Debug)]
 enum Annotation<'tcx> {
     Isize(Location, Place<'tcx>),
     Len(
@@ -1443,10 +1442,7 @@ fn into_iter_operand<'tcx>(
     if def_id != into_iter_def_id {
         return None;
     }
-    match args.first()?.node {
-        Operand::Copy(place) | Operand::Move(place) => Some(place),
-        Operand::Constant(_) => None,
-    }
+    args.first()?.node.place()
 }
 
 /// Returns place (if any) for the arg/operand of an iterator adapter initializer
@@ -1483,10 +1479,7 @@ fn iterator_adapter_operand<'tcx>(
     if !is_into_iter_call {
         return None;
     }
-    match args.first()?.node {
-        Operand::Copy(place) | Operand::Move(place) => Some(place),
-        Operand::Constant(_) => None,
-    }
+    args.first()?.node.place()
 }
 
 /// Returns place (if any) for the arg/operand of a `Iterator` by reference converter method
@@ -1505,10 +1498,7 @@ fn iter_by_ref_operand<'tcx>(
     if !is_slice_iter_call {
         return None;
     }
-    match args.first()?.node {
-        Operand::Copy(place) | Operand::Move(place) => Some(place),
-        Operand::Constant(_) => None,
-    }
+    args.first()?.node.place()
 }
 
 /// Returns true if the given `DefId` is an associated item of a slice type `[T]`.
@@ -1552,10 +1542,7 @@ fn deref_operand<'tcx>(terminator: &Terminator<'tcx>, tcx: TyCtxt<'tcx>) -> Opti
     if !is_deref_call {
         return None;
     }
-    match args.first()?.node {
-        Operand::Copy(place) | Operand::Move(place) => Some(place),
-        Operand::Constant(_) => None,
-    }
+    args.first()?.node.place()
 }
 
 /// Returns `DefId` (if known and available) for the length/size call for the given collection type.
@@ -2073,11 +2060,8 @@ fn try_branch_destination<'tcx>(
     if def_id != try_branch_def_id {
         return None;
     }
-    let first_arg_place = args.first().and_then(|arg| match &arg.node {
-        Operand::Copy(place) | Operand::Move(place) => Some(place),
-        Operand::Constant(_) => None,
-    })?;
-    if *first_arg_place != place {
+    let first_arg_place = args.first().and_then(|arg| arg.node.place())?;
+    if first_arg_place != place {
         return None;
     }
 
@@ -2196,10 +2180,7 @@ fn safe_transform_destination<'tcx>(
         return None;
     };
     let first_arg = args.first()?;
-    let first_arg_place = match first_arg.node {
-        Operand::Copy(place) | Operand::Move(place) => Some(place),
-        Operand::Constant(_) => None,
-    }?;
+    let first_arg_place = first_arg.node.place()?;
     if first_arg_place != place {
         return None;
     }

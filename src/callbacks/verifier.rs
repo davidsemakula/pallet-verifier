@@ -166,11 +166,15 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                 let mut visitor = ContractsVisitor::new(tcx);
                 hir.visit_item_likes_in_module(contracts_mod_def_id, &mut visitor);
 
-                for contract_local_def_id in visitor.fns {
+                for contract_def_id in visitor.fns {
                     // Analyzes "contract" with MIRAI and produces "summaries".
-                    let contract_def_id = contract_local_def_id.to_def_id();
                     let mut diagnostics = Vec::new();
-                    analyze(contract_def_id, &mut crate_visitor, &mut diagnostics, true);
+                    analyze(
+                        contract_def_id.to_def_id(),
+                        &mut crate_visitor,
+                        &mut diagnostics,
+                        true,
+                    );
 
                     // Ignores/cancels diagnostics from "contracts".
                     diagnostics.into_iter().for_each(DiagnosticBuilder::cancel);
@@ -181,24 +185,38 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             let mut dispatchable_entry_points = Vec::new();
             let mut pub_assoc_fn_entry_points = Vec::new();
             let mut analyze_entry_points =
-                |mut entry_points_info: Vec<(LocalDefId, LocalDefId, Symbol)>,
+                |mut entry_points_info: Vec<(LocalDefId, LocalDefId, Symbol, Option<Symbol>)>,
                  call_kind: CallKind| {
                     if entry_points_info.len() > 1 {
-                        entry_points_info.sort_by_key(|(.., name)| name.to_ident_string());
+                        entry_points_info.sort_by_key(|(.., fn_name, trait_name)| {
+                            (
+                                trait_name
+                                    .map(|trait_name| trait_name.to_ident_string())
+                                    .unwrap_or_default(),
+                                fn_name.to_ident_string(),
+                            )
+                        });
                     }
-                    for (local_def_id, _, name) in entry_points_info {
+                    for (entry_point_def_id, _, fn_name, trait_name) in entry_points_info {
                         println!(
-                            "{} {call_kind}: `{name}` ...",
-                            "Analyzing".style(utils::highlight_style())
+                            "{} {call_kind}: `{}{fn_name}` ...",
+                            "Analyzing".style(utils::highlight_style()),
+                            trait_name
+                                .map(|trait_name| format!("<Self as {trait_name}>::"))
+                                .unwrap_or_default()
                         );
 
                         // Analyzes entry point with MIRAI and collects diagnostics.
                         let mut diagnostics = Vec::new();
-                        let def_id = local_def_id.to_def_id();
-                        analyze(def_id, &mut crate_visitor, &mut diagnostics, false);
+                        analyze(
+                            entry_point_def_id.to_def_id(),
+                            &mut crate_visitor,
+                            &mut diagnostics,
+                            false,
+                        );
 
                         // Emit diagnostics for generated entry point (if necessary).
-                        emit_diagnostics(diagnostics, local_def_id, tcx, &test_mod_spans);
+                        emit_diagnostics(diagnostics, entry_point_def_id, tcx, &test_mod_spans);
                     }
                 };
             for local_def_id in hir.body_owners() {
@@ -209,7 +227,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                                 .iter()
                                 .find_map(|(name, (target_hash, call_kind))| {
                                     if name == def_name.as_str() {
-                                        let mut dispatchable_def_id_error = || {
+                                        let mut def_hash_to_id_error = || {
                                             let mut error =
                                                 compiler.sess.dcx().struct_err(format!(
                                         "Couldn't find definition for {call_kind}: `{}`",
@@ -225,23 +243,23 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                                             error.emit();
                                             process::exit(rustc_driver::EXIT_FAILURE)
                                         };
-                                        let dispatchable_def_id = tcx.def_path_hash_to_def_id(
+                                        let callee_def_id = tcx.def_path_hash_to_def_id(
                                             *target_hash,
-                                            &mut dispatchable_def_id_error,
+                                            &mut def_hash_to_id_error,
                                         );
-                                        dispatchable_def_id.as_local().map(
-                                            |dispatchable_local_def_id| {
-                                                (dispatchable_local_def_id, call_kind)
-                                            },
-                                        )
+                                        callee_def_id
+                                            .as_local()
+                                            .map(|callee_def_id| (callee_def_id, call_kind))
                                     } else {
                                         None
                                     }
                                 })
                         });
-                if let Some((dispatcable_local_def_id, call_kind)) = entry_point_info {
-                    let dispatchable_name = tcx.item_name(dispatcable_local_def_id.to_def_id());
-                    let info = (local_def_id, dispatcable_local_def_id, dispatchable_name);
+                if let Some((callee_def_id, call_kind)) = entry_point_info {
+                    let fn_name = tcx.item_name(callee_def_id.to_def_id());
+                    let trait_name = utils::assoc_item_parent_trait(callee_def_id.to_def_id(), tcx)
+                        .map(|trait_def_id| tcx.item_name(trait_def_id));
+                    let info = (local_def_id, callee_def_id, fn_name, trait_name);
                     match call_kind {
                         CallKind::Dispatchable => dispatchable_entry_points.push(info),
                         CallKind::PubAssocFn => pub_assoc_fn_entry_points.push(info),
@@ -276,7 +294,6 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
 
 /// MIRAI configuration.
 /// Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L29-L39>
-#[derive(Debug)]
 struct MiraiConfig {
     // MIRAI options.
     // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/options.rs#L74-L86>
@@ -321,7 +338,7 @@ fn analyze<'analysis>(
 /// Emit diagnostics for generated entry point (if necessary).
 fn emit_diagnostics(
     diagnostics: Vec<DiagnosticBuilder<()>>,
-    entry_point_local_def_id: LocalDefId,
+    entry_point_def_id: LocalDefId,
     tcx: TyCtxt,
     test_mod_spans: &FxHashSet<Span>,
 ) {
@@ -332,7 +349,7 @@ fn emit_diagnostics(
             .and_then(|span| source_map.span_to_location_info(span).0)
             .is_some_and(|source_file| source_file.cnum == LOCAL_CRATE)
     };
-    let entry_point_span = tcx.source_span(entry_point_local_def_id);
+    let entry_point_span = tcx.source_span(entry_point_def_id);
     let is_span_in_entry_point = |mspan: &MultiSpan| {
         mspan
             .primary_spans()
@@ -403,17 +420,22 @@ fn emit_diagnostics(
                         && assoc_item
                             .trait_item_def_id
                             .is_some_and(|trait_item_def_id| {
-                                let trait_item_path = tcx.def_path_str(trait_item_def_id);
-                                matches!(
-                                    trait_item_path.as_str(),
-                                    "core::convert::From::from" | "std::convert::From::from"
-                                )
+                                let crate_name = tcx.crate_name(trait_item_def_id.krate);
+                                let trait_def_id = tcx.trait_of_item(trait_item_def_id).expect("Expected a trait `DefId`");
+                                let trait_name = tcx.item_name(trait_def_id);
+                                matches!(crate_name.as_str(), "core" | "std") && trait_name.as_str() == "From"
                             });
                     let is_dispatch_error_impl =
                         assoc_item.impl_container(tcx).is_some_and(|impl_def_id| {
                             let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
                             if let rustc_middle::ty::ImplSubject::Trait(trait_ref) = impl_subject {
-                                trait_ref.self_ty().to_string() == "sp_runtime::DispatchError"
+                                trait_ref.self_ty().ty_adt_def().is_some_and(|adt_def| {
+                                    let adt_def_id = adt_def.did();
+                                    let crate_name = tcx.crate_name(adt_def_id.krate);
+                                    let adt_name = tcx.item_name(adt_def_id);
+                                    crate_name.as_str() == "sp_runtime" &&
+                                    adt_name.as_str() == "DispatchError"
+                                })
                             } else {
                                 false
                             }

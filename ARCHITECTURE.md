@@ -45,8 +45,9 @@ Additionally, for a seamless and familiar developer experience, `pallet-verifier
 ## Current Capabilities
 
 Currently, `pallet-verifier` focuses on detecting [panics] and [arithmetic overflow/underflow]
-(including [overflow checks for narrowing and/or lossy integer cast/`as` conversions that aren't checked by the default Rust compiler][overflow-rfc-updates] - see also [this][overflow-rfc-remove-as] and [this][as-conversions-lossy]) in [dispatchable functions/extrinsics][call] and
-public associated functions of [inherent implementations][inherent-impls] of [FRAME pallets][FRAME].
+(including [overflow checks for narrowing and/or lossy integer cast/`as` conversions that aren't checked by the default Rust compiler][overflow-rfc-updates] - 
+see also [this][overflow-rfc-remove-as] and [this][as-conversions-lossy]) in [dispatchable functions/extrinsics][call]
+(and public associated functions of [inherent][inherent-impls] and local trait implementations) of [FRAME pallets][FRAME].
 However, other classes of security vulnerabilities (e.g. [insufficient or missing origin checks][origin-checks],
 [bad randomness][randomness], [insufficient unsigned transaction validation][validate-unsigned] e.t.c)
 will also be targeted in the future.
@@ -54,7 +55,7 @@ will also be targeted in the future.
 [panics]: https://secure-contracts.com/not-so-smart-contracts/substrate/dont_panic/
 [arithmetic overflow/underflow]: https://secure-contracts.com/not-so-smart-contracts/substrate/arithmetic_overflow/
 [overflow-rfc-updates]: https://rust-lang.github.io/rfcs/0560-integer-overflow.html#updates-since-being-accepted
-[overflow-rfc-remove-as]: https://github.com/rust-lang/rfcs/pull/1019#issuecomment-88277675
+[overflow-rfc-remove-as]: https://github.com/rust-lang/rfcs/pull/1019
 [as-conversions-lossy]: https://doc.rust-lang.org/reference/expressions/operator-expr.html#semantics
 [call]: https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.call.html
 [inherent-impls]: https://doc.rust-lang.org/reference/items/implementations.html#inherent-implementations
@@ -138,9 +139,9 @@ verification/abstract interpretation with [MIRAI],
 ["it is necessary for MIRAI to resolve and analyze all functions that can be reached from an entry point"][MIRAI-entrypoint]
 (see also [this][monomorphization] and [this][lowering-MIR]).
 So `pallet-verifier` automatically generates "tractable" entry points as singular direct calls to 
-[dispatchable functions/extrinsics][call] (and public associated functions of [inherent implementations][inherent-impls]) 
-using concrete types from unit tests as substitutions for generic types, while keeping the call arguments 
-["abstract"][MIRAI-abstract-value] (in contrast to unit tests, which use 
+[dispatchable functions/extrinsics][call] (and public associated functions of [inherent][inherent-impls] and 
+local trait implementations) using concrete types from unit tests as substitutions for generic types, 
+while keeping the call arguments ["abstract"][MIRAI-abstract-value] (in contrast to unit tests, which use 
 ["concrete"][MIRAI-abstract-value] call arguments, and may also exercise a single target function multiple times, 
 leading to under-approximation of program semantics and/or inefficient use of resources during abstract interpretation).
 

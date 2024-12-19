@@ -21,6 +21,19 @@ pub fn target_pointer_width() -> usize {
     }
 }
 
+/// Returns the `DefId` is the parent/subject trait (if any) for the associated item
+/// with the given `DefId`.
+pub fn assoc_item_parent_trait(def_id: DefId, tcx: TyCtxt) -> Option<DefId> {
+    tcx.opt_associated_item(def_id).and_then(|assoc_item| {
+        assoc_item.trait_container(tcx).or_else(|| {
+            assoc_item
+                .impl_container(tcx)
+                .and_then(|impl_def_id| tcx.impl_trait_ref(impl_def_id))
+                .map(|trait_ref| trait_ref.skip_binder().def_id)
+        })
+    })
+}
+
 /// Checks if an item (given it's `HirId`) "effectively" has a `#[cfg(test)]` attribute.
 pub fn has_cfg_test_attr(hir_id: HirId, tcx: TyCtxt) -> bool {
     let attrs = tcx.hir().attrs(hir_id);
