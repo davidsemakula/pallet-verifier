@@ -707,13 +707,14 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             block: *target,
             statement_index: 0,
         };
+        let cond_op = BinOp::Le;
 
         // Finds place and basic block for a slice `Iterator` operand/arg (if any).
         if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
             // Adds a slice length/size bound annotation.
             self.add_slice_len_annotation(
                 annotation_location,
-                BinOp::Eq,
+                cond_op,
                 *destination,
                 iterator_subject_place,
             );
@@ -742,13 +743,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let is_isize_bound =
             is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx);
         if is_isize_bound {
-            self.annotations.push(Annotation::Isize(
-                Location {
-                    block: *target,
-                    statement_index: 0,
-                },
-                *destination,
-            ));
+            self.annotations
+                .push(Annotation::Isize(annotation_location, *destination));
         }
 
         // Declares a collection length/size bound annotation (if appropriate).
@@ -768,11 +764,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             });
             if let Some((collection_place, region)) = collection_place_info {
                 self.annotations.push(Annotation::Len(
-                    Location {
-                        block: *target,
-                        statement_index: 0,
-                    },
-                    BinOp::Eq,
+                    annotation_location,
+                    cond_op,
                     *destination,
                     collection_place,
                     region,
