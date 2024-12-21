@@ -21,7 +21,7 @@ pub fn target_pointer_width() -> usize {
     }
 }
 
-/// Returns the `DefId` is the parent/subject trait (if any) for the associated item
+/// Returns the `DefId` of the parent/subject trait (if any) for the associated item
 /// with the given `DefId`.
 pub fn assoc_item_parent_trait(def_id: DefId, tcx: TyCtxt) -> Option<DefId> {
     tcx.opt_associated_item(def_id).and_then(|assoc_item| {
