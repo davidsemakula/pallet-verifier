@@ -1,19 +1,21 @@
 //! `rustc` `MirPass` for adding integer cast overflow checks.
 
-use rustc_abi::{Align, Size};
-use rustc_const_eval::interpret::{Allocation, Scalar};
+use rustc_abi::Size;
+use rustc_const_eval::interpret::Scalar;
 use rustc_middle::{
     mir::{
-        visit::Visitor, BasicBlockData, BinOp, Body, CallSource, CastKind, Const, ConstOperand,
-        ConstValue, HasLocalDecls, LocalDecl, LocalDecls, Location, MirPass, Operand, Place,
-        Rvalue, Statement, StatementKind, Terminator, TerminatorKind, UnwindAction,
+        visit::Visitor, BinOp, Body, CastKind, Const, ConstValue, HasLocalDecls, LocalDecls,
+        Location, MirPass, Operand, Rvalue,
     },
-    ty::{ScalarInt, Ty, TyCtxt, TyKind},
+    ty::{ScalarInt, TyCtxt, TyKind},
 };
-use rustc_span::{source_map::dummy_spanned, Span};
+use rustc_span::Span;
 use rustc_type_ir::{IntTy, UintTy};
 
-use crate::utils;
+use crate::{
+    providers::annotate::{self, Annotation},
+    utils,
+};
 
 /// Adds integer cast overflow checks.
 pub struct IntCastOverflowChecks;
@@ -23,93 +25,8 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
         let mut visitor = LossyIntCastVisitor::new(tcx, body.local_decls());
         visitor.visit_body(body);
 
-        let mut checks = visitor.checks;
-        if checks.is_empty() {
-            return;
-        }
-        // Reverse sorts integer cast overflow check declarations by location.
-        checks.sort_by(|(loc_a, ..), (loc_b, ..)| loc_b.cmp(loc_a));
-
-        // Creates `mirai_verify` annotation handle and diagnostic message.
-        let mirai_verify_def_id = utils::mirai_annotation_fn("mirai_verify", tcx)
-            .expect("Expected a fn def for `mirai_verify`");
-        let mirai_verify_handle =
-            Operand::function_handle(tcx, mirai_verify_def_id, [], Span::default());
-        let diag_msg = "attempt to cast with overflow".as_bytes();
-        let diag_msg_const = ConstValue::Slice {
-            data: tcx.mk_const_alloc(Allocation::from_bytes(
-                diag_msg,
-                Align::ONE,
-                rustc_ast::Mutability::Not,
-            )),
-            meta: diag_msg.len() as u64,
-        };
-        let diag_msg_op = Operand::Constant(Box::new(ConstOperand {
-            span: Span::default(),
-            user_ty: None,
-            const_: Const::from_value(diag_msg_const, Ty::new_static_str(tcx)),
-        }));
-
         // Adds integer cast overflow checks.
-        for (location, assert_cond, val_operand, bound_operand) in checks {
-            let Some(basic_block) = body.basic_blocks.get(location.block) else {
-                continue;
-            };
-            let Some(cast_stmt) = basic_block.statements.get(location.statement_index) else {
-                continue;
-            };
-            let source_info = cast_stmt.source_info;
-
-            // Extracts predecessors and successors.
-            let (predecessors, successors) =
-                basic_block.statements.split_at(location.statement_index);
-            let mut predecessors = predecessors.to_vec();
-            let successors = successors.to_vec();
-            let terminator = basic_block.terminator.clone();
-
-            // Adds successor block.
-            let mut successor_block_data = BasicBlockData::new(terminator);
-            successor_block_data.statements = successors;
-            let successor_block = body.basic_blocks_mut().push(successor_block_data);
-
-            // Adds condition statement.
-            let cond_local_decl =
-                LocalDecl::with_source_info(Ty::new(tcx, TyKind::Bool), source_info);
-            let cond_local = body.local_decls.push(cond_local_decl);
-            let cond_place = Place::from(cond_local);
-            let cond_rvalue = Rvalue::BinaryOp(assert_cond, Box::new((val_operand, bound_operand)));
-            let cond_stmt = Statement {
-                source_info,
-                kind: StatementKind::Assign(Box::new((cond_place, cond_rvalue))),
-            };
-            predecessors.push(cond_stmt);
-
-            // Creates `mirai_verify` annotation call.
-            let annotation_ty = Ty::new(tcx, TyKind::Never);
-            let annotation_local_decl = LocalDecl::with_source_info(annotation_ty, source_info);
-            let annotation_local = body.local_decls.push(annotation_local_decl);
-            let annotation_place = Place::from(annotation_local);
-            let annotation_call = Terminator {
-                source_info,
-                kind: TerminatorKind::Call {
-                    func: mirai_verify_handle.clone(),
-                    args: vec![
-                        dummy_spanned(Operand::Move(cond_place)),
-                        dummy_spanned(diag_msg_op.clone()),
-                    ],
-                    destination: annotation_place,
-                    target: Some(successor_block),
-                    unwind: UnwindAction::Unreachable,
-                    call_source: CallSource::Misc,
-                    fn_span: Span::default(),
-                },
-            };
-
-            // Updates target block statements and terminator.
-            let basic_blocks = body.basic_blocks_mut();
-            basic_blocks[location.block].statements = predecessors;
-            basic_blocks[location.block].terminator = Some(annotation_call);
-        }
+        annotate::add_annotations(visitor.checks, body, tcx);
     }
 }
 
@@ -117,9 +34,8 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
 struct LossyIntCastVisitor<'tcx, 'pass> {
     tcx: TyCtxt<'tcx>,
     local_decls: &'pass LocalDecls<'tcx>,
-    /// A list of location, assert condition/comparison operation, value and bound operand tuples
-    /// for overflow/underflow checks.
-    checks: Vec<(Location, BinOp, Operand<'tcx>, Operand<'tcx>)>,
+    /// A list of integer cast overflow/underflow checks.
+    checks: Vec<Annotation<'tcx>>,
 }
 
 impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
@@ -300,7 +216,7 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                 _ => None,
             };
 
-            // Adds required cast overflow checks (if any).
+            // Declares cast overflow checks (if necessary).
             let mut add_check = |assert_cond, bound_scalar| {
                 let mut requires_check = true;
                 if let Operand::Constant(const_op) = operand {
@@ -321,8 +237,12 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                         Scalar::Int(bound_scalar),
                         Span::default(),
                     );
-                    self.checks
-                        .push((location, assert_cond, operand.clone(), max_operand));
+                    self.checks.push(Annotation::CastOverflow(
+                        location,
+                        assert_cond,
+                        operand.clone(),
+                        max_operand,
+                    ));
                 }
             };
             if let Some(max_scalar) = max_scalar {

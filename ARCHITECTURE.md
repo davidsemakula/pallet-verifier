@@ -160,7 +160,7 @@ Annotations are implemented/added by overriding the [`optimized-mir` query][opti
 [optimized-mir-query]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.optimized_mir
 [MIR-pass]: https://rustc-dev-guide.rust-lang.org/mir/passes.html
 [MIR-provider-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers.rs
-[int-cast-overflow-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers/int_cast_overflow.rs
+[int-cast-overflow-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers/passes/int_cast_overflow.rs
 
 [Annotations][annotations] are necessary for either adding checks that aren't included by the default Rust compiler 
 (e.g. [overflow checks for narrowing and/or lossy integer cast/`as` conversions][overflow-rfc-updates] - see also 
@@ -168,7 +168,7 @@ Annotations are implemented/added by overriding the [`optimized-mir` query][opti
 that can't be inferred from source code alone, to improve the accuracy of the verifier and reduce false positives 
 (e.g. [iterator invariant annotations][iterator-annotations-src]).
 
-[iterator-annotations-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers/iterator_annotations.rs
+[iterator-annotations-src]: https://github.com/davidsemakula/pallet-verifier/blob/master/src/providers/passes/iterator_invariants.rs
 
 **NOTE:** [Annotations][annotations] require the [mirai-annotations crate][annotations] to be a dependency of the target
 [FRAME] pallet that `pallet-verifier` is invoked on, however, it's improbable that this will be the case in the wild, 

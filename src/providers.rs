@@ -1,7 +1,8 @@
 //! `rustc` providers for overriding queries.
 
-mod int_cast_overflow;
-mod iterator_annotations;
+mod annotate;
+mod passes;
+mod traverse;
 
 use rustc_middle::{
     mir::{Body, MirPass},
@@ -10,8 +11,7 @@ use rustc_middle::{
 };
 use rustc_span::def_id::LocalDefId;
 
-use self::int_cast_overflow::IntCastOverflowChecks;
-use self::iterator_annotations::IteratorAnnotations;
+use passes::{IntCastOverflowChecks, IteratorInvariants, SliceInvariants};
 
 /// Overrides the `optimized_mir` query.
 pub fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
@@ -19,7 +19,11 @@ pub fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
     rustc_mir_transform::provide(&mut providers);
     let mut body = (providers.optimized_mir)(tcx, did).clone();
 
-    let passes: [&dyn MirPass; 2] = [&IntCastOverflowChecks, &IteratorAnnotations];
+    let passes: [&dyn MirPass; 3] = [
+        &IntCastOverflowChecks,
+        &IteratorInvariants,
+        &SliceInvariants,
+    ];
     for pass in passes {
         pass.run_pass(tcx, &mut body);
     }
