@@ -5,8 +5,8 @@ use rustc_hash::FxHashSet;
 use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
-        BasicBlock, BasicBlockData, BasicBlocks, Operand, Place, PlaceElem, Rvalue, Statement,
-        StatementKind, Terminator, TerminatorKind, RETURN_PLACE,
+        BasicBlock, BasicBlockData, BasicBlocks, LocalDecls, Operand, Place, PlaceElem, Rvalue,
+        Statement, StatementKind, Terminator, TerminatorKind, RETURN_PLACE,
     },
     ty::{AssocKind, GenericArg, ImplSubject, List, Region, Ty, TyCtxt, TyKind},
 };
@@ -196,11 +196,38 @@ pub fn deref_operand<'tcx>(
     args.first()?.node.place()
 }
 
-/// Returns `DefId` (if known and available) for the length/size call for the given collection type.
+/// Returns true if the type is a known collection whose length/size maxima is `isize::MAX`.
+pub fn is_isize_bound_collection(ty: Ty, tcx: TyCtxt) -> bool {
+    ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
+        let adt_def_id = adt_def.did();
+        matches!(
+            (
+                tcx.crate_name(adt_def_id.krate).as_str(),
+                tcx.item_name(adt_def_id).as_str(),
+            ),
+            ("alloc" | "std", "Vec" | "VecDeque")
+                | ("std" | "hashbrown", "HashSet" | "HashMap")
+                | ("hashbrown", "HashTable")
+                | (
+                    "bounded_collections" | "frame_support",
+                    "BoundedVec" | "WeakBoundedVec"
+                )
+                | ("frame_support", "PrefixIterator" | "KeyPrefixIterator")
+        )
+    })
+}
+
+/// Convenience type alias for tracking info necessary to build a length/size call for a collection
+/// (i.e. a list of tuples of length/size call `DefId`, call generic args, and the return type).
+pub type LenCallBuilderInfo<'tcx> = Vec<(DefId, &'tcx List<GenericArg<'tcx>>, Ty<'tcx>)>;
+
+/// Returns info necessary for constructing a length/size call for the given collection type
+/// (if possible).
+/// See [`LenCallBuilderInfo`] for additional details.
 pub fn collection_len_call<'tcx>(
     ty: Ty<'tcx>,
     tcx: TyCtxt<'tcx>,
-) -> Option<Vec<(DefId, &'tcx List<GenericArg<'tcx>>, Ty<'tcx>)>> {
+) -> Option<LenCallBuilderInfo<'tcx>> {
     let base_ty = ty.peel_refs();
     let TyKind::Adt(adt_def, gen_args) = base_ty.kind() else {
         return None;
@@ -274,6 +301,31 @@ pub fn collection_len_call<'tcx>(
             .or_else(deref_target_assoc_fn),
         _ => None,
     }
+}
+
+/// Given a collection place, returns info necessary to construct a collection length/size call
+/// only if the collection place is a reference.
+///
+/// Return info (if any) includes the derefed collection place, the reference `region`,
+/// along with [`LenCallBuilderInfo`].
+pub fn ref_only_collection_len_call_info<'tcx>(
+    place: Place<'tcx>,
+    block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    local_decls: &LocalDecls<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<(Place<'tcx>, Region<'tcx>, LenCallBuilderInfo<'tcx>)> {
+    let place_ty = place.ty(local_decls, tcx).ty;
+    let (collection_place, region) =
+        deref_place_recursive(place, block, basic_blocks).or_else(|| {
+            if let TyKind::Ref(region, _, _) = place_ty.kind() {
+                Some((place, *region))
+            } else {
+                None
+            }
+        })?;
+    collection_len_call(place_ty, tcx)
+        .map(|len_call_info| (collection_place, region, len_call_info))
 }
 
 /// Returns the `VariantIdx` for a `LangItem`.

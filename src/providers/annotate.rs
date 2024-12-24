@@ -23,7 +23,7 @@ pub enum Annotation<'tcx> {
     /// An integer cast overflow check.
     CastOverflow(Location, BinOp, Operand<'tcx>, Operand<'tcx>),
     /// An `isize::MAX` bound annotation.
-    Isize(Location, Place<'tcx>),
+    Isize(Location, BinOp, Place<'tcx>),
     /// A collection length/size bound annotation.
     Len(
         Location,
@@ -102,10 +102,10 @@ impl<'tcx> Annotation<'tcx> {
                     predecessors,
                 )
             }
-            Annotation::Isize(_, op_place) => {
+            Annotation::Isize(_, cond_op, op_place) => {
                 // Creates `isize::MAX` bound statement.
                 let arg_rvalue = Rvalue::BinaryOp(
-                    BinOp::Le,
+                    cond_op,
                     Box::new((Operand::Copy(op_place), isize_max_operand(tcx))),
                 );
                 let arg_stmt = Statement {

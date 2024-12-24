@@ -6,7 +6,7 @@ use rustc_middle::{
         visit::Visitor, BasicBlock, BasicBlocks, BinOp, Body, HasLocalDecls, LocalDecls, Location,
         MirPass, Operand, Place, Terminator, TerminatorKind,
     },
-    ty::{TyCtxt, TyKind},
+    ty::TyCtxt,
 };
 use rustc_span::source_map::Spanned;
 
@@ -66,15 +66,28 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                 return;
             };
 
+            // Only continues if `DefId` is a slice associated item.
+            if !traverse::is_slice_assoc_item(def_id, self.tcx) {
+                return;
+            }
+
             // Handles calls to slice `binary_search` methods.
             if self.tcx.opt_item_name(def_id).is_some_and(|name| {
                 matches!(
                     name.as_str(),
                     "binary_search" | "binary_search_by" | "binary_search_by_key"
                 )
-            }) && traverse::is_slice_assoc_item(def_id, self.tcx)
-            {
+            }) {
                 self.process_binary_search(args, destination, target.as_ref(), location);
+            }
+
+            // Handles calls to `[T]::partition_point` methods.
+            if self
+                .tcx
+                .opt_item_name(def_id)
+                .is_some_and(|name| name.as_str() == "partition_point")
+            {
+                self.process_partition_point(args, destination, target.as_ref(), location);
             }
         }
     }
@@ -95,43 +108,10 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Finds place and basic block for a slice `binary_search` operand/arg (if any).
-        let dominators = self.basic_blocks.dominators();
-        let slice_def_call = traverse::find_pre_anchor_assign_terminator(
-            binary_search_arg_place,
-            location.block,
-            location.block,
-            self.basic_blocks,
-            dominators,
-        );
+        // Finds place for operand/arg and basic block for a slice `Deref` call (if any).
         let Some((slice_deref_arg_place, slice_deref_bb)) =
-            slice_def_call.and_then(|(terminator, bb)| {
-                traverse::deref_operand(&terminator, self.tcx).map(|place| (place, bb))
-            })
+            self.deref_subject(binary_search_arg_place, location)
         else {
-            return;
-        };
-
-        // Only continues if slice target has a known length/size returning function
-        // and is passed by reference.
-        let slice_deref_arg_ty = slice_deref_arg_place.ty(self.local_decls, self.tcx).ty;
-        let Some(len_call_info) = traverse::collection_len_call(slice_deref_arg_ty, self.tcx)
-        else {
-            return;
-        };
-        let collection_place_info = traverse::deref_place_recursive(
-            slice_deref_arg_place,
-            slice_deref_bb,
-            self.basic_blocks,
-        )
-        .or_else(|| {
-            if let TyKind::Ref(region, _, _) = slice_deref_arg_ty.kind() {
-                Some((slice_deref_arg_place, *region))
-            } else {
-                None
-            }
-        });
-        let Some((collection_place, region)) = collection_place_info else {
             return;
         };
 
@@ -316,17 +296,29 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             }
         }
 
+        // Retrieves info needed to construct a collection length/size call for the slice subject
+        // (if possible).
+        let len_bound_info = traverse::ref_only_collection_len_call_info(
+            slice_deref_arg_place,
+            slice_deref_bb,
+            self.basic_blocks,
+            self.local_decls,
+            self.tcx,
+        );
+
         // Composes collection length/size bound annotations for extracted invariants.
         for (annotation_location, invariant_place, cond_op) in invariants {
             // Declares a collection length/size bound annotation.
-            self.annotations.push(Annotation::Len(
-                annotation_location,
-                cond_op,
-                invariant_place,
-                collection_place,
-                region,
-                len_call_info.clone(),
-            ));
+            if let Some((collection_place, region, len_call_info)) = &len_bound_info {
+                self.annotations.push(Annotation::Len(
+                    annotation_location,
+                    cond_op,
+                    invariant_place,
+                    *collection_place,
+                    *region,
+                    len_call_info.clone(),
+                ));
+            }
 
             // Declares a slice length/size bound annotation.
             if let Some(annotation) = annotate::compose_slice_len_annotation(
@@ -339,7 +331,120 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             ) {
                 self.annotations.push(annotation);
             }
+
+            // Declares an `isize::MAX` bound annotation (if appropriate).
+            if traverse::is_isize_bound_collection(
+                slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
+                self.tcx,
+            ) {
+                self.annotations.push(Annotation::Isize(
+                    annotation_location,
+                    cond_op,
+                    invariant_place,
+                ));
+            }
         }
+    }
+
+    /// Analyzes and annotates calls to `[T]::partition_point`.
+    fn process_partition_point(
+        &mut self,
+        args: &[Spanned<Operand<'tcx>>],
+        destination: &Place<'tcx>,
+        target: Option<&BasicBlock>,
+        location: Location,
+    ) {
+        // Only continues if the terminator has a target basic block.
+        let Some(target) = target else {
+            return;
+        };
+
+        // Finds place for slice `partition_point` operand/arg.
+        let partition_point_arg = args
+            .first()
+            .expect("Expected an arg for slice `partition_point` method");
+        let Some(partition_point_arg_place) = partition_point_arg.node.place() else {
+            return;
+        };
+
+        // Length invariant annotations are added at the beginning of the next block.
+        let annotation_location = Location {
+            block: *target,
+            statement_index: 0,
+        };
+        let cond_op = BinOp::Le;
+
+        // Declares a slice length/size bound annotation.
+        if let Some(annotation) = annotate::compose_slice_len_annotation(
+            annotation_location,
+            cond_op,
+            *destination,
+            partition_point_arg_place,
+            self.local_decls,
+            self.tcx,
+        ) {
+            self.annotations.push(annotation);
+        }
+
+        // Finds place for operand/arg and basic block for a slice `Deref` call (if any).
+        let Some((slice_deref_arg_place, slice_deref_bb)) =
+            self.deref_subject(partition_point_arg_place, location)
+        else {
+            return;
+        };
+
+        // Declares an `isize::MAX` bound annotation (if appropriate).
+        if traverse::is_isize_bound_collection(
+            slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
+            self.tcx,
+        ) {
+            self.annotations.push(Annotation::Isize(
+                annotation_location,
+                cond_op,
+                *destination,
+            ));
+        }
+
+        // Retrieves info needed to construct a collection length/size call for the slice subject
+        // (if possible).
+        let len_bound_info = traverse::ref_only_collection_len_call_info(
+            slice_deref_arg_place,
+            slice_deref_bb,
+            self.basic_blocks,
+            self.local_decls,
+            self.tcx,
+        );
+
+        // Declares a collection length/size bound annotation.
+        if let Some((collection_place, region, len_call_info)) = len_bound_info {
+            self.annotations.push(Annotation::Len(
+                annotation_location,
+                cond_op,
+                *destination,
+                collection_place,
+                region,
+                len_call_info,
+            ));
+        }
+    }
+
+    /// Finds place for operand/arg and basic block for a slice `Deref` call (if any).
+    fn deref_subject(
+        &mut self,
+        slice_place: Place<'tcx>,
+        location: Location,
+    ) -> Option<(Place<'tcx>, BasicBlock)> {
+        let dominators = self.basic_blocks.dominators();
+        let slice_def_call = traverse::find_pre_anchor_assign_terminator(
+            slice_place,
+            location.block,
+            location.block,
+            self.basic_blocks,
+            dominators,
+        );
+        slice_def_call.and_then(|(terminator, bb)| {
+            traverse::deref_operand(&terminator, self.tcx).map(|place| (place, bb))
+        })
     }
 }
 

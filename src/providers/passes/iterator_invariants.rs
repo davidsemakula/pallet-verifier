@@ -174,25 +174,15 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Only continues if `Iterator` target either has a length/size with `isize::MAX` maxima,
         // or has a known length/size returning function and is passed by reference.
-        let iterator_subject_ty = self.place_ty(iterator_subject_place);
-        let is_isize_bound = is_isize_bound_collection(iterator_subject_ty, self.tcx);
-        let len_call_info = traverse::collection_len_call(iterator_subject_ty, self.tcx);
-        let len_bound_info = len_call_info.and_then(|len_call_info| {
-            let collection_place_info = traverse::deref_place_recursive(
-                iterator_subject_place,
-                iterator_subject_bb,
-                self.basic_blocks,
-            )
-            .or_else(|| {
-                if let TyKind::Ref(region, _, _) = iterator_subject_ty.kind() {
-                    Some((iterator_subject_place, *region))
-                } else {
-                    None
-                }
-            });
-            collection_place_info
-                .map(|(collection_place, region)| (collection_place, region, len_call_info))
-        });
+        let is_isize_bound =
+            traverse::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx);
+        let len_bound_info = traverse::ref_only_collection_len_call_info(
+            iterator_subject_place,
+            iterator_subject_bb,
+            self.basic_blocks,
+            self.local_decls,
+            self.tcx,
+        );
         if !is_isize_bound && len_bound_info.is_none() {
             return;
         }
@@ -236,6 +226,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                                 block: *bb,
                                 statement_index: stmt_idx,
                             },
+                            BinOp::Lt,
                             op_place,
                         ));
                     }
@@ -436,7 +427,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Length invariant annotation are added at the beginning of the next block.
+        // Length invariant annotations are added at the beginning of the next block.
         let annotation_location = Location {
             block: *target,
             statement_index: 0,
@@ -478,11 +469,12 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Declares an `isize::MAX` bound annotation (if appropriate).
         let iterator_subject_ty = self.place_ty(iterator_subject_place);
-        let is_isize_bound =
-            is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx);
-        if is_isize_bound {
-            self.annotations
-                .push(Annotation::Isize(annotation_location, *destination));
+        if traverse::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx) {
+            self.annotations.push(Annotation::Isize(
+                annotation_location,
+                cond_op,
+                *destination,
+            ));
         }
 
         // Declares a collection length/size bound annotation (if appropriate).
@@ -526,7 +518,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
         let len_arg_ty = len_arg.node.ty(self.local_decls, self.tcx);
-        if !is_isize_bound_collection(len_arg_ty, self.tcx) {
+        if !traverse::is_isize_bound_collection(len_arg_ty, self.tcx) {
             return;
         }
 
@@ -541,6 +533,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 block: *target,
                 statement_index: 0,
             },
+            BinOp::Le,
             *destination,
         ));
     }
@@ -561,27 +554,6 @@ impl<'tcx, 'pass> Visitor<'tcx> for IteratorVisitor<'tcx, 'pass> {
         self.process_terminator(terminator, location);
         self.super_terminator(terminator, location);
     }
-}
-
-/// Returns true if the type is a known collection whose length/size maxima is `isize::MAX`.
-fn is_isize_bound_collection(ty: Ty, tcx: TyCtxt) -> bool {
-    ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
-        let adt_def_id = adt_def.did();
-        matches!(
-            (
-                tcx.crate_name(adt_def_id.krate).as_str(),
-                tcx.item_name(adt_def_id).as_str(),
-            ),
-            ("alloc" | "std", "Vec" | "VecDeque")
-                | ("std" | "hashbrown", "HashSet" | "HashMap")
-                | ("hashbrown", "HashTable")
-                | (
-                    "bounded_collections" | "frame_support",
-                    "BoundedVec" | "WeakBoundedVec"
-                )
-                | ("frame_support", "PrefixIterator" | "KeyPrefixIterator")
-        )
-    })
 }
 
 /// Returns place and basic block (if any) of innermost iterator subject to which
