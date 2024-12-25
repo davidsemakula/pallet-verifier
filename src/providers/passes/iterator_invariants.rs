@@ -18,8 +18,8 @@ use rustc_type_ir::UintTy;
 use itertools::Itertools;
 
 use crate::providers::{
+    analyze,
     annotate::{self, Annotation},
-    traverse,
 };
 
 /// Adds `Iterator` invariant annotations.
@@ -35,13 +35,13 @@ impl<'tcx> MirPass<'tcx> for IteratorInvariants {
     }
 }
 
-/// Collects iterator annotations.
+/// Collects `Iterator` annotations.
 struct IteratorVisitor<'tcx, 'pass> {
     tcx: TyCtxt<'tcx>,
     basic_blocks: &'pass BasicBlocks<'tcx>,
     local_decls: &'pass LocalDecls<'tcx>,
     iterator_assoc_items: FxHashMap<Symbol, DefId>,
-    /// A list of `Iterator` annotation declarations.
+    /// A list of annotation declarations.
     annotations: Vec<Annotation<'tcx>>,
 }
 
@@ -140,7 +140,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // no "growing" iterator adapters are applied.
         let dominators = self.basic_blocks.dominators();
         let Some((mut iterator_subject_place, mut iterator_subject_bb)) =
-            find_size_invariant_iterator_subject(
+            size_invariant_iterator_subject(
                 iterator_next_arg_place,
                 location.block,
                 self.basic_blocks,
@@ -152,20 +152,16 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Finds place and basic block for a slice `Iterator` operand/arg (if any).
+        // Finds place and basic block for slice `Deref` operand/arg (if any).
         if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
-            let slice_def_call = traverse::find_pre_anchor_assign_terminator(
+            let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
                 iterator_subject_place,
                 iterator_subject_bb,
                 location.block,
                 self.basic_blocks,
                 dominators,
-            );
-            let Some((slice_deref_arg_place, slice_deref_bb)) =
-                slice_def_call.and_then(|(terminator, bb)| {
-                    traverse::deref_operand(&terminator, self.tcx).map(|place| (place, bb))
-                })
-            else {
+                self.tcx,
+            ) else {
                 return;
             };
             iterator_subject_place = slice_deref_arg_place;
@@ -175,8 +171,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Only continues if `Iterator` target either has a length/size with `isize::MAX` maxima,
         // or has a known length/size returning function and is passed by reference.
         let is_isize_bound =
-            traverse::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx);
-        let len_bound_info = traverse::ref_only_collection_len_call_info(
+            analyze::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx);
+        let len_bound_info = analyze::borrowed_collection_len_call_info(
             iterator_subject_place,
             iterator_subject_bb,
             self.basic_blocks,
@@ -283,7 +279,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // the target collection to be passed by reference (not value) so that
         // it's length/size can still be referenced after this iteration.
         let dominators = self.basic_blocks.dominators();
-        let iter_by_ref_arg_def_call = traverse::find_pre_anchor_assign_terminator(
+        let iter_by_ref_arg_def_call = analyze::pre_anchor_assign_terminator(
             iter_pos_arg_place,
             location.block,
             location.block,
@@ -297,29 +293,27 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         else {
             return;
         };
-        let iter_by_ref_ty_def_call = traverse::find_pre_anchor_assign_terminator(
+
+        // Finds place and basic block for slice `Deref` operand/arg (if any).
+        let Some((iter_by_ref_deref_arg_place, iter_by_ref_deref_bb)) = analyze::deref_subject(
             iter_by_ref_place,
             iter_by_ref_bb,
             location.block,
             self.basic_blocks,
             dominators,
-        );
-        let Some((iter_by_ref_deref_arg_place, iter_by_ref_deref_bb)) = iter_by_ref_ty_def_call
-            .and_then(|(terminator, bb)| {
-                traverse::deref_operand(&terminator, self.tcx).map(|place| (place, bb))
-            })
-        else {
+            self.tcx,
+        ) else {
             return;
         };
 
         // Only continues if `Iterator` target has a known length/size returning function
         // and is passed by reference.
         let Some(len_call_info) =
-            traverse::collection_len_call(self.place_ty(iter_by_ref_deref_arg_place), self.tcx)
+            analyze::collection_len_call(self.place_ty(iter_by_ref_deref_arg_place), self.tcx)
         else {
             return;
         };
-        let collection_place_info = traverse::deref_place_recursive(
+        let collection_place_info = analyze::deref_place_recursive(
             iter_by_ref_deref_arg_place,
             iter_by_ref_deref_bb,
             self.basic_blocks,
@@ -342,9 +336,9 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let mut switch_target_place = *destination;
         let mut switch_target_bb = location.block;
         let mut switch_target_variant_name = "Some".to_string();
-        let mut switch_target_variant_idx = traverse::variant_idx(LangItem::OptionSome, self.tcx);
+        let mut switch_target_variant_idx = analyze::variant_idx(LangItem::OptionSome, self.tcx);
         if let Some(target) = target {
-            traverse::track_safe_primary_opt_result_variant_transformations(
+            analyze::track_safe_primary_opt_result_variant_transformations(
                 &mut switch_target_place,
                 &mut switch_target_bb,
                 &mut switch_target_variant_name,
@@ -358,7 +352,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Finds `Option::Some` (or equivalent safe transformation) target blocks
         // for switches based on the discriminant of return value of
         // `std::iter::Iterator::position` or `std::iter::Iterator::rposition` in successor blocks.
-        for target_bb in traverse::collect_switch_targets_for_discr_value(
+        for target_bb in analyze::collect_switch_targets_for_discr_value(
             switch_target_place,
             switch_target_variant_idx.as_u32() as u128,
             switch_target_bb,
@@ -366,7 +360,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         ) {
             for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
                 // Finds variant downcast to `usize` places (if any) for the switch target variant.
-                let Some(downcast_place) = traverse::variant_downcast_to_usize_place(
+                let Some(downcast_place) = analyze::variant_downcast_to_usize_place(
                     switch_target_place,
                     &switch_target_variant_name,
                     switch_target_variant_idx,
@@ -415,7 +409,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // no "growing" iterator adapters are applied.
         let dominators = self.basic_blocks.dominators();
         let Some((mut iterator_subject_place, mut iterator_subject_bb)) =
-            find_size_invariant_iterator_subject(
+            size_invariant_iterator_subject(
                 iterator_next_arg_place,
                 location.block,
                 self.basic_blocks,
@@ -448,19 +442,15 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 self.annotations.push(annotation);
             }
 
-            // Finds `Deref` arg/operand for slice.
-            let slice_def_call = traverse::find_pre_anchor_assign_terminator(
+            // Finds place and basic block for slice `Deref` operand/arg (if any).
+            let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
                 iterator_subject_place,
                 iterator_subject_bb,
                 location.block,
                 self.basic_blocks,
                 dominators,
-            );
-            let Some((slice_deref_arg_place, slice_deref_bb)) =
-                slice_def_call.and_then(|(terminator, bb)| {
-                    traverse::deref_operand(&terminator, self.tcx).map(|place| (place, bb))
-                })
-            else {
+                self.tcx,
+            ) else {
                 return;
             };
             iterator_subject_place = slice_deref_arg_place;
@@ -469,7 +459,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Declares an `isize::MAX` bound annotation (if appropriate).
         let iterator_subject_ty = self.place_ty(iterator_subject_place);
-        if traverse::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx) {
+        if analyze::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx) {
             self.annotations.push(Annotation::Isize(
                 annotation_location,
                 cond_op,
@@ -478,9 +468,9 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
 
         // Declares a collection length/size bound annotation (if appropriate).
-        let len_call_info = traverse::collection_len_call(iterator_subject_ty, self.tcx);
+        let len_call_info = analyze::collection_len_call(iterator_subject_ty, self.tcx);
         if let Some(len_call_info) = len_call_info {
-            let collection_place_info = traverse::deref_place_recursive(
+            let collection_place_info = analyze::deref_place_recursive(
                 iterator_subject_place,
                 iterator_subject_bb,
                 self.basic_blocks,
@@ -518,7 +508,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
         let len_arg_ty = len_arg.node.ty(self.local_decls, self.tcx);
-        if !traverse::is_isize_bound_collection(len_arg_ty, self.tcx) {
+        if !analyze::is_isize_bound_collection(len_arg_ty, self.tcx) {
             return;
         }
 
@@ -558,7 +548,7 @@ impl<'tcx, 'pass> Visitor<'tcx> for IteratorVisitor<'tcx, 'pass> {
 
 /// Returns place and basic block (if any) of innermost iterator subject to which
 /// no "growing" iterator adapters are applied.
-fn find_size_invariant_iterator_subject<'tcx>(
+fn size_invariant_iterator_subject<'tcx>(
     iterator_arg_place: Place<'tcx>,
     anchor_block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
@@ -566,8 +556,8 @@ fn find_size_invariant_iterator_subject<'tcx>(
     dominators: &Dominators<BasicBlock>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<(Place<'tcx>, BasicBlock)> {
-    // Finds place and basic block for `std::iter::IntoIterator::into_iter` operand/arg.
-    let (terminator, mut iterator_subject_bb) = traverse::find_pre_anchor_assign_terminator(
+    // Finds place and basic block for outermost `Iterator` transformation operand/arg (if any).
+    let (terminator, mut iterator_subject_bb) = analyze::pre_anchor_assign_terminator(
         iterator_arg_place,
         anchor_block,
         anchor_block,
@@ -589,9 +579,9 @@ fn find_size_invariant_iterator_subject<'tcx>(
         tcx,
     );
 
-    // Finds place and basic block for a slice `Iterator` or `IntoIter` operand/arg (if any).
+    // Finds place and basic block for innermost `Iterator` transformation operand/arg (if any).
     if is_into_iter_ty(iterator_subject_place.ty(local_decls, tcx).ty, tcx) {
-        let (into_iter_def_terminator, into_iter_bb) = traverse::find_pre_anchor_assign_terminator(
+        let (into_iter_def_terminator, into_iter_bb) = analyze::pre_anchor_assign_terminator(
             iterator_subject_place,
             iterator_subject_bb,
             anchor_block,
@@ -602,7 +592,7 @@ fn find_size_invariant_iterator_subject<'tcx>(
         iterator_subject_place = collection_place;
         iterator_subject_bb = into_iter_bb;
     } else if is_iter_by_ref_ty(iterator_subject_place.ty(local_decls, tcx).ty, tcx) {
-        let (iter_by_ref_terminator, iter_by_ref_bb) = traverse::find_pre_anchor_assign_terminator(
+        let (iter_by_ref_terminator, iter_by_ref_bb) = analyze::pre_anchor_assign_terminator(
             iterator_subject_place,
             iterator_subject_bb,
             anchor_block,
@@ -629,7 +619,7 @@ fn track_size_invariant_iterator_transformations<'tcx>(
     tcx: TyCtxt<'tcx>,
 ) {
     while is_size_invariant_iterator_adapter(iterator_place.ty(local_decls, tcx).ty, tcx) {
-        let adapter_def_call = traverse::find_pre_anchor_assign_terminator(
+        let adapter_def_call = analyze::pre_anchor_assign_terminator(
             *iterator_place,
             *parent_block,
             anchor_block,
@@ -725,7 +715,7 @@ fn iter_by_ref_operand<'tcx>(
     let (def_id, ..) = func.const_fn_def()?;
     let is_slice_iter_call = tcx.item_name(def_id).as_str() == "iter"
         && matches!(tcx.crate_name(def_id.krate).as_str(), "core" | "std")
-        && traverse::is_slice_assoc_item(def_id, tcx);
+        && analyze::is_slice_assoc_item(def_id, tcx);
     if !is_slice_iter_call {
         return None;
     }

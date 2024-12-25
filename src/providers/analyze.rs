@@ -1,4 +1,4 @@
-//! Utilities and helpers for traversing and analyzing MIR.
+//! Common utilities and helpers for traversing and analyzing MIR.
 
 use rustc_data_structures::graph::{dominators::Dominators, WithStartNode, WithSuccessors};
 use rustc_hash::FxHashSet;
@@ -64,9 +64,9 @@ pub fn deref_place_recursive<'tcx>(
     result
 }
 
-/// Returns terminator (if any) whose destination is the specified place,
+/// Returns terminator (if any) whose destination is the given place,
 /// and whose basic block is a predecessor of the given anchor block.
-pub fn find_pre_anchor_assign_terminator<'tcx>(
+pub fn pre_anchor_assign_terminator<'tcx>(
     place: Place<'tcx>,
     parent_block: BasicBlock,
     anchor_block: BasicBlock,
@@ -84,7 +84,7 @@ pub fn find_pre_anchor_assign_terminator<'tcx>(
         deref_target_place = derefed_place;
     }
 
-    return find_pre_anchor_assign_terminator_inner(
+    return pre_anchor_assign_terminator_inner(
         &mut places,
         anchor_block,
         anchor_block,
@@ -93,7 +93,7 @@ pub fn find_pre_anchor_assign_terminator<'tcx>(
         &mut already_visited,
     );
 
-    fn find_pre_anchor_assign_terminator_inner<'tcx>(
+    fn pre_anchor_assign_terminator_inner<'tcx>(
         places: &mut FxHashSet<Place<'tcx>>,
         current_block: BasicBlock,
         anchor_block: BasicBlock,
@@ -121,7 +121,7 @@ pub fn find_pre_anchor_assign_terminator<'tcx>(
                         }
                     }
                 }
-                let assign = find_pre_anchor_assign_terminator_inner(
+                let assign = pre_anchor_assign_terminator_inner(
                     places,
                     *pred_bb,
                     anchor_block,
@@ -149,7 +149,7 @@ pub fn find_pre_anchor_assign_terminator<'tcx>(
     }
 }
 
-/// Returns true if the given `DefId` is an associated item of a slice type `[T]`.
+/// Returns true if the given `DefId` is an associated item of the slice type `[T]`.
 pub fn is_slice_assoc_item(def_id: DefId, tcx: TyCtxt) -> bool {
     tcx.opt_associated_item(def_id)
         .and_then(|assoc_item| assoc_item.impl_container(tcx))
@@ -166,11 +166,22 @@ pub fn is_slice_assoc_item(def_id: DefId, tcx: TyCtxt) -> bool {
         })
 }
 
-/// Returns place (if any) for the arg/operand of `std::ops::Deref` or `std::ops::DerefMut`.
-pub fn deref_operand<'tcx>(
-    terminator: &Terminator<'tcx>,
+/// Finds place for operand/arg and basic block of a `Deref` call (if any) that assigns to the given place.
+pub fn deref_subject<'tcx>(
+    place: Place<'tcx>,
+    parent_block: BasicBlock,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    dominators: &Dominators<BasicBlock>,
     tcx: TyCtxt<'tcx>,
-) -> Option<Place<'tcx>> {
+) -> Option<(Place<'tcx>, BasicBlock)> {
+    let deref_call =
+        pre_anchor_assign_terminator(place, parent_block, anchor_block, basic_blocks, dominators);
+    deref_call.and_then(|(terminator, bb)| deref_operand(&terminator, tcx).map(|place| (place, bb)))
+}
+
+/// Returns place (if any) for the arg/operand of `std::ops::Deref` or `std::ops::DerefMut`.
+fn deref_operand<'tcx>(terminator: &Terminator<'tcx>, tcx: TyCtxt<'tcx>) -> Option<Place<'tcx>> {
     let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
         return None;
     };
@@ -304,11 +315,11 @@ pub fn collection_len_call<'tcx>(
 }
 
 /// Given a collection place, returns info necessary to construct a collection length/size call
-/// only if the collection place is a reference.
+/// only if the collection place is borrowed (i.e. a reference).
 ///
-/// Return info (if any) includes the derefed collection place, the reference `region`,
+/// Return info (if any) includes the derefed collection place, the `region`,
 /// along with [`LenCallBuilderInfo`].
-pub fn ref_only_collection_len_call_info<'tcx>(
+pub fn borrowed_collection_len_call_info<'tcx>(
     place: Place<'tcx>,
     block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
@@ -340,11 +351,10 @@ pub fn variant_idx(lang_item: LangItem, tcx: TyCtxt) -> VariantIdx {
     adt_def.variant_index_with_id(variant_def_id)
 }
 
-// Tracks switch target info through "safe" transformations
-// (i.e. ones that don't change the target variant's value) between
-// `Option::Some`, `Result::Ok` and `ControlFlow::Continue`
-// (e.g. via `std::ops::Try::branch` calls, `Option::ok_or`, `Result::ok`, `Result::map_err`
-// and `Option::inspect` calls e.t.c).
+/// Tracks switch target info through "safe" transformations
+/// (i.e. ones that don't change the `Result::Ok` nor `Result::Err` variant values) between
+/// `Option::Some`, `Result::Ok` and `ControlFlow::Continue`
+/// (e.g. via `Result::inspect`, `Result::inspect_err` calls e.t.c).
 pub fn track_safe_result_transformations<'tcx>(
     switch_target_place: &mut Place<'tcx>,
     switch_target_bb: &mut BasicBlock,

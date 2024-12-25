@@ -11,8 +11,8 @@ use rustc_middle::{
 use rustc_span::source_map::Spanned;
 
 use crate::providers::{
+    analyze,
     annotate::{self, Annotation},
-    traverse,
 };
 
 /// Adds slice (i.e. `[T]`) invariant annotations.
@@ -67,7 +67,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             };
 
             // Only continues if `DefId` is a slice associated item.
-            if !traverse::is_slice_assoc_item(def_id, self.tcx) {
+            if !analyze::is_slice_assoc_item(def_id, self.tcx) {
                 return;
             }
 
@@ -109,9 +109,15 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         };
 
         // Finds place for operand/arg and basic block for a slice `Deref` call (if any).
-        let Some((slice_deref_arg_place, slice_deref_bb)) =
-            self.deref_subject(binary_search_arg_place, location)
-        else {
+        let dominators = self.basic_blocks.dominators();
+        let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
+            binary_search_arg_place,
+            location.block,
+            location.block,
+            self.basic_blocks,
+            dominators,
+            self.tcx,
+        ) else {
             return;
         };
 
@@ -124,18 +130,18 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         // slice `binary_search` methods.
         // Also tracks/allows "safe" transformations before `unwrap_or_else` call
         // (e.g. via `Result::inspect`, `Result::inspect_err` e.t.c).
-        // See [`track_safe_result_transformations`] for details.
+        // See [`analyze::track_safe_result_transformations`] for details.
         if let Some(target) = target {
             let mut unwrap_arg_place = *destination;
             let mut unwrap_arg_def_bb = location.block;
-            traverse::track_safe_result_transformations(
+            analyze::track_safe_result_transformations(
                 &mut unwrap_arg_place,
                 &mut unwrap_arg_def_bb,
                 *target,
                 self.basic_blocks,
                 self.tcx,
             );
-            let unwrap_place_info = traverse::call_target(&self.basic_blocks[unwrap_arg_def_bb])
+            let unwrap_place_info = analyze::call_target(&self.basic_blocks[unwrap_arg_def_bb])
                 .and_then(|next_target| {
                     // Retrieves `Result::unwrap_else` destination place and next target block (if any).
                     let next_bb_data = &self.basic_blocks[next_target];
@@ -149,7 +155,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                             && fn_name == "unwrap_or_else"
                     }
                     let (unwrap_dest_place, post_unwrap_target) =
-                        traverse::safe_transform_destination(
+                        analyze::safe_transform_destination(
                             unwrap_arg_place,
                             next_bb_data,
                             crate_adt_and_fn_name_check,
@@ -159,7 +165,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
 
                     // Checks that second arg is an identity function or closure and, if true,
                     // returns unwrap destination place and next target.
-                    // See [`is_identity_fn`] and [`is_identity_closure`] for details.
+                    // See [`analyze::is_identity_fn`] and [`analyze::is_identity_closure`] for details.
                     let unwrap_terminator = next_bb_data.terminator.as_ref()?;
                     let TerminatorKind::Call {
                         args: unwrap_args, ..
@@ -168,8 +174,8 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                         return None;
                     };
                     let unwrap_second_arg = unwrap_args.get(1)?;
-                    let is_identity = traverse::is_identity_fn(&unwrap_second_arg.node, self.tcx)
-                        || traverse::is_identity_closure(&unwrap_second_arg.node, self.tcx);
+                    let is_identity = analyze::is_identity_fn(&unwrap_second_arg.node, self.tcx)
+                        || analyze::is_identity_closure(&unwrap_second_arg.node, self.tcx);
                     is_identity.then_some((unwrap_dest_place, next_target_bb))
                 });
 
@@ -193,13 +199,13 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         // Tracks `Result::Ok` switch target info of return value of slice `binary_search` methods.
         // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
         // `Option::Some` transformations)
-        // See [`track_safe_primary_opt_result_variant_transformations`] for details.
+        // See [`analyze::track_safe_primary_opt_result_variant_transformations`] for details.
         let mut switch_target_place = *destination;
         let mut switch_target_bb = location.block;
         let mut switch_target_variant_name = "Ok".to_string();
-        let mut switch_target_variant_idx = traverse::variant_idx(LangItem::ResultOk, self.tcx);
+        let mut switch_target_variant_idx = analyze::variant_idx(LangItem::ResultOk, self.tcx);
         if let Some(target) = target {
-            traverse::track_safe_primary_opt_result_variant_transformations(
+            analyze::track_safe_primary_opt_result_variant_transformations(
                 &mut switch_target_place,
                 &mut switch_target_bb,
                 &mut switch_target_variant_name,
@@ -213,14 +219,13 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         // Tracks `Result::Err` switch target info of return value of slice `binary_search` methods.
         // Also tracks variant "safe" transformations (e.g. to `Option::Some`, then optionally to
         // `ControlFlow::Continue` and `Option::Some` transformations).
-        // See [`track_safe_result_err_transformations`] for details.
+        // See [`analyze::track_safe_result_err_transformations`] for details.
         let mut switch_target_place_alt = *destination;
         let mut switch_target_bb_alt = location.block;
         let mut switch_target_variant_name_alt = "Err".to_string();
-        let mut switch_target_variant_idx_alt =
-            traverse::variant_idx(LangItem::ResultErr, self.tcx);
+        let mut switch_target_variant_idx_alt = analyze::variant_idx(LangItem::ResultErr, self.tcx);
         if let Some(target) = target {
-            traverse::track_safe_result_err_transformations(
+            analyze::track_safe_result_err_transformations(
                 &mut switch_target_place_alt,
                 &mut switch_target_bb_alt,
                 &mut switch_target_variant_name_alt,
@@ -234,7 +239,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         // Collects `Result::Ok` (or equivalent safe transformation) target blocks
         // for switches based on the discriminant of return value of slice `binary_search`
         // in successor blocks.
-        let switch_targets = traverse::collect_switch_targets_for_discr_value(
+        let switch_targets = analyze::collect_switch_targets_for_discr_value(
             switch_target_place,
             switch_target_variant_idx.as_u32() as u128,
             switch_target_bb,
@@ -244,7 +249,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         // Collects `Result::Err` (or equivalent safe transformation) target blocks
         // for switches based on the discriminant of return value of slice `binary_search`
         // in successor blocks.
-        let switch_targets_err = traverse::collect_switch_targets_for_discr_value(
+        let switch_targets_err = analyze::collect_switch_targets_for_discr_value(
             switch_target_place_alt,
             switch_target_variant_idx_alt.as_u32() as u128,
             switch_target_bb_alt,
@@ -276,7 +281,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             for target_bb in targets_blocks {
                 for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
                     // Finds variant downcast to `usize` places (if any) for the switch target variant.
-                    let Some(downcast_place) = traverse::variant_downcast_to_usize_place(
+                    let Some(downcast_place) = analyze::variant_downcast_to_usize_place(
                         target_place,
                         target_variant_name,
                         target_variant_idx,
@@ -298,7 +303,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
 
         // Retrieves info needed to construct a collection length/size call for the slice subject
         // (if possible).
-        let len_bound_info = traverse::ref_only_collection_len_call_info(
+        let len_bound_info = analyze::borrowed_collection_len_call_info(
             slice_deref_arg_place,
             slice_deref_bb,
             self.basic_blocks,
@@ -333,7 +338,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             }
 
             // Declares an `isize::MAX` bound annotation (if appropriate).
-            if traverse::is_isize_bound_collection(
+            if analyze::is_isize_bound_collection(
                 slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
                 self.tcx,
             ) {
@@ -387,14 +392,20 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         }
 
         // Finds place for operand/arg and basic block for a slice `Deref` call (if any).
-        let Some((slice_deref_arg_place, slice_deref_bb)) =
-            self.deref_subject(partition_point_arg_place, location)
-        else {
+        let dominators = self.basic_blocks.dominators();
+        let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
+            partition_point_arg_place,
+            location.block,
+            location.block,
+            self.basic_blocks,
+            dominators,
+            self.tcx,
+        ) else {
             return;
         };
 
         // Declares an `isize::MAX` bound annotation (if appropriate).
-        if traverse::is_isize_bound_collection(
+        if analyze::is_isize_bound_collection(
             slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
             self.tcx,
         ) {
@@ -407,7 +418,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
 
         // Retrieves info needed to construct a collection length/size call for the slice subject
         // (if possible).
-        let len_bound_info = traverse::ref_only_collection_len_call_info(
+        let len_bound_info = analyze::borrowed_collection_len_call_info(
             slice_deref_arg_place,
             slice_deref_bb,
             self.basic_blocks,
@@ -426,25 +437,6 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                 len_call_info,
             ));
         }
-    }
-
-    /// Finds place for operand/arg and basic block for a slice `Deref` call (if any).
-    fn deref_subject(
-        &mut self,
-        slice_place: Place<'tcx>,
-        location: Location,
-    ) -> Option<(Place<'tcx>, BasicBlock)> {
-        let dominators = self.basic_blocks.dominators();
-        let slice_def_call = traverse::find_pre_anchor_assign_terminator(
-            slice_place,
-            location.block,
-            location.block,
-            self.basic_blocks,
-            dominators,
-        );
-        slice_def_call.and_then(|(terminator, bb)| {
-            traverse::deref_operand(&terminator, self.tcx).map(|place| (place, bb))
-        })
     }
 }
 

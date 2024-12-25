@@ -775,8 +775,8 @@ fn pallet_generics<'tcx>(
 
 /// Composes an entry point (returns a `name`, `content` and "used item" `DefId`s).
 ///
-/// NOTE: This function assumes the given `DefId` represents a dispatchable function/extrinsic or
-/// a public associated function of a `Pallet<T>` struct, but doesn't verify it.
+/// **NOTE:** This function assumes the given `DefId` represents a dispatchable function/extrinsic
+/// or a public associated function of a `Pallet<T>` struct, but doesn't verify it.
 fn compose_entry_point<'tcx>(
     fn_def_id: LocalDefId,
     generics: &Generics<'tcx>,
@@ -2198,15 +2198,17 @@ impl<'tcx> CallVisitor<'tcx> {
 impl<'tcx> CallVisitor<'tcx> {
     /// Collects calls to the `Pallet<T>` struct's associated functions.
     fn process_terminator(&mut self, terminator: &Terminator<'tcx>, _location: Location) {
-        if let TerminatorKind::Call { func, .. } = &terminator.kind {
-            let Some((fn_def_id, gen_args)) = func.const_fn_def() else {
-                return;
-            };
-            let Some(fn_local_def_id) = fn_def_id.as_local() else {
-                return;
-            };
-            let is_pallet_inherent_assoc_item = self
-                .tcx
+        let TerminatorKind::Call { func, .. } = &terminator.kind else {
+            return;
+        };
+        let Some((fn_def_id, gen_args)) = func.const_fn_def() else {
+            return;
+        };
+        let Some(fn_local_def_id) = fn_def_id.as_local() else {
+            return;
+        };
+        let is_pallet_inherent_assoc_item =
+            self.tcx
                 .opt_associated_item(fn_def_id)
                 .is_some_and(|assoc_item| {
                     assoc_item
@@ -2218,25 +2220,24 @@ impl<'tcx> CallVisitor<'tcx> {
                             })
                         })
                 });
-            if is_pallet_inherent_assoc_item {
-                let contains_type_params =
-                    gen_args
-                        .iter()
-                        .filter_map(GenericArg::as_type)
-                        .any(|gen_ty| {
-                            let is_param_ty = gen_ty
-                                .walk()
-                                .filter_map(GenericArg::as_type)
-                                .any(|ty| matches!(ty.kind(), TyKind::Param(_)));
-                            is_param_ty
-                        });
-                if contains_type_params {
-                    self.generic_calls.insert(fn_local_def_id);
-                } else {
-                    self.concrete_calls
-                        .entry(fn_local_def_id)
-                        .or_insert_with(|| terminator.clone());
-                }
+        if is_pallet_inherent_assoc_item {
+            let contains_type_params =
+                gen_args
+                    .iter()
+                    .filter_map(GenericArg::as_type)
+                    .any(|gen_ty| {
+                        let is_param_ty = gen_ty
+                            .walk()
+                            .filter_map(GenericArg::as_type)
+                            .any(|ty| matches!(ty.kind(), TyKind::Param(_)));
+                        is_param_ty
+                    });
+            if contains_type_params {
+                self.generic_calls.insert(fn_local_def_id);
+            } else {
+                self.concrete_calls
+                    .entry(fn_local_def_id)
+                    .or_insert_with(|| terminator.clone());
             }
         }
     }

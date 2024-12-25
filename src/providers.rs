@@ -1,8 +1,8 @@
 //! `rustc` providers for overriding queries.
 
+mod analyze;
 mod annotate;
 mod passes;
-mod traverse;
 
 use rustc_middle::{
     mir::{Body, MirPass},

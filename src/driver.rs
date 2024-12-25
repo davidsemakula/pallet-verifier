@@ -184,6 +184,7 @@ fn compile_annotated_dependency(args: &[String]) -> i32 {
 }
 
 /// Compiles dependencies.
+/// Enables unstable features if necessary, see [`lang_features`].
 fn compile_dependency(args: &[String]) -> i32 {
     let mut callbacks = DefaultCallbacks;
     let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
@@ -361,7 +362,7 @@ fn analysis_file_loader(
     file_loader_builder.build()
 }
 
-// Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
+/// Reads the analysis target path as the "normalized" first `*.rs` argument from CLI args.
 fn analysis_target_path(args: &[String]) -> PathBuf {
     let target_path_str = args
         .iter()
@@ -377,7 +378,7 @@ fn lang_features(crate_name: &str) -> Option<FxHashSet<&'static str>> {
         // Ref: <https://github.com/paritytech/parity-scale-codec/blob/master/Cargo.toml#L73C1-L73C13>
         // Ref: <https://blog.rust-lang.org/2024/06/13/Rust-1.79.0.html#inline-const-expressions>
         "parity_scale_codec" => Some(FxHashSet::from_iter(["inline_const"])),
-        // TODO: Remove when compiler is update to >= 1.80
+        // TODO: Remove when compiler is updated to >= 1.80
         // Ref: <https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html#lazycell-and-lazylock>
         "sp_panic_handler" | "sp_trie" | "sp_core" | "sp_consensus_beefy" => {
             Some(FxHashSet::from_iter(["lazy_cell"]))
