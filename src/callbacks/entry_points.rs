@@ -1241,6 +1241,11 @@ fn tractable_param_hir_type<'tcx>(
     used_items: &mut FxHashSet<DefId>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<String> {
+    if ty.span.from_expansion() || ty.span.is_dummy() {
+        // Bails if the HIR type has a "fake" span.
+        return None;
+    }
+
     let mut visitor = TyVisitor::new(tcx);
     visitor.visit_ty(ty);
 
