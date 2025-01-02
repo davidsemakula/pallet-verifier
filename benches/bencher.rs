@@ -519,6 +519,7 @@ impl std::fmt::Display for FixtureKind {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 enum Call {
     Dispatchable(String),
+    Hook(String),
     PubAssocFn(String),
 }
 
@@ -527,6 +528,7 @@ impl Call {
     fn new(name: String, kind: CallKind) -> Self {
         match kind {
             CallKind::Dispatchable => Call::Dispatchable(name),
+            CallKind::Hook => Call::Hook(name),
             CallKind::PubAssocFn => Call::PubAssocFn(name),
         }
     }
@@ -544,7 +546,7 @@ impl Call {
     /// Returns the name of the pallet `fn`.
     fn name(&self) -> &str {
         match self {
-            Self::Dispatchable(name) | Self::PubAssocFn(name) => name,
+            Self::Dispatchable(name) | Self::Hook(name) | Self::PubAssocFn(name) => name,
         }
     }
 }
@@ -553,9 +555,14 @@ impl Ord for Call {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (Call::Dispatchable(_), Call::Dispatchable(_))
+            | (Call::Hook(_), Call::Hook(_))
             | (Call::PubAssocFn(_), Call::PubAssocFn(_)) => Ord::cmp(self.name(), other.name()),
+            (Call::Dispatchable(_), Call::Hook(_)) => Ordering::Less,
             (Call::Dispatchable(_), Call::PubAssocFn(_)) => Ordering::Less,
+            (Call::Hook(_), Call::PubAssocFn(_)) => Ordering::Less,
+            (Call::Hook(_), Call::Dispatchable(_)) => Ordering::Greater,
             (Call::PubAssocFn(_), Call::Dispatchable(_)) => Ordering::Greater,
+            (Call::PubAssocFn(_), Call::Hook(_)) => Ordering::Greater,
         }
     }
 }
@@ -573,6 +580,7 @@ impl std::fmt::Display for Call {
             "{}: `{}`",
             match self {
                 Self::Dispatchable(_) => "dispatchable",
+                Self::Hook(_) => "hook",
                 Self::PubAssocFn(_) => "pub assoc fn",
             },
             self.name()

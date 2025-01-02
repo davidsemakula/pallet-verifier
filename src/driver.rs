@@ -8,6 +8,7 @@ extern crate rustc_session;
 
 mod cli_utils;
 
+use rustc_driver::EXIT_FAILURE;
 use rustc_hash::FxHashSet;
 
 use std::{
@@ -19,10 +20,11 @@ use std::{
 };
 
 use itertools::Itertools;
+use owo_colors::OwoColorize;
 
 use cli_utils::{
-    ARG_AUTO_ANNOTATIONS_DEP, ARG_COMPILE_ANNOTATIONS, ARG_DEP_ANNOTATE, ARG_DEP_FEATURES,
-    ARG_POINTER_WIDTH, ENV_DEP_RENAMES, ENV_OPTIONAL_DEPS,
+    ARG_ALLOW_HOOK_PANICS, ARG_AUTO_ANNOTATIONS_DEP, ARG_COMPILE_ANNOTATIONS, ARG_DEP_ANNOTATE,
+    ARG_DEP_FEATURES, ARG_POINTER_WIDTH, ENV_DEP_RENAMES, ENV_OPTIONAL_DEPS, HOOKS,
 };
 use pallet_verifier::{
     DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntrysPointInfo,
@@ -58,12 +60,17 @@ fn main() {
     // Removes `pallet-verifier` specific args.
     let mut skip_next = false;
     args.retain(|arg| {
-        let can_skip = skip_next
+        let can_skip = (skip_next && !arg.starts_with('-'))
             || is_equal_or_prefix(arg, ARG_POINTER_WIDTH)
             || is_equal_or_prefix(arg, ARG_DEP_ANNOTATE)
             || is_equal_or_prefix(arg, ARG_DEP_FEATURES)
-            || is_equal_or_prefix(arg, ARG_AUTO_ANNOTATIONS_DEP);
-        skip_next = arg == ARG_POINTER_WIDTH || arg == ARG_DEP_ANNOTATE || arg == ARG_DEP_FEATURES;
+            || is_equal_or_prefix(arg, ARG_AUTO_ANNOTATIONS_DEP)
+            || is_equal_or_prefix(arg, ARG_ALLOW_HOOK_PANICS);
+        skip_next = arg == ARG_POINTER_WIDTH
+            || arg == ARG_DEP_ANNOTATE
+            || arg == ARG_DEP_FEATURES
+            || arg == ARG_AUTO_ANNOTATIONS_DEP
+            || arg == ARG_ALLOW_HOOK_PANICS;
         !can_skip
     });
     fn is_equal_or_prefix(val: &str, pat: &str) -> bool {
@@ -78,6 +85,42 @@ fn main() {
     // Compiles dependency crates that need annotations and exits.
     if cli_utils::is_arg_enabled(ARG_DEP_ANNOTATE) {
         exit(compile_annotated_dependency(&args));
+    }
+
+    // Parses `--allow-hook-panics` arg.
+    let allow_hook_panics = cli_utils::arg_value(ARG_ALLOW_HOOK_PANICS).map(|arg_value| {
+        arg_value
+            .split(',')
+            .filter_map(|val| {
+                let name = val.trim();
+                if HOOKS.contains(&name) {
+                    Some(name.to_string())
+                } else if name.is_empty() {
+                    None
+                } else {
+                    eprintln!(
+                        "{}: Unknown hook `{name}` in `{ARG_ALLOW_HOOK_PANICS}` values.\
+                        \n  Allowed values are: {}",
+                        "error".red().bold(),
+                        HOOKS.map(|name| format!("`{name}`")).join(", ")
+                    );
+                    exit(EXIT_FAILURE);
+                }
+            })
+            .collect()
+    });
+    if allow_hook_panics.is_none()
+        && env::args().any(|arg| {
+            arg == ARG_ALLOW_HOOK_PANICS && arg.starts_with(&format!("{ARG_ALLOW_HOOK_PANICS}="))
+        })
+    {
+        eprintln!(
+            "{}: Missing value(s) for `{ARG_ALLOW_HOOK_PANICS}` arg.\
+            \n  Accepts a comma separated list from: {}",
+            "error".red().bold(),
+            HOOKS.map(|name| format!("`{name}`")).join(", "),
+        );
+        exit(EXIT_FAILURE);
     }
 
     // If neither `CARGO_PKG_NAME` nor `CARGO_PRIMARY_PACKAGE`, then presumably this is
@@ -119,6 +162,7 @@ fn main() {
         &args,
         entry_points_content,
         &entry_points_info,
+        allow_hook_panics,
     ));
 }
 
@@ -152,8 +196,9 @@ fn analyze_with_mirai(
     args: &[String],
     entry_points_content: String,
     entry_points_info: &EntrysPointInfo,
+    allow_hook_panics: Option<FxHashSet<String>>,
 ) -> i32 {
-    let mut callbacks = VerifierCallbacks::new(entry_points_info);
+    let mut callbacks = VerifierCallbacks::new(entry_points_info, allow_hook_panics);
     let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(

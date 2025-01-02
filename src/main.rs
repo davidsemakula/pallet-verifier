@@ -9,9 +9,11 @@ use std::{
     process::{exit, Command},
 };
 
+use owo_colors::OwoColorize;
+
 use cli_utils::{
-    ARG_AUTO_ANNOTATIONS_DEP, ARG_COMPILE_ANNOTATIONS, ARG_DEP_ANNOTATE, ARG_DEP_FEATURES,
-    ARG_POINTER_WIDTH, ENV_DEP_RENAMES, ENV_OPTIONAL_DEPS,
+    ARG_ALLOW_HOOK_PANICS, ARG_AUTO_ANNOTATIONS_DEP, ARG_COMPILE_ANNOTATIONS, ARG_DEP_ANNOTATE,
+    ARG_DEP_FEATURES, ARG_POINTER_WIDTH, ENV_DEP_RENAMES, ENV_OPTIONAL_DEPS, HOOKS,
 };
 
 const COMMAND: &str = "cargo verify-pallet";
@@ -26,6 +28,8 @@ const ENV_TARGET: &str = "PALLET_VERIFIER_TARGET";
 const ENV_ANNOTATIONS_RLIB_PATH_HOST: &str = "PALLET_VERIFIER_ANNOTATIONS_RLIB_PATH_HOST";
 /// Env var for tracking path for compiled `mirai-annotations` crate artifact for the "target" platform.
 const ENV_ANNOTATIONS_RLIB_PATH_TARGET: &str = "PALLET_VERIFIER_ANNOTATIONS_RLIB_PATH_TARGET";
+/// Env var for tracking `--allow-hook-panics` arg passed directly to cargo sub command.
+const ENV_ALLOW_HOOK_PANICS: &str = "PALLET_VERIFIER_ALLOW_HOOK_PANICS";
 
 /// filename of compiled `mirai-annotations` crate artifact.
 const ANNOTATIONS_RLIB_FILENAME: &str = "libmirai_annotations-pallet-verifier.rlib";
@@ -152,7 +156,10 @@ fn call_cargo() {
         Some("32") | None => 32,
         Some("64") => 64,
         _ => {
-            eprintln!("Expected a valid `--pointer-width=32|64`");
+            eprintln!(
+                "{}: Invalid `--pointer-width` arg value, expected `32` or `64`",
+                "error".red().bold(),
+            );
             exit(1);
         }
     };
@@ -301,10 +308,29 @@ fn call_cargo() {
     // Forwards relevant CLI args (skips cargo, subcommand and pallet-verifier specific args).
     let mut skip_next = false;
     cmd.args(env::args().skip(2).filter(|arg| {
-        let can_skip = skip_next || arg == ARG_POINTER_WIDTH || arg.starts_with(ARG_POINTER_WIDTH);
-        skip_next = arg == ARG_POINTER_WIDTH;
+        let can_skip = (skip_next && !arg.starts_with('-'))
+            || arg == ARG_POINTER_WIDTH
+            || arg.starts_with(ARG_POINTER_WIDTH)
+            || arg == ARG_ALLOW_HOOK_PANICS
+            || arg.starts_with(ARG_ALLOW_HOOK_PANICS);
+        skip_next = arg == ARG_POINTER_WIDTH || arg == ARG_ALLOW_HOOK_PANICS;
         !can_skip
     }));
+
+    // Track `--allow-hook-panics` arg.
+    if cli_utils::has_arg(ARG_ALLOW_HOOK_PANICS) {
+        if let Some(arg_value) = cli_utils::arg_value(ARG_ALLOW_HOOK_PANICS) {
+            env::set_var(ENV_ALLOW_HOOK_PANICS, arg_value);
+        } else {
+            eprintln!(
+                "{}: Missing value(s) for `{ARG_ALLOW_HOOK_PANICS}` arg.\
+                \n  Accepts a comma separated list from: {}",
+                "error".red().bold(),
+                HOOKS.map(|name| format!("`{name}`")).join(", "),
+            );
+            exit(1);
+        }
+    }
 
     // Executes command (exits on failure).
     cli_utils::exec_cmd(&mut cmd);
@@ -372,6 +398,12 @@ fn call_pallet_verifier(
             let sys_root_path = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("lib");
             add_dy_lib_path(&sys_root_path.to_string_lossy());
         }
+    }
+
+    // Adds `--allow-hook-panics` arg from env (if any).
+    if let Ok(arg_value) = env::var(ENV_ALLOW_HOOK_PANICS) {
+        cmd.arg(ARG_ALLOW_HOOK_PANICS);
+        cmd.arg(arg_value);
     }
 
     // Executes command (exits on failure).

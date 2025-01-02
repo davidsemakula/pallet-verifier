@@ -7,11 +7,11 @@ use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_interface::interface::Compiler;
 use rustc_middle::{
     query,
-    ty::{AssocKind, TyCtxt},
+    ty::{AssocKind, GenericArg, ImplSubject, TyCtxt, TyKind},
 };
 use rustc_span::{
     def_id::{CrateNum, DefId, LocalDefId},
-    Span, Symbol,
+    ExpnKind, Span, Symbol,
 };
 
 use std::{cell::RefCell, collections::HashMap, process, rc::Rc};
@@ -33,13 +33,18 @@ use crate::{
 pub struct VerifierCallbacks<'compilation> {
     entry_points: &'compilation EntrysPointInfo,
     mirai_config: Option<MiraiConfig>,
+    allow_hook_panics: Option<FxHashSet<String>>,
 }
 
 impl<'compilation> VerifierCallbacks<'compilation> {
-    pub fn new(entry_points: &'compilation EntrysPointInfo) -> Self {
+    pub fn new(
+        entry_points: &'compilation EntrysPointInfo,
+        allow_hook_panics: Option<FxHashSet<String>>,
+    ) -> Self {
         Self {
             entry_points,
             mirai_config: None,
+            allow_hook_panics,
         }
     }
 }
@@ -183,6 +188,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
 
             // Finds and analyzes the generated entry points.
             let mut dispatchable_entry_points = Vec::new();
+            let mut hook_entry_points = Vec::new();
             let mut pub_assoc_fn_entry_points = Vec::new();
             let mut analyze_entry_points =
                 |mut entry_points_info: Vec<(LocalDefId, LocalDefId, Symbol, Option<Symbol>)>,
@@ -197,7 +203,9 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                             )
                         });
                     }
-                    for (entry_point_def_id, _, fn_name, trait_name) in entry_points_info {
+                    for (entry_point_def_id, callee_def_id, fn_name, trait_name) in
+                        entry_points_info
+                    {
                         println!(
                             "{} {call_kind}: `{}{fn_name}` ...",
                             "Analyzing".style(utils::highlight_style()),
@@ -216,7 +224,14 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                         );
 
                         // Emit diagnostics for generated entry point (if necessary).
-                        emit_diagnostics(diagnostics, entry_point_def_id, tcx, &test_mod_spans);
+                        emit_diagnostics(
+                            diagnostics,
+                            entry_point_def_id,
+                            callee_def_id,
+                            tcx,
+                            &test_mod_spans,
+                            self.allow_hook_panics.as_ref(),
+                        );
                     }
                 };
             for local_def_id in hir.body_owners() {
@@ -262,6 +277,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                     let info = (local_def_id, callee_def_id, fn_name, trait_name);
                     match call_kind {
                         CallKind::Dispatchable => dispatchable_entry_points.push(info),
+                        CallKind::Hook => hook_entry_points.push(info),
                         CallKind::PubAssocFn => pub_assoc_fn_entry_points.push(info),
                     }
                 }
@@ -274,6 +290,12 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                     "Analyzing".style(utils::highlight_style())
                 );
                 analyze_entry_points(dispatchable_entry_points, CallKind::Dispatchable);
+            }
+
+            // Analyze hooks.
+            if !hook_entry_points.is_empty() {
+                println!("{} hooks ...", "Analyzing".style(utils::highlight_style()));
+                analyze_entry_points(hook_entry_points, CallKind::Hook);
             }
 
             // Analyze pub assoc `fn`s.
@@ -339,14 +361,16 @@ fn analyze<'analysis>(
 fn emit_diagnostics(
     diagnostics: Vec<DiagnosticBuilder<()>>,
     entry_point_def_id: LocalDefId,
+    callee_def_id: LocalDefId,
     tcx: TyCtxt,
     test_mod_spans: &FxHashSet<Span>,
+    allow_hook_panics: Option<&FxHashSet<String>>,
 ) {
     let source_map = tcx.sess.source_map();
     let is_span_local = |mspan: &MultiSpan| {
         mspan
             .primary_span()
-            .and_then(|span| source_map.span_to_location_info(span).0)
+            .and_then(|span| source_map.span_to_location_info(span.source_callsite()).0)
             .is_some_and(|source_file| source_file.cnum == LOCAL_CRATE)
     };
     let entry_point_span = tcx.source_span(entry_point_def_id);
@@ -410,7 +434,8 @@ fn emit_diagnostics(
     let is_span_from_dispatch_error_from_impl = |mspan: &MultiSpan| {
         mspan.primary_span().is_some_and(|span| {
             // Handles local `#[pallet::error]` definitions.
-            span.parent()
+            let is_in_local_pallet_error = span
+                .parent()
                 .and_then(|parent_local_def_id| {
                     tcx.opt_associated_item(parent_local_def_id.to_def_id())
                 })
@@ -421,41 +446,249 @@ fn emit_diagnostics(
                             .trait_item_def_id
                             .is_some_and(|trait_item_def_id| {
                                 let crate_name = tcx.crate_name(trait_item_def_id.krate);
-                                let trait_def_id = tcx.trait_of_item(trait_item_def_id).expect("Expected a trait `DefId`");
+                                let trait_def_id = tcx
+                                    .trait_of_item(trait_item_def_id)
+                                    .expect("Expected a trait `DefId`");
                                 let trait_name = tcx.item_name(trait_def_id);
-                                matches!(crate_name.as_str(), "core" | "std") && trait_name.as_str() == "From"
+                                matches!(crate_name.as_str(), "core" | "std")
+                                    && trait_name.as_str() == "From"
                             });
                     let is_dispatch_error_impl =
                         assoc_item.impl_container(tcx).is_some_and(|impl_def_id| {
                             let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
-                            if let rustc_middle::ty::ImplSubject::Trait(trait_ref) = impl_subject {
+                            if let ImplSubject::Trait(trait_ref) = impl_subject {
                                 trait_ref.self_ty().ty_adt_def().is_some_and(|adt_def| {
                                     let adt_def_id = adt_def.did();
                                     let crate_name = tcx.crate_name(adt_def_id.krate);
                                     let adt_name = tcx.item_name(adt_def_id);
-                                    crate_name.as_str() == "sp_runtime" &&
-                                    adt_name.as_str() == "DispatchError"
+                                    crate_name.as_str() == "sp_runtime"
+                                        && adt_name.as_str() == "DispatchError"
                                 })
                             } else {
                                 false
                             }
                         });
                     is_core_convert_from_impl && is_dispatch_error_impl
-                })
-                // Handles foreign `#[pallet::error]` definitions.
-                || source_map.span_to_snippet(span).is_ok_and(|snippet| {
+                });
+            // Handles foreign `#[pallet::error]` definitions.
+            let is_in_foreign_pallet_error = || {
+                source_map.span_to_snippet(span).is_ok_and(|snippet| {
                     snippet == "error"
                         && source_map
                             .span_to_snippet(source_map.span_extend_to_line(span))
-                        .is_ok_and(|mut line_snippet| {
-                            line_snippet.retain(|c| !c.is_whitespace());
-                            line_snippet.contains("#[pallet::error")
-                        })
+                            .is_ok_and(|mut line_snippet| {
+                                line_snippet.retain(|c| !c.is_whitespace());
+                                line_snippet.contains("#[pallet::error")
+                            })
                 })
+            };
+            is_in_local_pallet_error || is_in_foreign_pallet_error()
+        })
+    };
+    // Checks if diagnostic arises from FRAME storage definition.
+    let is_span_from_frame_storage_def = |mspan: &MultiSpan| {
+        mspan.primary_span().is_some_and(|span| {
+            // Handles local `#[pallet::storage]` definitions.
+            let is_in_local_pallet_storage = span.parent().is_some_and(|local_def_id| {
+                tcx.impl_of_method(local_def_id.to_def_id())
+                    .is_some_and(|impl_def_id| {
+                        let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
+                        let self_ty = match impl_subject {
+                            ImplSubject::Trait(trait_ref) => {
+                                let trait_def_id = trait_ref.def_id;
+                                let is_frame_storage_trait =
+                                    tcx.crate_name(trait_def_id.krate).as_str() == "frame_support"
+                                        && tcx.item_name(trait_def_id).as_str().contains("Storage");
+                                is_frame_storage_trait.then_some(trait_ref.self_ty())
+                            }
+                            ImplSubject::Inherent(self_ty) => Some(self_ty),
+                        };
+                        let is_storage_generated_storage_struct = |adt_def_id: DefId| {
+                            tcx.item_name(adt_def_id)
+                                .as_str()
+                                .starts_with("_GeneratedPrefixForStorage")
+                        };
+                        self_ty.is_some_and(|self_ty| {
+                            if let TyKind::Adt(adt_def, gen_args) = self_ty.kind() {
+                                if is_storage_generated_storage_struct(adt_def.did()) {
+                                    return true;
+                                }
+
+                                let prefix_ty_arg =
+                                    gen_args.iter().filter_map(GenericArg::as_type).next();
+                                let prefix_adt_def = prefix_ty_arg
+                                    .and_then(|prefix_ty_arg| prefix_ty_arg.ty_adt_def());
+                                let is_storage_prefix = prefix_adt_def.is_some_and(|adt_def| {
+                                    is_storage_generated_storage_struct(adt_def.did())
+                                });
+                                let includes_query_type = || {
+                                    gen_args.iter().any(|arg| {
+                                        arg.as_type()
+                                            .and_then(|ty| ty.ty_adt_def())
+                                            .map(|adt_def| adt_def.did())
+                                            .is_some_and(|adt_def_id| {
+                                                let crate_name = tcx.crate_name(adt_def_id.krate);
+                                                let item_name = tcx.item_name(adt_def_id);
+                                                crate_name.as_str() == "frame_support"
+                                                    && matches!(
+                                                        item_name.as_str(),
+                                                        "ValueQuery"
+                                                            | "OptionQuery"
+                                                            | "ResultQuery"
+                                                    )
+                                            })
+                                    })
+                                };
+                                return is_storage_prefix || includes_query_type();
+                            };
+                            false
+                        })
+                    })
+            });
+            // Handles foreign `#[pallet::storage]` definitions.
+            let is_in_foreign_pallet_storage = || {
+                source_map.span_to_snippet(span).is_ok_and(|snippet| {
+                    snippet == "storage"
+                        && source_map
+                            .span_to_snippet(source_map.span_extend_to_line(span))
+                            .is_ok_and(|mut line_snippet| {
+                                line_snippet.retain(|c| !c.is_whitespace());
+                                line_snippet.contains("#[pallet::storage")
+                            })
+                })
+            };
+            is_in_local_pallet_storage || is_in_foreign_pallet_storage()
+        })
+    };
+    // Checks if diagnostic arises from generated code for `##[pallet::pallet]` annotated struct.
+    let is_span_from_pallet_struct = |mspan: &MultiSpan| {
+        mspan.primary_span().is_some_and(|span| {
+            // Handles local `#[pallet::pallet]` definitions.
+            let is_in_local_pallet_pallet = span.parent().is_some_and(|local_def_id| {
+                tcx.impl_of_method(local_def_id.to_def_id())
+                    .is_some_and(|impl_def_id| {
+                        let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
+                        if let ImplSubject::Trait(trait_ref) = impl_subject {
+                            let trait_def_id = trait_ref.def_id;
+                            let is_pallet_trait = tcx.crate_name(trait_def_id.krate).as_str()
+                                == "frame_support"
+                                && tcx.item_name(trait_def_id).as_str().contains("Pallet");
+                            if is_pallet_trait {
+                                let self_ty = trait_ref.self_ty();
+                                if let Some(adt_def) = self_ty.ty_adt_def() {
+                                    let adt_name = tcx.item_name(adt_def.did());
+                                    return adt_name.as_str() == "Pallet";
+                                }
+                            }
+                        }
+
+                        false
+                    })
+            });
+            // Handles foreign `#[pallet::pallet]` definitions.
+            let is_in_foreign_pallet_pallet = || {
+                source_map.span_to_snippet(span).is_ok_and(|snippet| {
+                    snippet == "pallet"
+                        && source_map
+                            .span_to_snippet(source_map.span_extend_to_line(span))
+                            .is_ok_and(|mut line_snippet| {
+                                line_snippet.retain(|c| !c.is_whitespace());
+                                line_snippet.contains("#[pallet::pallet")
+                            })
+                })
+            };
+            is_in_local_pallet_pallet || is_in_foreign_pallet_pallet()
+        })
+    };
+    // Checks if the callee `DefId` is an assoc fn of the `frame_support::traits::Hooks` impl.
+    let is_hooks_impl_callee = || {
+        let impl_def_id = tcx.impl_of_method(callee_def_id.to_def_id());
+        let trait_def_id = impl_def_id.and_then(|impl_def_id| tcx.trait_id_of_impl(impl_def_id));
+        trait_def_id.is_some_and(|trait_def_id| {
+            let crate_name = tcx.crate_name(trait_def_id.krate);
+            let trait_name = tcx.item_name(trait_def_id);
+            crate_name.as_str() == "frame_support" && trait_name.as_str() == "Hooks"
+        })
+    };
+    let callee_name = tcx.item_name(callee_def_id.to_def_id());
+    // Checks if span points to a panic or assert macro.
+    let is_panic_or_assert_macro = |mspan: &MultiSpan| {
+        mspan.primary_span().is_some_and(|span| {
+            span.macro_backtrace().any(|expn_data| {
+                if let ExpnKind::Macro(rustc_span::MacroKind::Bang, name) = expn_data.kind {
+                    matches!(
+                        name.as_str(),
+                        "panic" | "assert" | "assert_eq" | "assert_ne"
+                    ) || name.as_str().starts_with("$crate::panic::")
+                } else {
+                    false
+                }
+            })
+        })
+    };
+    // Checks if span points to an `Result::expect` or `Option::expect`.
+    let is_result_or_opt_expect = |mspan: &MultiSpan| {
+        mspan.primary_span().is_some_and(|span| {
+            source_map.span_to_snippet(span).is_ok_and(|snippet| {
+                if let (Some(source_file), ..) = source_map.span_to_location_info(span) {
+                    let crate_name = tcx.crate_name(source_file.cnum);
+                    let file_name = source_file.name.prefer_local().to_string();
+                    if matches!(crate_name.as_str(), "core" | "std") {
+                        // Handles `Option::expect`.
+                        if file_name.ends_with("/option.rs")
+                            && snippet.starts_with("expect_failed(")
+                        {
+                            return true;
+                        }
+
+                        // Handles `Result::expect`.
+                        // NOTE: For both `Result::expect` and `Result::unwrap` call `unwrap_failed(..)`,
+                        // however `Result::unwrap` passes in a string literal as the `msg` arg,
+                        // while `Result::expect` passes a variable.
+                        if file_name.ends_with("/result.rs")
+                            && snippet.starts_with("unwrap_failed(")
+                            && !snippet.starts_with("unwrap_failed(\"")
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                false
+            })
         })
     };
 
     for mut diagnostic in diagnostics {
+        // Ignores direct calls built-in panic and assert macros in `integrity_test` hook.
+        let last_mspan = diagnostic
+            .children
+            .last()
+            .map(|sub_diag| &sub_diag.span)
+            .unwrap_or_else(|| &diagnostic.span);
+        let is_hook_allowed_to_panic = allow_hook_panics
+            .is_some_and(|hooks| hooks.contains(callee_name.as_str()))
+            || (allow_hook_panics.is_none() && callee_name.as_str() == "integrity_test");
+        let is_penultimate_span_local = || {
+            if !diagnostic.children.is_empty() {
+                let penultimate_mspan = diagnostic
+                    .children
+                    .get(diagnostic.children.len() - 2)
+                    .map(|sub_diag| &sub_diag.span)
+                    .unwrap_or_else(|| &diagnostic.span);
+                return is_span_local(penultimate_mspan);
+            }
+            false
+        };
+        if is_hook_allowed_to_panic
+            && is_hooks_impl_callee()
+            && ((is_panic_or_assert_macro(last_mspan) && is_span_local(last_mspan))
+                || (is_result_or_opt_expect(last_mspan) && is_penultimate_span_local()))
+        {
+            diagnostic.cancel();
+            continue;
+        }
+
         // Ignores noisy diagnostics about foreign functions with missing MIR bodies, incomplete analysis e.t.c.
         // Also ignores `mirai_annotations::assume!` related diagnostics because those are likely
         // from our analysis code.
@@ -474,11 +707,13 @@ fn emit_diagnostics(
                 let is_debug_assert = || {
                     msg.contains("assert")
                         && diagnostic.span.primary_span().is_some_and(|span| {
-                            source_map.span_to_snippet(span).is_ok_and(|snippet| {
-                                snippet.contains("debug_assert!")
-                                    || snippet.contains("debug_assert_eq!")
-                                    || snippet.contains("debug_assert_ne!")
-                            })
+                            source_map
+                                .span_to_snippet(span.source_callsite())
+                                .is_ok_and(|snippet| {
+                                    snippet.contains("debug_assert!")
+                                        || snippet.contains("debug_assert_eq!")
+                                        || snippet.contains("debug_assert_ne!")
+                                })
                         })
                 };
                 let is_truthy_assume = || {
@@ -539,7 +774,7 @@ fn emit_diagnostics(
         // Ignores diagnostics that either have no relation to user-defined local item definitions,
         // or arise from FRAME and substrate "core" crates (i.e. substrate primitive/`sp_*` libraries,
         // `frame_support` and `frame_system` pallets, and SCALE codec libraries) or test-only code.
-        let relevant_spans = std::iter::once(diagnostic.span.clone())
+        let relevant_spans: Vec<_> = std::iter::once(diagnostic.span.clone())
             .chain(
                 diagnostic
                     .children
@@ -547,9 +782,11 @@ fn emit_diagnostics(
                     .map(|sub_diag| sub_diag.span.clone()),
             )
             .skip_while(|span| {
-                !is_span_local(span) || is_span_from_expansion(span) || is_span_in_entry_point(span)
+                !is_span_local(span)
+                    || (is_span_from_expansion(span) && is_span_in_frame_substrate_core(span))
+                    || is_span_in_entry_point(span)
             })
-            .collect::<Vec<_>>();
+            .collect();
         if relevant_spans.is_empty()
             || relevant_spans.iter().any(|mspan| {
                 is_span_from_dispatch_error_from_impl(mspan) || is_span_in_cfg_test_mod(mspan)
@@ -558,7 +795,11 @@ fn emit_diagnostics(
                 .iter()
                 .rev()
                 .take_while_inclusive(|mspan| !is_span_local(mspan))
-                .any(is_span_in_frame_substrate_core)
+                .any(|mspan| {
+                    is_span_in_frame_substrate_core(mspan)
+                        || is_span_from_frame_storage_def(mspan)
+                        || is_span_from_pallet_struct(mspan)
+                })
         {
             diagnostic.cancel();
             continue;

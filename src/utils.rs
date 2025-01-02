@@ -1,7 +1,7 @@
 //! Common analysis utilities.
 
 use rustc_ast::NestedMetaItem;
-use rustc_hir::HirId;
+use rustc_hir::{def_id::CrateNum, HirId};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::{def_id::DefId, Symbol};
 
@@ -19,6 +19,14 @@ pub fn target_pointer_width() -> usize {
         Ok("64") => 64,
         _ => HOST_POINTER_WIDTH,
     }
+}
+
+/// Returns `CrateNum` given a crate name.
+pub fn find_crate(name: &str, tcx: TyCtxt) -> Option<CrateNum> {
+    tcx.crates(())
+        .iter()
+        .find(|crate_num| tcx.crate_name(**crate_num).as_str() == name)
+        .cloned()
 }
 
 /// Returns the `DefId` of the parent/subject trait (if any) for the associated item

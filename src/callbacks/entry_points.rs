@@ -143,13 +143,23 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                 }
             }
 
+            // Finds pallet hook function definitions.
+            println!(
+                "{} for implementations of pallet hooks ...",
+                "Searching".style(utils::highlight_style())
+            );
+            let hook_fn_def_ids = hook_impl_fn_ids(pallet_struct_def_id, tcx).unwrap_or_default();
+
             // Finds pallet associated function definitions.
             println!(
                 "{} for public associated function definitions ...",
                 "Searching".style(utils::highlight_style())
             );
             let pub_assoc_fn_def_ids = pallet_pub_assoc_fn_ids(pallet_struct_def_id, tcx);
-            if dispatchable_def_ids.is_empty() && pub_assoc_fn_def_ids.is_empty() {
+            if dispatchable_def_ids.is_empty()
+                && hook_fn_def_ids.is_empty()
+                && pub_assoc_fn_def_ids.is_empty()
+            {
                 return;
             }
 
@@ -213,6 +223,7 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
             };
             for fn_def_id in dispatchable_def_ids
                 .iter()
+                .chain(&hook_fn_def_ids)
                 .chain(&pub_assoc_fn_def_ids)
                 // Process functions with calls first, so that we can collect type substitutions
                 // for opaque, dynamic and indirect types.
@@ -240,6 +251,8 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                 );
                 let call_kind = if dispatchable_def_ids.contains(fn_def_id) {
                     CallKind::Dispatchable
+                } else if hook_fn_def_ids.contains(fn_def_id) {
+                    CallKind::Hook
                 } else {
                     CallKind::PubAssocFn
                 };
@@ -604,6 +617,41 @@ fn pallet_pub_assoc_fn_ids(
             .collect(),
         None => pallet_local_trait_assoc_fns.collect(),
     }
+}
+
+/// Finds definitions of associated functions of pallet's `frame_support::traits::Hooks` trait implementation.
+///
+/// Ref: <https://docs.rs/frame-support/latest/frame_support/traits/trait.Hooks.html>
+/// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.hooks.html>
+fn hook_impl_fn_ids(
+    pallet_struct_def_id: LocalDefId,
+    tcx: TyCtxt,
+) -> Option<FxHashSet<LocalDefId>> {
+    // Finds `frame_support::traits::Hooks` traits.
+    let frame_support_crate = utils::find_crate("frame_support", tcx)?;
+    let traits = tcx.traits(frame_support_crate);
+    let hooks_trait_def_id = traits
+        .iter()
+        .find(|trait_def_id| tcx.item_name(**trait_def_id).as_str() == "Hooks")?;
+
+    // Finds assoc fns of `frame_support::traits::Hooks` trait implementation.
+    let hook_fn_def_ids = tcx
+        .trait_impls_of(hooks_trait_def_id)
+        .non_blanket_impls()
+        .iter()
+        .filter_map(|(self_ty, impls_)| {
+            let self_ty_id = self_ty.def()?;
+            let is_pallet_impl = self_ty_id == pallet_struct_def_id.to_def_id();
+            is_pallet_impl.then_some(
+                impls_
+                    .iter()
+                    .flat_map(|impl_def_id| tcx.associated_item_def_ids(impl_def_id))
+                    .filter_map(|def_id| def_id.as_local()),
+            )
+        })
+        .flatten()
+        .collect();
+    Some(hook_fn_def_ids)
 }
 
 /// Generic info for specializing entry points.

@@ -64,7 +64,11 @@ pub type EntrysPointInfo = FxHashMap<String, (DefPathHash, CallKind)>;
 /// Kind of pallet `fn`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallKind {
+    /// Associated functions of a `#[pallet::call]` annotated `impl` block.
     Dispatchable,
+    /// Associated functions of a `#[pallet::hooks]` annotated `impl` block.
+    Hook,
+    /// All other pallet struct associated function with public visibility.
     PubAssocFn,
 }
 
@@ -75,6 +79,7 @@ impl std::fmt::Display for CallKind {
             "{}",
             match self {
                 CallKind::Dispatchable => "dispatchable",
+                CallKind::Hook => "hook",
                 CallKind::PubAssocFn => "pub assoc fn",
             }
         )

@@ -20,11 +20,25 @@ pub const ARG_AUTO_ANNOTATIONS_DEP: &str = "--auto-annotations-dep";
 pub const ARG_DEP_ANNOTATE: &str = "--dep-with-annotations";
 /// CLI arg that tells `pallet-verifier` to compile a dependency with some unstable features enabled.
 pub const ARG_DEP_FEATURES: &str = "--dep-with-lang-features";
+/// CLI arg that tells `pallet-verifier` to allow local panics in specified list of pallet hooks.
+pub const ARG_ALLOW_HOOK_PANICS: &str = "--allow-hook-panics";
 
 /// Env var for tracking dependency renames from `Cargo.toml`.
 pub const ENV_DEP_RENAMES: &str = "PALLET_VERIFIER_DEP_RENAMES";
 /// Env var for tracking names of optional dependency from `Cargo.toml`.
 pub const ENV_OPTIONAL_DEPS: &str = "PALLET_VERIFIER_OPTIONAL_DEPS";
+
+/// Names of pallet hook functions.
+/// Ref: <https://docs.rs/frame-support/latest/frame_support/traits/trait.Hooks.html>
+pub const HOOKS: [&str; 7] = [
+    "on_initialize",
+    "on_finalize",
+    "on_idle",
+    "on_poll",
+    "on_runtime_upgrade",
+    "offchain_worker",
+    "integrity_test",
+];
 
 /// Shows help and version messages (and exits, if necessary).
 ///
@@ -103,6 +117,12 @@ pub fn is_rustc_path(arg: &str) -> bool {
         .is_some_and(|name| name == "rustc")
 }
 
+/// Returns true if the command line argument is present.
+#[allow(dead_code)] // False positive.
+pub fn has_arg(name: &str) -> bool {
+    env::args().any(|arg| arg == name || arg.starts_with(&format!("{name}=")))
+}
+
 /// Returns a command line argument value (if any).
 /// i.e. `value` in `--name value` or `--name=value`.
 pub fn arg_value(name: &str) -> Option<String> {
@@ -113,9 +133,9 @@ pub fn arg_value(name: &str) -> Option<String> {
         .as_ref()
         .and_then(|arg| arg.splitn(2, '=').collect_tuple())
     {
-        return Some(value.to_string());
+        return (!value.is_empty()).then_some(value.to_string());
     }
-    args.next()
+    args.next().filter(|val| !val.is_empty())
 }
 
 /// Returns true is the CLI arg with given name is enabled
@@ -160,9 +180,12 @@ fn help(command: &str) {
 Usage: {command}
 
 Options:
-    -h, --help               Print help
-    -V, --version            Print version
-    --pointer-width <32|64>  The pointer width for the target execution environment
-"#
+    -h, --help                   Print help
+    -V, --version                Print version
+    --pointer-width <32|64>      The pointer width for the target execution environment
+    --allow-hook-panics <list>   The hooks in which no warnings should be reported for local panics.
+                                     Accepts a comma separated list from: {}
+"#,
+        HOOKS.map(|name| format!("`{name}`")).join(",")
     );
 }
