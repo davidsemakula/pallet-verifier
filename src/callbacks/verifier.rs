@@ -11,7 +11,7 @@ use rustc_middle::{
 };
 use rustc_span::{
     def_id::{CrateNum, DefId, LocalDefId},
-    ExpnKind, Span, Symbol,
+    ExpnData, ExpnKind, MacroKind, Span, Symbol,
 };
 
 use std::{cell::RefCell, collections::HashMap, process, rc::Rc};
@@ -611,18 +611,26 @@ fn emit_diagnostics(
         })
     };
     let callee_name = tcx.item_name(callee_def_id.to_def_id());
-    // Checks if span points to a panic or assert macro.
-    let is_panic_or_assert_macro = |mspan: &MultiSpan| {
+    // Checks if span points to a panicking macro (expect `unimplemented!`).
+    let is_panicking_macro_except_unimpl = |mspan: &MultiSpan| {
         mspan.primary_span().is_some_and(|span| {
+            let macro_name = |expn_data: ExpnData| match expn_data.kind {
+                ExpnKind::Macro(MacroKind::Bang, symbol) => Some(symbol),
+                _ => None,
+            };
+            let is_unimplemented = span.macro_backtrace().any(|expn_data| {
+                macro_name(expn_data).is_some_and(|name| name.as_str() == "unimplemented")
+            });
+            if is_unimplemented {
+                return false;
+            }
             span.macro_backtrace().any(|expn_data| {
-                if let ExpnKind::Macro(rustc_span::MacroKind::Bang, name) = expn_data.kind {
+                macro_name(expn_data).is_some_and(|name| {
                     matches!(
                         name.as_str(),
-                        "panic" | "assert" | "assert_eq" | "assert_ne"
+                        "panic" | "assert" | "assert_eq" | "assert_ne" | "unreachable"
                     ) || name.as_str().starts_with("$crate::panic::")
-                } else {
-                    false
-                }
+                })
             })
         })
     };
@@ -660,7 +668,9 @@ fn emit_diagnostics(
     };
 
     for mut diagnostic in diagnostics {
-        // Ignores direct calls built-in panic and assert macros in `integrity_test` hook.
+        // Ignores direct calls panicking macros  (i.e. `panic!`, `assert!`, `unreachable!` e.t.c)
+        // and `Option/Result::expect` calls either `integrity_test` hook (default) or
+        // any hooks specified by the `allow_hook_panics` arg.
         let last_mspan = diagnostic
             .children
             .last()
@@ -682,7 +692,7 @@ fn emit_diagnostics(
         };
         if is_hook_allowed_to_panic
             && is_hooks_impl_callee()
-            && ((is_panic_or_assert_macro(last_mspan) && is_span_local(last_mspan))
+            && ((is_panicking_macro_except_unimpl(last_mspan) && is_span_local(last_mspan))
                 || (is_result_or_opt_expect(last_mspan) && is_penultimate_span_local()))
         {
             diagnostic.cancel();
@@ -728,21 +738,22 @@ fn emit_diagnostics(
                 let is_pointer_alloc_issue = || {
                     msg.contains("pointer") && msg.contains("memory") && msg.contains("deallocated")
                 };
-                let is_arg_validity_related = || {
-                    let is_from_std = || {
-                        diagnostic.children.iter().any(|sub_diag| {
-                            sub_diag.span.primary_span().is_some_and(|span| {
-                                source_map.span_to_location_info(span).0.is_some_and(
-                                    |source_file| {
-                                        matches!(
-                                            tcx.crate_name(source_file.cnum).as_str(),
-                                            "std" | "core" | "alloc"
-                                        )
-                                    },
-                                )
-                            })
+                let is_from_std = || {
+                    diagnostic.children.iter().any(|sub_diag| {
+                        sub_diag.span.primary_span().is_some_and(|span| {
+                            source_map
+                                .span_to_location_info(span)
+                                .0
+                                .is_some_and(|source_file| {
+                                    matches!(
+                                        tcx.crate_name(source_file.cnum).as_str(),
+                                        "std" | "core" | "alloc"
+                                    )
+                                })
                         })
-                    };
+                    })
+                };
+                let is_arg_validity_related = || {
                     let is_in_fn_like_macro = || {
                         diagnostic.span.primary_span().is_some_and(|span| {
                             source_map.span_to_snippet(span).is_ok_and(|snippet| {
@@ -758,6 +769,13 @@ fn emit_diagnostics(
                     (msg.contains("invalid args") || msg.contains("dummy argument"))
                         && (is_from_std() || is_in_fn_like_macro())
                 };
+                // More targeted replacement for disabled MIRAI unreachable! panic suppression.
+                // Ref: <https://github.com/davidsemakula/MIRAI/commit/64d9f234a4be09f793d146594096b4d6377d969e>
+                let is_std_internal_unreachable = || {
+                    msg.contains("internal error:")
+                        && msg.contains("entered unreachable")
+                        && is_from_std()
+                };
                 is_missing_mir()
                     || msg.contains("incomplete analysis")
                     || is_debug_assert()
@@ -765,6 +783,7 @@ fn emit_diagnostics(
                     || is_unreachable_assume()
                     || is_pointer_alloc_issue()
                     || is_arg_validity_related()
+                    || is_std_internal_unreachable()
             });
         if is_noisy {
             diagnostic.cancel();
