@@ -269,58 +269,58 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Finds place for `std::iter::Iterator::position` operand/arg.
         let iter_pos_arg = args
             .first()
-            .expect("Expected an arg for `Iterator::position`");
+            .expect("Expected an arg for `Iterator::(r)position`");
         let Some(iter_pos_arg_place) = iter_pos_arg.node.place() else {
             return;
         };
 
-        // Finds place and basic block for an `Iterator` by reference conversion method operand/arg (if any).
-        // NOTE: We only care about `Iterator`s by reference because our length annotation requires
-        // the target collection to be passed by reference (not value) so that
-        // it's length/size can still be referenced after this iteration.
+        // Finds place and basic block (if any) of innermost iterator subject to which
+        // no "growing" iterator adapters are applied.
         let dominators = self.basic_blocks.dominators();
-        let iter_by_ref_arg_def_call = analyze::pre_anchor_assign_terminator(
-            iter_pos_arg_place,
-            location.block,
-            location.block,
-            self.basic_blocks,
-            dominators,
-        );
-        let Some((iter_by_ref_place, iter_by_ref_bb)) =
-            iter_by_ref_arg_def_call.and_then(|(terminator, bb)| {
-                iter_by_ref_operand(&terminator, self.tcx).map(|place| (place, bb))
-            })
+        let Some((mut iterator_subject_place, mut iterator_subject_bb)) =
+            size_invariant_iterator_subject(
+                iter_pos_arg_place,
+                location.block,
+                self.basic_blocks,
+                self.local_decls,
+                dominators,
+                self.tcx,
+            )
         else {
             return;
         };
 
         // Finds place and basic block for slice `Deref` operand/arg (if any).
-        let Some((iter_by_ref_deref_arg_place, iter_by_ref_deref_bb)) = analyze::deref_subject(
-            iter_by_ref_place,
-            iter_by_ref_bb,
-            location.block,
-            self.basic_blocks,
-            dominators,
-            self.tcx,
-        ) else {
-            return;
-        };
+        if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
+            let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
+                iterator_subject_place,
+                iterator_subject_bb,
+                location.block,
+                self.basic_blocks,
+                dominators,
+                self.tcx,
+            ) else {
+                return;
+            };
+            iterator_subject_place = slice_deref_arg_place;
+            iterator_subject_bb = slice_deref_bb;
+        }
 
         // Only continues if `Iterator` target has a known length/size returning function
         // and is passed by reference.
         let Some(len_call_info) =
-            analyze::collection_len_call(self.place_ty(iter_by_ref_deref_arg_place), self.tcx)
+            analyze::collection_len_call(self.place_ty(iterator_subject_place), self.tcx)
         else {
             return;
         };
         let collection_place_info = analyze::deref_place_recursive(
-            iter_by_ref_deref_arg_place,
-            iter_by_ref_deref_bb,
+            iterator_subject_place,
+            iterator_subject_bb,
             self.basic_blocks,
         )
         .or_else(|| {
-            if let TyKind::Ref(region, _, _) = self.place_ty(iter_by_ref_deref_arg_place).kind() {
-                Some((iter_by_ref_deref_arg_place, *region))
+            if let TyKind::Ref(region, _, _) = self.place_ty(iterator_subject_place).kind() {
+                Some((iterator_subject_place, *region))
             } else {
                 None
             }
