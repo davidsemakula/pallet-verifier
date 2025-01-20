@@ -2,7 +2,7 @@
 
 use rustc_ast::NestedMetaItem;
 use rustc_hir::{def_id::CrateNum, HirId};
-use rustc_middle::ty::TyCtxt;
+use rustc_middle::ty::{GenericArg, List, TyCtxt};
 use rustc_span::{def_id::DefId, Symbol};
 
 use std::env;
@@ -74,4 +74,32 @@ pub fn highlight_style() -> owo_colors::Style {
     } else {
         owo_colors::Style::new().green().bold()
     }
+}
+
+/// Returns true if the item with the given `DefId` is named like a generated storage prefix.
+pub fn is_storage_prefix(def_id: DefId, tcx: TyCtxt) -> bool {
+    tcx.item_name(def_id)
+        .as_str()
+        .starts_with("_GeneratedPrefixForStorage")
+}
+
+/// Returns true if the given generic args include a storage query type.
+///
+/// (i.e. `frame_support::storage::types::ValueQuery`, `frame_support::storage::types::OptionQuery`
+/// or `frame_support::storage::types::ResultQuery`).
+pub fn includes_query_type(gen_args: &List<GenericArg>, tcx: TyCtxt) -> bool {
+    gen_args.iter().any(|arg| {
+        arg.as_type()
+            .and_then(|ty| ty.ty_adt_def())
+            .map(|adt_def| adt_def.did())
+            .is_some_and(|adt_def_id| {
+                let crate_name = tcx.crate_name(adt_def_id.krate);
+                let item_name = tcx.item_name(adt_def_id);
+                crate_name.as_str() == "frame_support"
+                    && matches!(
+                        item_name.as_str(),
+                        "ValueQuery" | "OptionQuery" | "ResultQuery"
+                    )
+            })
+    })
 }

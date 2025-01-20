@@ -503,14 +503,9 @@ fn emit_diagnostics(
                             }
                             ImplSubject::Inherent(self_ty) => Some(self_ty),
                         };
-                        let is_storage_generated_storage_struct = |adt_def_id: DefId| {
-                            tcx.item_name(adt_def_id)
-                                .as_str()
-                                .starts_with("_GeneratedPrefixForStorage")
-                        };
                         self_ty.is_some_and(|self_ty| {
                             if let TyKind::Adt(adt_def, gen_args) = self_ty.kind() {
-                                if is_storage_generated_storage_struct(adt_def.did()) {
+                                if utils::is_storage_prefix(adt_def.did(), tcx) {
                                     return true;
                                 }
 
@@ -519,27 +514,10 @@ fn emit_diagnostics(
                                 let prefix_adt_def = prefix_ty_arg
                                     .and_then(|prefix_ty_arg| prefix_ty_arg.ty_adt_def());
                                 let is_storage_prefix = prefix_adt_def.is_some_and(|adt_def| {
-                                    is_storage_generated_storage_struct(adt_def.did())
+                                    utils::is_storage_prefix(adt_def.did(), tcx)
                                 });
-                                let includes_query_type = || {
-                                    gen_args.iter().any(|arg| {
-                                        arg.as_type()
-                                            .and_then(|ty| ty.ty_adt_def())
-                                            .map(|adt_def| adt_def.did())
-                                            .is_some_and(|adt_def_id| {
-                                                let crate_name = tcx.crate_name(adt_def_id.krate);
-                                                let item_name = tcx.item_name(adt_def_id);
-                                                crate_name.as_str() == "frame_support"
-                                                    && matches!(
-                                                        item_name.as_str(),
-                                                        "ValueQuery"
-                                                            | "OptionQuery"
-                                                            | "ResultQuery"
-                                                    )
-                                            })
-                                    })
-                                };
-                                return is_storage_prefix || includes_query_type();
+                                return is_storage_prefix
+                                    || utils::includes_query_type(gen_args, tcx);
                             };
                             false
                         })

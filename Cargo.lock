@@ -833,6 +833,7 @@ dependencies = [
  "mirai-annotations 1.12.0",
  "owo-colors 4.1.0",
  "rustc_tools_util",
+ "serde",
  "serde_json",
  "tempfile",
  "ui_test",

@@ -19,7 +19,8 @@ use itertools::Itertools;
 
 use crate::providers::{
     analyze,
-    annotate::{self, Annotation},
+    annotate::{self, Annotation, CondOp},
+    storage::{self, StorageInvariant},
 };
 
 /// Adds `Iterator` invariant annotations.
@@ -27,11 +28,20 @@ pub struct IteratorInvariants;
 
 impl<'tcx> MirPass<'tcx> for IteratorInvariants {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+        // Generates iterator annotations.
         let mut visitor = IteratorVisitor::new(tcx, &body.basic_blocks, body.local_decls());
         visitor.visit_body(body);
+        let mut annotations = visitor.annotations;
+
+        // Propagates storage related invariants.
+        if !visitor.storage_invariants.is_empty() {
+            storage::propagate_invariants(visitor.storage_invariants, &mut annotations, body, tcx);
+        }
 
         // Adds iterator annotations.
-        annotate::add_annotations(visitor.annotations, body, tcx);
+        if !annotations.is_empty() {
+            annotate::add_annotations(annotations, body, tcx);
+        }
     }
 }
 
@@ -43,6 +53,8 @@ struct IteratorVisitor<'tcx, 'pass> {
     iterator_assoc_items: FxHashMap<Symbol, DefId>,
     /// A list of annotation declarations.
     annotations: Vec<Annotation<'tcx>>,
+    /// A list of FRAME storage related invariants.
+    storage_invariants: Vec<StorageInvariant<'tcx>>,
 }
 
 impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
@@ -66,6 +78,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             local_decls,
             iterator_assoc_items,
             annotations: Vec::new(),
+            storage_invariants: Vec::new(),
         }
     }
 
@@ -222,7 +235,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                                 block: *bb,
                                 statement_index: stmt_idx,
                             },
-                            BinOp::Lt,
+                            CondOp::Lt,
                             op_place,
                         ));
                     }
@@ -246,7 +259,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                                 block: bb,
                                 statement_index: 0,
                             },
-                            BinOp::Lt,
+                            CondOp::Lt,
                             *len_maxima_place,
                             collection_place,
                             region,
@@ -349,6 +362,17 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             );
         }
 
+        // Finds FRAME storage subject (if any).
+        let storage_info = storage::storage_subject(
+            iterator_subject_place,
+            iterator_subject_bb,
+            location.block,
+            self.basic_blocks,
+            dominators,
+            self.tcx,
+        );
+        let mut storage_invariants = FxHashSet::default();
+
         // Finds `Option::Some` (or equivalent safe transformation) target blocks
         // for switches based on the discriminant of return value of
         // `std::iter::Iterator::position` or `std::iter::Iterator::rposition` in successor blocks.
@@ -360,33 +384,48 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         ) {
             for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
                 // Finds variant downcast to `usize` places (if any) for the switch target variant.
-                let Some(downcast_place) = analyze::variant_downcast_to_usize_place(
+                let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
                     switch_target_place,
                     &switch_target_variant_name,
                     switch_target_variant_idx,
+                    self.tcx.types.usize,
                     stmt,
-                    self.tcx,
                 ) else {
                     continue;
                 };
 
                 // Declares a collection length/size bound annotation.
+                let annotation_location = Location {
+                    block: target_bb,
+                    statement_index: stmt_idx + 1,
+                };
+                let cond_op = CondOp::Lt;
                 self.annotations.push(Annotation::Len(
-                    Location {
-                        block: target_bb,
-                        statement_index: stmt_idx + 1,
-                    },
-                    BinOp::Lt,
+                    annotation_location,
+                    cond_op,
                     downcast_place,
                     collection_place,
                     region,
                     len_call_info.clone(),
                 ));
+
+                // Tracks invariants that need to propagated to other storage uses.
+                if storage_info.is_some() {
+                    storage_invariants.insert((annotation_location, cond_op, downcast_place));
+                }
+            }
+        }
+
+        // Adds storage invariants.
+        if !storage_invariants.is_empty() {
+            if let Some((storage_item, use_location)) = storage_info {
+                self.storage_invariants
+                    .push((storage_item, use_location, storage_invariants));
             }
         }
     }
 
-    /// Analyzes and annotates calls to `std::iter::Iterator::next`.
+    /// Analyzes and annotates calls to `std::iter::Iterator::count`.
     fn process_iterator_count(
         &mut self,
         args: &[Spanned<Operand<'tcx>>],
@@ -394,9 +433,9 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         target: Option<&BasicBlock>,
         location: Location,
     ) {
-        // Finds place for `std::iter::Iterator::next` operand/arg.
-        let iterator_next_arg = args.first().expect("Expected an arg for `Iterator::next`");
-        let Some(iterator_next_arg_place) = iterator_next_arg.node.place() else {
+        // Finds place for `std::iter::Iterator::count` operand/arg.
+        let iterator_count_arg = args.first().expect("Expected an arg for `Iterator::count`");
+        let Some(iterator_count_arg_place) = iterator_count_arg.node.place() else {
             return;
         };
 
@@ -410,7 +449,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let dominators = self.basic_blocks.dominators();
         let Some((mut iterator_subject_place, mut iterator_subject_bb)) =
             size_invariant_iterator_subject(
-                iterator_next_arg_place,
+                iterator_count_arg_place,
                 location.block,
                 self.basic_blocks,
                 self.local_decls,
@@ -426,7 +465,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             block: *target,
             statement_index: 0,
         };
-        let cond_op = BinOp::Le;
+        let cond_op = CondOp::Le;
 
         // Finds place and basic block for a slice `Iterator` operand/arg (if any).
         if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
@@ -491,6 +530,25 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     region,
                     len_call_info.clone(),
                 ));
+
+                // Finds FRAME storage subject (if any).
+                let storage_info = storage::storage_subject(
+                    iterator_subject_place,
+                    iterator_subject_bb,
+                    location.block,
+                    self.basic_blocks,
+                    dominators,
+                    self.tcx,
+                );
+
+                // Adds storage invariants.
+                if let Some((storage_item, use_location)) = storage_info {
+                    self.storage_invariants.push((
+                        storage_item,
+                        use_location,
+                        FxHashSet::from_iter([(annotation_location, cond_op, *destination)]),
+                    ));
+                }
             }
         }
     }
@@ -523,7 +581,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 block: *target,
                 statement_index: 0,
             },
-            BinOp::Le,
+            CondOp::Le,
             *destination,
         ));
     }

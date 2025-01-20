@@ -1,9 +1,10 @@
 //! `rustc` `MirPass` for adding annotations for slice (i.e. `[T]`) invariants.
 
+use rustc_hash::FxHashSet;
 use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
-        visit::Visitor, BasicBlock, BasicBlocks, BinOp, Body, HasLocalDecls, LocalDecls, Location,
+        visit::Visitor, BasicBlock, BasicBlocks, Body, HasLocalDecls, LocalDecls, Location,
         MirPass, Operand, Place, Terminator, TerminatorKind,
     },
     ty::TyCtxt,
@@ -12,7 +13,8 @@ use rustc_span::source_map::Spanned;
 
 use crate::providers::{
     analyze,
-    annotate::{self, Annotation},
+    annotate::{self, Annotation, CondOp},
+    storage::{self, StorageInvariant},
 };
 
 /// Adds slice (i.e. `[T]`) invariant annotations.
@@ -20,11 +22,20 @@ pub struct SliceInvariants;
 
 impl<'tcx> MirPass<'tcx> for SliceInvariants {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+        // Generates slice annotations.
         let mut visitor = SliceVisitor::new(tcx, &body.basic_blocks, body.local_decls());
         visitor.visit_body(body);
+        let mut annotations = visitor.annotations;
+
+        // Propagates storage related invariants.
+        if !visitor.storage_invariants.is_empty() {
+            storage::propagate_invariants(visitor.storage_invariants, &mut annotations, body, tcx);
+        }
 
         // Adds slice annotations.
-        annotate::add_annotations(visitor.annotations, body, tcx);
+        if !annotations.is_empty() {
+            annotate::add_annotations(annotations, body, tcx);
+        }
     }
 }
 
@@ -35,6 +46,8 @@ struct SliceVisitor<'tcx, 'pass> {
     local_decls: &'pass LocalDecls<'tcx>,
     /// A list of slice annotation declarations.
     annotations: Vec<Annotation<'tcx>>,
+    /// A list of FRAME storage related invariants.
+    storage_invariants: Vec<StorageInvariant<'tcx>>,
 }
 
 impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
@@ -48,6 +61,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             basic_blocks,
             local_decls,
             annotations: Vec::new(),
+            storage_invariants: Vec::new(),
         }
     }
 
@@ -191,7 +205,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                     // index <= collection length/size for `Result::unwrap_or_else`
                     // where the second arg is an identity function or closure
                     // (e.g. `std::convert::identity` or `|x| x`).
-                    BinOp::Le,
+                    CondOp::Le,
                 ));
             }
         }
@@ -265,7 +279,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                 &switch_target_variant_name,
                 switch_target_variant_idx,
                 // index < collection length/size for `Result::Ok`.
-                BinOp::Lt,
+                CondOp::Lt,
                 switch_targets,
             ),
             // `Result::Err` switch target info.
@@ -274,19 +288,19 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                 &switch_target_variant_name_alt,
                 switch_target_variant_idx_alt,
                 // index <= collection length/size for `Result::Err`.
-                BinOp::Le,
+                CondOp::Le,
                 switch_targets_err,
             ),
         ] {
             for target_bb in targets_blocks {
                 for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
                     // Finds variant downcast to `usize` places (if any) for the switch target variant.
-                    let Some(downcast_place) = analyze::variant_downcast_to_usize_place(
+                    let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
                         target_place,
                         target_variant_name,
                         target_variant_idx,
+                        self.tcx.types.usize,
                         stmt,
-                        self.tcx,
                     ) else {
                         continue;
                     };
@@ -310,6 +324,17 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             self.local_decls,
             self.tcx,
         );
+
+        // Finds FRAME storage subject (if any).
+        let storage_info = storage::storage_subject(
+            slice_deref_arg_place,
+            slice_deref_bb,
+            location.block,
+            self.basic_blocks,
+            dominators,
+            self.tcx,
+        );
+        let mut storage_invariants = FxHashSet::default();
 
         // Composes collection length/size bound annotations for extracted invariants.
         for (annotation_location, invariant_place, cond_op) in invariants {
@@ -348,6 +373,19 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                     invariant_place,
                 ));
             }
+
+            // Tracks invariants that need to propagated to other storage uses.
+            if storage_info.is_some() && len_bound_info.is_some() {
+                storage_invariants.insert((annotation_location, cond_op, invariant_place));
+            }
+        }
+
+        // Adds storage invariants.
+        if !storage_invariants.is_empty() {
+            if let Some((storage_item, use_location)) = storage_info {
+                self.storage_invariants
+                    .push((storage_item, use_location, storage_invariants));
+            }
         }
     }
 
@@ -377,7 +415,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             block: *target,
             statement_index: 0,
         };
-        let cond_op = BinOp::Le;
+        let cond_op = CondOp::Le;
 
         // Declares a slice length/size bound annotation.
         if let Some(annotation) = annotate::compose_slice_len_annotation(
@@ -436,6 +474,25 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                 region,
                 len_call_info,
             ));
+
+            // Finds FRAME storage subject (if any).
+            let storage_info = storage::storage_subject(
+                slice_deref_arg_place,
+                slice_deref_bb,
+                location.block,
+                self.basic_blocks,
+                dominators,
+                self.tcx,
+            );
+
+            // Adds storage invariants.
+            if let Some((storage_item, use_location)) = storage_info {
+                self.storage_invariants.push((
+                    storage_item,
+                    use_location,
+                    FxHashSet::from_iter([(annotation_location, cond_op, *destination)]),
+                ));
+            }
         }
     }
 }

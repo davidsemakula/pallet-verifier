@@ -4,8 +4,8 @@ use rustc_abi::Size;
 use rustc_const_eval::interpret::Scalar;
 use rustc_middle::{
     mir::{
-        visit::Visitor, BinOp, Body, CastKind, Const, ConstValue, HasLocalDecls, LocalDecls,
-        Location, MirPass, Operand, Rvalue,
+        visit::Visitor, Body, CastKind, Const, ConstValue, HasLocalDecls, LocalDecls, Location,
+        MirPass, Operand, Rvalue,
     },
     ty::{ScalarInt, TyCtxt, TyKind},
 };
@@ -13,7 +13,7 @@ use rustc_span::Span;
 use rustc_type_ir::{IntTy, UintTy};
 
 use crate::{
-    providers::annotate::{self, Annotation},
+    providers::annotate::{self, Annotation, CondOp},
     utils,
 };
 
@@ -222,8 +222,8 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                 if let Operand::Constant(const_op) = operand {
                     if let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_op.const_
                     {
-                        if (assert_cond == BinOp::Le && scalar <= bound_scalar)
-                            || (assert_cond == BinOp::Gt && scalar >= bound_scalar)
+                        if (assert_cond == CondOp::Le && scalar <= bound_scalar)
+                            || (assert_cond == CondOp::Gt && scalar >= bound_scalar)
                         {
                             requires_check = false;
                         }
@@ -246,10 +246,10 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                 }
             };
             if let Some(max_scalar) = max_scalar {
-                add_check(BinOp::Le, max_scalar);
+                add_check(CondOp::Le, max_scalar);
             }
             if let Some(min_scalar) = min_scalar {
-                add_check(BinOp::Gt, min_scalar);
+                add_check(CondOp::Gt, min_scalar);
             }
         }
     }

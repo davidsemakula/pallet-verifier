@@ -809,12 +809,12 @@ fn switch_target_for_discr_value<'tcx>(
 }
 
 /// Returns place (if any) for the variant downcast to `usize` of given place.
-pub fn variant_downcast_to_usize_place<'tcx>(
+pub fn variant_downcast_to_ty_place<'tcx>(
     place: Place<'tcx>,
     variant_name: &str,
     variant_idx: VariantIdx,
+    ty: Ty<'tcx>,
     stmt: &Statement<'tcx>,
-    tcx: TyCtxt<'tcx>,
 ) -> Option<Place<'tcx>> {
     let StatementKind::Assign(assign) = &stmt.kind else {
         return None;
@@ -836,7 +836,7 @@ pub fn variant_downcast_to_usize_place<'tcx>(
             || op_variant_name.is_some_and(|name| name.as_str() == variant_name))
             && op_variant_idx == variant_idx
             && field_idx.as_u32() == 0
-            && field_ty == tcx.types.usize
+            && field_ty == ty
         {
             return Some(assign.0);
         }

@@ -16,19 +16,21 @@ use rustc_middle::{
 };
 use rustc_span::{def_id::DefId, source_map::dummy_spanned, Span};
 
+use serde::{Deserialize, Serialize};
+
 use crate::utils;
 
 /// An annotation to add to MIR.
 pub enum Annotation<'tcx> {
     /// An integer cast overflow check.
-    CastOverflow(Location, BinOp, Operand<'tcx>, Operand<'tcx>),
+    CastOverflow(Location, CondOp, Operand<'tcx>, Operand<'tcx>),
     /// An `isize::MAX` bound annotation.
-    Isize(Location, BinOp, Place<'tcx>),
+    Isize(Location, CondOp, Place<'tcx>),
     /// A collection length/size bound annotation.
     Len(
         Location,
         /// Binary operation for the annotation.
-        BinOp,
+        CondOp,
         /// The operand place (e.g. a index place).
         Place<'tcx>,
         /// The collection place and region.
@@ -84,7 +86,7 @@ impl<'tcx> Annotation<'tcx> {
             Annotation::CastOverflow(_, assert_cond, val_operand, bound_operand) => {
                 // Adds condition statement.
                 let arg_rvalue =
-                    Rvalue::BinaryOp(assert_cond, Box::new((val_operand, bound_operand)));
+                    Rvalue::BinaryOp(assert_cond.into(), Box::new((val_operand, bound_operand)));
                 let arg_stmt = Statement {
                     source_info,
                     kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
@@ -105,7 +107,7 @@ impl<'tcx> Annotation<'tcx> {
             Annotation::Isize(_, cond_op, op_place) => {
                 // Creates `isize::MAX` bound statement.
                 let arg_rvalue = Rvalue::BinaryOp(
-                    cond_op,
+                    cond_op.into(),
                     Box::new((Operand::Copy(op_place), isize_max_operand(tcx))),
                 );
                 let arg_stmt = Statement {
@@ -219,7 +221,7 @@ impl<'tcx> Annotation<'tcx> {
                         op_place
                     };
                     let arg_rvalue = Rvalue::BinaryOp(
-                        cond_op,
+                        cond_op.into(),
                         Box::new((
                             Operand::Copy(deref_op_place),
                             Operand::Copy(final_len_bound_place),
@@ -298,7 +300,7 @@ pub fn add_annotations<'tcx>(
 /// Composes a slice length/size bound annotation.
 pub fn compose_slice_len_annotation<'tcx>(
     annotation_location: Location,
-    cond_op: BinOp,
+    cond_op: CondOp,
     invariant_place: Place<'tcx>,
     slice_place: Place<'tcx>,
     local_decls: &LocalDecls<'tcx>,
@@ -361,6 +363,39 @@ impl AnnotationFn {
 impl std::fmt::Display for AnnotationFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.fn_name())
+    }
+}
+
+/// Conditional operator.
+#[derive(Copy, Clone, Debug, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
+pub enum CondOp {
+    /// The `==` operator (equality).
+    Eq,
+    /// The `<=` operator (less than or equal to).
+    Le,
+    /// The `<` operator (less than).
+    Lt,
+    /// The `!=` operator (not equal to).
+    Ne,
+    /// The `>=` operator (greater than or equal to).
+    Ge,
+    /// The `>` operator (greater than).
+    Gt,
+}
+
+/// We can't implement `From<BinOp> for CondOp` (because `CondOp` is a subset of `BinOp`),
+/// so we implement `Into<BinOp> for CondOp` instead.
+#[allow(clippy::from_over_into)]
+impl Into<BinOp> for CondOp {
+    fn into(self) -> BinOp {
+        match self {
+            CondOp::Eq => BinOp::Eq,
+            CondOp::Lt => BinOp::Lt,
+            CondOp::Le => BinOp::Le,
+            CondOp::Ne => BinOp::Ne,
+            CondOp::Ge => BinOp::Ge,
+            CondOp::Gt => BinOp::Gt,
+        }
     }
 }
 
