@@ -391,27 +391,26 @@ fn propagate_closure_arg_invariant<'tcx>(
     let captured_invariant_idx = captured_locals
         .iter_enumerated()
         .find_map(|(idx, operand)| {
-            operand
-                .place()
-                .and_then(|op_place| (op_place == invariant_place).then_some(idx))
-                .or_else(|| {
-                    // Handles captures after aliasing.
+            operand.place().and_then(|op_place| {
+                (op_place == invariant_place).then_some(idx).or_else(|| {
+                    // Handles aliased captures.
                     basic_block.statements.iter().find_map(|stmt| {
                         if let StatementKind::Assign(assign) = &stmt.kind {
-                            let op_place = match assign.1 {
-                                Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) => {
-                                    Some(op_place)
+                            let src_place = match assign.1 {
+                                Rvalue::Use(Operand::Copy(place) | Operand::Move(place)) => {
+                                    Some(place)
                                 }
                                 Rvalue::Ref(_, _, place) => Some(place),
                                 _ => None,
                             }?;
-                            if op_place == invariant_place {
+                            if src_place == invariant_place && op_place == assign.0 {
                                 return Some(idx);
                             }
                         }
                         None
                     })
                 })
+            })
         })?;
 
     // Returns closure propagation info.
