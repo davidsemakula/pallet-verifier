@@ -491,10 +491,9 @@ pub fn track_safe_result_err_transformations<'tcx>(
 /// Returns the target block for the given basic block's terminator call (if any).
 pub fn call_target(bb_data: &BasicBlockData) -> Option<BasicBlock> {
     let terminator = bb_data.terminator.as_ref()?;
-    if let TerminatorKind::Call { target, .. } = &terminator.kind {
-        *target
-    } else {
-        None
+    match &terminator.kind {
+        TerminatorKind::Call { target, .. } => *target,
+        _ => None,
     }
 }
 

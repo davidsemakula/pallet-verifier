@@ -2,6 +2,7 @@
 
 mod analyze;
 mod annotate;
+mod closure;
 mod passes;
 mod storage;
 
@@ -34,10 +35,8 @@ pub fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
 
     // Applies propagated storage invariants (if any) for closure.
     if let DefKind::Closure = tcx.def_kind(did) {
-        if let Some(closure_invariant_env) =
-            storage::find_closure_invariant_env(did.to_def_id(), tcx)
-        {
-            storage::apply_propagated_closure_invariants(
+        if let Some(closure_invariant_env) = closure::find_invariant_env(did.to_def_id(), tcx) {
+            closure::apply_propagated_invariants(
                 did.to_def_id(),
                 closure_invariant_env,
                 &mut body,

@@ -29,7 +29,7 @@ pub enum Annotation<'tcx> {
     /// A collection length/size bound annotation.
     Len(
         Location,
-        /// Binary operation for the annotation.
+        /// Conditional operation for the annotation.
         CondOp,
         /// The operand place (e.g. a index place).
         Place<'tcx>,

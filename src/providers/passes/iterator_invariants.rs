@@ -20,6 +20,7 @@ use itertools::Itertools;
 use crate::providers::{
     analyze,
     annotate::{self, Annotation, CondOp},
+    closure,
     storage::{self, StorageInvariant},
 };
 
@@ -423,6 +424,19 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     .push((storage_item, use_location, storage_invariants));
             }
         }
+
+        // Propagate position invariant to `Option` (and `Result`) adapter input closures.
+        let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_bb]) else {
+            return;
+        };
+        let next_block_data = &self.basic_blocks[next_target];
+        closure::propagate_opt_result_idx_invariant(
+            switch_target_place,
+            next_block_data,
+            &[(iterator_subject_place, iterator_subject_bb)],
+            self.basic_blocks,
+            self.tcx,
+        );
     }
 
     /// Analyzes and annotates calls to `std::iter::Iterator::count`.

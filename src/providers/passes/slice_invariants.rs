@@ -14,6 +14,7 @@ use rustc_span::source_map::Spanned;
 use crate::providers::{
     analyze,
     annotate::{self, Annotation, CondOp},
+    closure,
     storage::{self, StorageInvariant},
 };
 
@@ -158,7 +159,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             let unwrap_place_info = analyze::call_target(&self.basic_blocks[unwrap_arg_def_bb])
                 .and_then(|next_target| {
                     // Retrieves `Result::unwrap_else` destination place and next target block (if any).
-                    let next_bb_data = &self.basic_blocks[next_target];
+                    let next_block_data = &self.basic_blocks[next_target];
                     fn crate_adt_and_fn_name_check(
                         crate_name: &str,
                         adt_name: &str,
@@ -171,7 +172,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                     let (unwrap_dest_place, post_unwrap_target) =
                         analyze::safe_transform_destination(
                             unwrap_arg_place,
-                            next_bb_data,
+                            next_block_data,
                             crate_adt_and_fn_name_check,
                             self.tcx,
                         )?;
@@ -180,7 +181,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                     // Checks that second arg is an identity function or closure and, if true,
                     // returns unwrap destination place and next target.
                     // See [`analyze::is_identity_fn`] and [`analyze::is_identity_closure`] for details.
-                    let unwrap_terminator = next_bb_data.terminator.as_ref()?;
+                    let unwrap_terminator = next_block_data.terminator.as_ref()?;
                     let TerminatorKind::Call {
                         args: unwrap_args, ..
                     } = &unwrap_terminator.kind
@@ -386,6 +387,25 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                 self.storage_invariants
                     .push((storage_item, use_location, storage_invariants));
             }
+        }
+
+        // Propagate index invariant to `Result` (and `Option`) adapter input closures.
+        if len_bound_info.is_some() {
+            let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_bb])
+            else {
+                return;
+            };
+            let next_block_data = &self.basic_blocks[next_target];
+            closure::propagate_opt_result_idx_invariant(
+                switch_target_place,
+                next_block_data,
+                &[
+                    (binary_search_arg_place, location.block),
+                    (slice_deref_arg_place, slice_deref_bb),
+                ],
+                self.basic_blocks,
+                self.tcx,
+            );
         }
     }
 

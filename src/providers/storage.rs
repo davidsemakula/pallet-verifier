@@ -1,4 +1,4 @@
-//! Common utilities and helpers for analyses related to FRAME storage item types.
+//! Common utilities and helpers for analyses related to FRAME storage items.
 
 use rustc_ast::Mutability;
 use rustc_data_structures::graph::{dominators::Dominators, iterate::post_order_from};
@@ -6,13 +6,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
-        visit::Visitor, AggregateKind, BasicBlock, BasicBlockData, BasicBlocks, Body,
-        HasLocalDecls, Local, LocalDecl, LocalDecls, Location, Operand, Place, PlaceElem, Rvalue,
-        Statement, StatementKind, Terminator, TerminatorKind,
+        visit::Visitor, BasicBlock, BasicBlockData, BasicBlocks, Body, HasLocalDecls, LocalDecls,
+        Location, Operand, Place, Rvalue, StatementKind, Terminator, TerminatorKind,
     },
     ty::{
-        AssocItemContainer, ClosureArgs, GenericArg, ImplSubject, List, Region, RegionKind, Ty,
-        TyCtxt, TyKind,
+        AssocItemContainer, GenericArg, ImplSubject, List, Region, RegionKind, Ty, TyCtxt, TyKind,
     },
 };
 use rustc_mir_dataflow::{
@@ -23,12 +21,12 @@ use rustc_span::def_id::DefId;
 use rustc_target::abi::FieldIdx;
 
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     providers::{
         analyze,
         annotate::{Annotation, CondOp},
+        closure::{self, ClosureInvariantEnv, ClosureInvariantInfo, ClosurePlaceIdx},
     },
     utils,
 };
@@ -171,7 +169,7 @@ pub fn propagate_invariants<'tcx>(
     tcx: TyCtxt<'tcx>,
 ) {
     // Tracks propagated storage related invariants for closures.
-    let mut closure_invariants_map: FxHashMap<DefId, FxHashSet<(usize, u32, CondOp)>> =
+    let mut closure_invariants_map: FxHashMap<DefId, FxHashSet<ClosureInvariantInfo>> =
         FxHashMap::default();
 
     // Collects storage type associated function calls.
@@ -283,9 +281,9 @@ pub fn propagate_invariants<'tcx>(
                     closure_invariant_info
                 {
                     let invariant_info = (
-                        storage_value_arg_index,
-                        captured_invariant_idx.as_u32(),
                         *cond_op,
+                        ClosurePlaceIdx::new_capture(captured_invariant_idx.as_u32()),
+                        ClosurePlaceIdx::new_arg(storage_value_arg_index),
                     );
                     match closure_invariants_map.get_mut(&closure_def_id) {
                         Some(closure_invariants) => {
@@ -321,10 +319,7 @@ pub fn propagate_invariants<'tcx>(
     for (closure_def_id, invariants) in closure_invariants_map {
         // Sets propagated invariant environment for closure.
         let closure_invariant_env = ClosureInvariantEnv::new(closure_def_id, invariants, tcx);
-        let closure_invariant_env_json = serde_json::to_string(&closure_invariant_env)
-            .expect("Expected serialized `ClosureInvariantEnv`");
-        // SAFETY: `pallet-verifier` is single-threaded.
-        std::env::set_var(ENV_CLOSURE_INVARIANTS, closure_invariant_env_json);
+        closure::set_invariant_env(&closure_invariant_env);
 
         // Composes closure MIR (with propagated invariant environment set).
         let _ = tcx.optimized_mir(closure_def_id);
@@ -350,21 +345,9 @@ fn propagate_closure_arg_invariant<'tcx>(
         return None;
     };
     let (closure_def_id, captured_locals, storage_value_arg_idx) = args.iter().find_map(|arg| {
-        // A direct const operand indicates a non-capturing closure which requires no annotation.
-        let arg_place = arg.node.place()?;
+        // Find capturing closure info (if any).
         let (closure_def_id, captured_locals, closure_args) =
-            basic_block.statements.iter().find_map(|stmt| {
-                if let StatementKind::Assign(assign) = &stmt.kind {
-                    if assign.0 == arg_place {
-                        if let Rvalue::Aggregate(aggregate_kind, captured_locals) = &assign.1 {
-                            if let AggregateKind::Closure(def_id, args) = **aggregate_kind {
-                                return Some((def_id, captured_locals, ClosureArgs { args }));
-                            }
-                        }
-                    }
-                }
-                None
-            })?;
+            closure::capturing_closure_info(&arg.node, basic_block)?;
 
         // Extracts the "real" (i.e. user-supplied) closure args.
         // Ref: <https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.ClosureArgs.html>
@@ -394,21 +377,22 @@ fn propagate_closure_arg_invariant<'tcx>(
             operand.place().and_then(|op_place| {
                 (op_place == invariant_place).then_some(idx).or_else(|| {
                     // Handles aliased captures.
-                    basic_block.statements.iter().find_map(|stmt| {
-                        if let StatementKind::Assign(assign) = &stmt.kind {
-                            let src_place = match assign.1 {
-                                Rvalue::Use(Operand::Copy(place) | Operand::Move(place)) => {
-                                    Some(place)
-                                }
-                                Rvalue::Ref(_, _, place) => Some(place),
-                                _ => None,
-                            }?;
-                            if src_place == invariant_place && op_place == assign.0 {
-                                return Some(idx);
+                    basic_block
+                        .statements
+                        .iter()
+                        .find_map(|stmt| match &stmt.kind {
+                            StatementKind::Assign(assign) if op_place == assign.0 => {
+                                let src_place = match assign.1 {
+                                    Rvalue::Use(Operand::Copy(place) | Operand::Move(place)) => {
+                                        Some(place)
+                                    }
+                                    Rvalue::Ref(_, _, place) => Some(place),
+                                    _ => None,
+                                }?;
+                                (src_place == invariant_place).then_some(idx)
                             }
-                        }
-                        None
-                    })
+                            _ => None,
+                        })
                 })
             })
         })?;
@@ -569,175 +553,6 @@ fn propagate_return_place_invariant<'tcx>(
             ));
         }
     }
-}
-
-/// Info needed to apply propagated storage invariants to a closure's MIR.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ClosureInvariantEnv {
-    def_hash: String,
-    invariants: FxHashSet<ClosureInvariantInfo>,
-}
-
-type ClosureInvariantInfo = (usize, u32, CondOp);
-
-impl ClosureInvariantEnv {
-    /// Create new closure invariant environment.
-    fn new(def_id: DefId, invariants: FxHashSet<ClosureInvariantInfo>, tcx: TyCtxt) -> Self {
-        Self {
-            def_hash: def_hash_str(def_id, tcx),
-            invariants,
-        }
-    }
-}
-
-/// Env var for tracking propagated invariant environment for closure.
-const ENV_CLOSURE_INVARIANTS: &str = "PALLET_VERIFIER_CLOSURE_INVARIANTS";
-
-/// Retrieves the propagated invariant environment for closure (if any).
-///
-/// **NOTE**: This function clears the environment after it successfully retrieves it,
-/// so it should only be called once (if it succeeds i.e. return `Some`).
-pub fn find_closure_invariant_env(def_id: DefId, tcx: TyCtxt) -> Option<ClosureInvariantEnv> {
-    // SAFETY: `pallet-verifier` is single-threaded.
-    let closure_invariant_env_json = std::env::var(ENV_CLOSURE_INVARIANTS).ok()?;
-    let closure_invariant_env: ClosureInvariantEnv =
-        serde_json::from_str(&closure_invariant_env_json).ok()?;
-    let hash = def_hash_str(def_id, tcx);
-    if closure_invariant_env.def_hash == hash {
-        // Clears the environment.
-        std::env::remove_var(ENV_CLOSURE_INVARIANTS);
-        Some(closure_invariant_env)
-    } else {
-        None
-    }
-}
-
-/// Applies propagated storage invariants for closure.
-pub fn apply_propagated_closure_invariants<'tcx>(
-    def_id: DefId,
-    closure_invariant_env: ClosureInvariantEnv,
-    body: &mut Body<'tcx>,
-    tcx: TyCtxt<'tcx>,
-) {
-    for (storage_value_arg_index, captured_invariant_idx, cond_op) in
-        closure_invariant_env.invariants
-    {
-        apply_propagated_closure_invariant(
-            def_id,
-            storage_value_arg_index,
-            captured_invariant_idx,
-            cond_op,
-            body,
-            tcx,
-        );
-    }
-}
-
-/// Applies propagated storage invariant for closure.
-fn apply_propagated_closure_invariant<'tcx>(
-    def_id: DefId,
-    storage_value_arg_index: usize,
-    captured_invariant_idx: u32,
-    cond_op: CondOp,
-    body: &mut Body<'tcx>,
-    tcx: TyCtxt<'tcx>,
-) {
-    // Finds the type of the captured propagated invariant place.
-    // NOTE: At the moment, this will either be an `usize` or a ref of `usize`.
-    let closure_ty = tcx.type_of(def_id).skip_binder();
-    let TyKind::Closure(_, closure_args) = closure_ty.kind() else {
-        panic!("Expected a closure, found {:?}", def_id);
-    };
-    let closure_args = ClosureArgs { args: closure_args };
-    let captured_locals_tys = closure_args.upvar_tys();
-    let invariant_place_ty = captured_locals_tys[captured_invariant_idx as usize];
-
-    // Finds the propagated invariant place.
-    // NOTE: For closures captured locals are represented as projections (i.e. struct fields)
-    // of the local with index 1.
-    let captured_locals = Local::from_u32(1);
-    let captured_locals_place = Place::from(captured_locals);
-    let invariant_field_idx = FieldIdx::from_u32(captured_invariant_idx);
-    let invariant_projection = PlaceElem::Field(invariant_field_idx, invariant_place_ty);
-    let invariant_place = tcx.mk_place_elem(captured_locals_place, invariant_projection);
-
-    // Finds the storage value arg place.
-    // NOTE: For closures the "real"/user-defined args start from index 2.
-    let storage_value_local = Local::from_usize(storage_value_arg_index + 2);
-    let storage_value_place = Place::from(storage_value_local);
-
-    // Declares a collection length/size bound annotation (if appropriate).
-    let storage_value_ty = storage_value_place.ty(body.local_decls(), tcx).ty;
-    let Some(len_call_info) = analyze::collection_len_call(storage_value_ty, tcx) else {
-        return;
-    };
-
-    // Derefs invariant place (if necessary), also sets the annotation location.
-    let mut annotation_location = Location::START;
-    let derefed_invariant_place = if invariant_place_ty.is_ref() {
-        // Composes `CopyForDeref` statement for invariant place ref.
-        let basic_block = &body.basic_blocks[annotation_location.block];
-        let Some(source_info) = basic_block
-            .statements
-            .first()
-            .map(|stmt| stmt.source_info)
-            .or_else(|| {
-                basic_block
-                    .terminator
-                    .as_ref()
-                    .map(|terminator| terminator.source_info)
-            })
-        else {
-            return;
-        };
-        let copy_for_deref_rvalue = Rvalue::CopyForDeref(invariant_place);
-        let copy_for_deref_local_decl =
-            LocalDecl::with_source_info(invariant_place_ty, source_info);
-        let copy_for_deref_local = body.local_decls.push(copy_for_deref_local_decl);
-        let copy_for_deref_place = Place::from(copy_for_deref_local);
-        let copy_for_deref_stmt = Statement {
-            source_info,
-            kind: StatementKind::Assign(Box::new((copy_for_deref_place, copy_for_deref_rvalue))),
-        };
-
-        // Composes `Deref` statements for invariant place.
-        let deref_place = tcx.mk_place_deref(copy_for_deref_place);
-        let deref_operand = Operand::Copy(deref_place);
-        let deref_rvalue = Rvalue::Use(deref_operand);
-        let deref_local_decl = LocalDecl::with_source_info(tcx.types.usize, source_info);
-        let deref_local = body.local_decls.push(deref_local_decl);
-        let deref_place = Place::from(deref_local);
-        let deref_stmt = Statement {
-            source_info,
-            kind: StatementKind::Assign(Box::new((deref_place, deref_rvalue))),
-        };
-
-        // Adds `Deref` statements for invariant place to first block, and updates annotation location.
-        body.basic_blocks_mut()[annotation_location.block]
-            .statements
-            .splice(..0, [copy_for_deref_stmt, deref_stmt]);
-        annotation_location.statement_index = 2;
-
-        // Sets derefed invariant place
-        deref_place
-    } else {
-        invariant_place
-    };
-
-    // Adds propagated storage invariant annotation.
-    let region = match storage_value_ty.kind() {
-        TyKind::Ref(region, _, _) => *region,
-        _ => Region::new_from_kind(tcx, RegionKind::ReErased),
-    };
-    let annotation = Annotation::Len(
-        annotation_location,
-        cond_op,
-        derefed_invariant_place,
-        storage_value_place,
-        region,
-        len_call_info,
-    );
-    annotation.insert(body, tcx);
 }
 
 /// Composes a boolean condition for checking if any of the `$needle` word stems is present
@@ -965,11 +780,6 @@ fn is_adt_with_generic_type_param<'tcx>(ty: Ty<'tcx>, def_id: DefId, inner_ty: T
 /// Returns the type of the first type arg in the generic arg list.
 fn first_ty_arg<'tcx>(gen_args: &List<GenericArg<'tcx>>) -> Option<Ty<'tcx>> {
     gen_args.iter().filter_map(GenericArg::as_type).next()
-}
-
-/// Returns a string representation of the `DefPathHash` of the given `DefId`.
-fn def_hash_str(def_id: DefId, tcx: TyCtxt) -> String {
-    format!("{:?}", tcx.def_path_hash(def_id))
 }
 
 /// Collects storage type associated function calls.
