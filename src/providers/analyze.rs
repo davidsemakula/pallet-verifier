@@ -14,6 +14,7 @@ use rustc_span::{def_id::DefId, symbol::Ident};
 use rustc_target::abi::VariantIdx;
 
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 
 /// Finds the innermost place if the given place is a single deref of a local,
 /// otherwise returns the given place.
@@ -27,11 +28,11 @@ fn direct_place(place: Place) -> Place {
 /// Returns the derefed place and region (if the current place is a reference).
 fn deref_place<'tcx>(
     place: Place<'tcx>,
-    bb: BasicBlock,
+    block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
 ) -> Option<(Place<'tcx>, Region<'tcx>)> {
     let target_place = direct_place(place);
-    basic_blocks[bb].statements.iter().find_map(|stmt| {
+    basic_blocks[block].statements.iter().find_map(|stmt| {
         let StatementKind::Assign(assign) = &stmt.kind else {
             return None;
         };
@@ -52,12 +53,12 @@ fn deref_place<'tcx>(
 // Returns the innermost derefed place and region (if the current place is a reference).
 pub fn deref_place_recursive<'tcx>(
     place: Place<'tcx>,
-    bb: BasicBlock,
+    block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
 ) -> Option<(Place<'tcx>, Region<'tcx>)> {
     let mut result = None;
     let mut deref_target_place = place;
-    while let Some((derefed_place, region)) = deref_place(deref_target_place, bb, basic_blocks) {
+    while let Some((derefed_place, region)) = deref_place(deref_target_place, block, basic_blocks) {
         result = Some((derefed_place, region));
         deref_target_place = derefed_place;
     }
@@ -339,16 +340,71 @@ pub fn borrowed_collection_len_call_info<'tcx>(
         .map(|len_call_info| (collection_place, region, len_call_info))
 }
 
-/// Returns the `VariantIdx` for a `LangItem`.
-///
-/// # Panics
-///
-/// Panics if the `LangItem` is not a Variant.
-pub fn variant_idx(lang_item: LangItem, tcx: TyCtxt) -> VariantIdx {
-    let variant_def_id = tcx.lang_items().get(lang_item).expect("Expected lang item");
-    let adt_def_id = tcx.parent(variant_def_id);
-    let adt_def = tcx.adt_def(adt_def_id);
-    adt_def.variant_index_with_id(variant_def_id)
+/// An `Option`, `Result` or `ControlFlow` variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SwitchVariant {
+    /// `Option::Some`
+    OptionSome,
+    /// `Option::None`
+    #[allow(dead_code)]
+    OptionNone,
+    /// `Result::Ok`
+    ResultOk,
+    /// `Result::Err`
+    ResultErr,
+    /// `ControlFlow::Continue`
+    ControlFlowContinue,
+    /// `ControlFlow::Break`
+    #[allow(dead_code)]
+    ControlFlowBreak,
+}
+
+impl SwitchVariant {
+    /// Returns `VariantIdx` for equivalent `LangItem`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `LangItem` is not a Variant.
+    pub fn idx(&self, tcx: TyCtxt) -> VariantIdx {
+        let lang_item = self.lang_item();
+        let variant_def_id = tcx
+            .lang_items()
+            .get(lang_item)
+            .unwrap_or_else(|| panic!("Expected `DefId` for lang item for {:?}", lang_item));
+        let adt_def_id = tcx.parent(variant_def_id);
+        let adt_def = tcx.adt_def(adt_def_id);
+        adt_def.variant_index_with_id(variant_def_id)
+    }
+
+    /// Returns name of the variant.
+    pub fn name(&self) -> &str {
+        match self {
+            SwitchVariant::OptionSome => "Some",
+            SwitchVariant::OptionNone => "None",
+            SwitchVariant::ResultOk => "Ok",
+            SwitchVariant::ResultErr => "Err",
+            SwitchVariant::ControlFlowContinue => "Continue",
+            SwitchVariant::ControlFlowBreak => "Break",
+        }
+    }
+
+    /// Returns `LangItem` for the variant.
+    fn lang_item(&self) -> LangItem {
+        match self {
+            SwitchVariant::OptionSome => LangItem::OptionSome,
+            SwitchVariant::OptionNone => LangItem::OptionNone,
+            SwitchVariant::ResultOk => LangItem::ResultOk,
+            SwitchVariant::ResultErr => LangItem::ResultErr,
+            SwitchVariant::ControlFlowContinue => LangItem::ControlFlowContinue,
+            SwitchVariant::ControlFlowBreak => LangItem::ControlFlowBreak,
+        }
+    }
+}
+
+impl std::fmt::Display for SwitchVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
 }
 
 /// Tracks switch target info through "safe" transformations
@@ -357,22 +413,22 @@ pub fn variant_idx(lang_item: LangItem, tcx: TyCtxt) -> VariantIdx {
 /// (e.g. via `Result::inspect`, `Result::inspect_err` calls e.t.c).
 pub fn track_safe_result_transformations<'tcx>(
     switch_target_place: &mut Place<'tcx>,
-    switch_target_bb: &mut BasicBlock,
-    target_bb: BasicBlock,
+    switch_target_block: &mut BasicBlock,
+    target_block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
     tcx: TyCtxt,
 ) {
-    let mut next_target_bb = Some(target_bb);
-    while let Some(target_bb) = next_target_bb {
-        let target_bb_data = &basic_blocks[target_bb];
-        if let Some((transformer_destination, transformer_target_bb)) =
+    let mut next_target_block = Some(target_block);
+    while let Some(current_target_block) = next_target_block {
+        let target_bb_data = &basic_blocks[current_target_block];
+        if let Some((transformer_destination, transformer_target_block)) =
             safe_result_transform_destination(*switch_target_place, target_bb_data, tcx)
         {
             *switch_target_place = transformer_destination;
-            *switch_target_bb = target_bb;
-            next_target_bb = transformer_target_bb;
+            *switch_target_block = current_target_block;
+            next_target_block = transformer_target_block;
         } else {
-            next_target_bb = None;
+            next_target_block = None;
         }
     }
 }
@@ -384,42 +440,38 @@ pub fn track_safe_result_transformations<'tcx>(
 // and `Option::inspect` calls e.t.c).
 pub fn track_safe_primary_opt_result_variant_transformations<'tcx>(
     switch_target_place: &mut Place<'tcx>,
-    switch_target_bb: &mut BasicBlock,
-    switch_target_variant_name: &mut String,
-    switch_target_variant_idx: &mut VariantIdx,
-    target_bb: BasicBlock,
+    switch_target_block: &mut BasicBlock,
+    switch_target_variant: &mut SwitchVariant,
+    target_block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
     tcx: TyCtxt,
 ) {
-    let mut next_target_bb = Some(target_bb);
-    while let Some(target_bb) = next_target_bb {
-        let target_bb_data = &basic_blocks[target_bb];
+    let mut next_target_block = Some(target_block);
+    while let Some(current_target_block) = next_target_block {
+        let block_data = &basic_blocks[current_target_block];
         if let Some((try_branch_destination, try_branch_target_bb)) =
-            try_branch_destination(*switch_target_place, target_bb_data, tcx)
+            try_branch_destination(*switch_target_place, block_data, tcx)
         {
             *switch_target_place = try_branch_destination;
-            *switch_target_bb = target_bb;
-            *switch_target_variant_name = "Continue".to_string();
-            *switch_target_variant_idx = variant_idx(LangItem::ControlFlowContinue, tcx);
-            next_target_bb = try_branch_target_bb;
-        } else if let Some((transformer_destination, transformer_target_bb)) =
-            safe_option_some_transform_destination(*switch_target_place, target_bb_data, tcx)
+            *switch_target_block = current_target_block;
+            *switch_target_variant = SwitchVariant::ControlFlowContinue;
+            next_target_block = try_branch_target_bb;
+        } else if let Some((transformer_destination, transformer_target_block)) =
+            safe_option_some_transform_destination(*switch_target_place, block_data, tcx)
         {
             *switch_target_place = transformer_destination;
-            *switch_target_bb = target_bb;
-            *switch_target_variant_name = "Some".to_string();
-            *switch_target_variant_idx = variant_idx(LangItem::OptionSome, tcx);
-            next_target_bb = transformer_target_bb;
-        } else if let Some((transformer_destination, transformer_target_bb)) =
-            safe_result_ok_transform_destination(*switch_target_place, target_bb_data, tcx)
+            *switch_target_block = current_target_block;
+            *switch_target_variant = SwitchVariant::OptionSome;
+            next_target_block = transformer_target_block;
+        } else if let Some((transformer_destination, transformer_target_block)) =
+            safe_result_ok_transform_destination(*switch_target_place, block_data, tcx)
         {
             *switch_target_place = transformer_destination;
-            *switch_target_bb = target_bb;
-            *switch_target_variant_name = "Ok".to_string();
-            *switch_target_variant_idx = variant_idx(LangItem::ResultOk, tcx);
-            next_target_bb = transformer_target_bb;
+            *switch_target_block = current_target_block;
+            *switch_target_variant = SwitchVariant::ResultOk;
+            next_target_block = transformer_target_block;
         } else {
-            next_target_bb = None;
+            next_target_block = None;
         }
     }
 }
@@ -432,15 +484,14 @@ pub fn track_safe_primary_opt_result_variant_transformations<'tcx>(
 // and `Option::inspect` calls e.t.c).
 pub fn track_safe_result_err_transformations<'tcx>(
     switch_target_place: &mut Place<'tcx>,
-    switch_target_bb: &mut BasicBlock,
-    switch_target_variant_name: &mut String,
-    switch_target_variant_idx: &mut VariantIdx,
-    target_bb: BasicBlock,
+    switch_target_block: &mut BasicBlock,
+    switch_target_variant: &mut SwitchVariant,
+    target_block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
     tcx: TyCtxt,
 ) {
-    let mut next_target_bb = Some(target_bb);
-    let mut opt_some_target_bb = None;
+    let mut next_target_block = Some(target_block);
+    let mut opt_some_target_block = None;
     fn result_err_crate_adt_and_fn_name_check(
         crate_name: &str,
         adt_name: &str,
@@ -448,40 +499,39 @@ pub fn track_safe_result_err_transformations<'tcx>(
     ) -> bool {
         matches!(crate_name, "std" | "core") && (adt_name == "Result" && fn_name == "err")
     }
-    while let Some(target_bb) = next_target_bb {
-        let target_bb_data = &basic_blocks[target_bb];
-        if let Some((transformer_destination, transformer_target_bb)) = safe_transform_destination(
-            *switch_target_place,
-            target_bb_data,
-            result_err_crate_adt_and_fn_name_check,
-            tcx,
-        ) {
-            *switch_target_place = transformer_destination;
-            *switch_target_bb = target_bb;
-            *switch_target_variant_name = "Some".to_string();
-            *switch_target_variant_idx = variant_idx(LangItem::OptionSome, tcx);
-            next_target_bb = None;
-            opt_some_target_bb = transformer_target_bb;
-        } else if let Some((transformer_destination, transformer_target_bb)) =
-            safe_result_err_transform_destination(*switch_target_place, target_bb_data, tcx)
+    while let Some(current_target_block) = next_target_block {
+        let block_data = &basic_blocks[current_target_block];
+        if let Some((transformer_destination, transformer_target_block)) =
+            safe_transform_destination(
+                *switch_target_place,
+                block_data,
+                result_err_crate_adt_and_fn_name_check,
+                tcx,
+            )
         {
             *switch_target_place = transformer_destination;
-            *switch_target_bb = target_bb;
-            *switch_target_variant_name = "Err".to_string();
-            *switch_target_variant_idx = variant_idx(LangItem::ResultErr, tcx);
-            next_target_bb = transformer_target_bb;
+            *switch_target_block = current_target_block;
+            *switch_target_variant = SwitchVariant::OptionSome;
+            next_target_block = None;
+            opt_some_target_block = transformer_target_block;
+        } else if let Some((transformer_destination, transformer_target_block)) =
+            safe_result_err_transform_destination(*switch_target_place, block_data, tcx)
+        {
+            *switch_target_place = transformer_destination;
+            *switch_target_block = current_target_block;
+            *switch_target_variant = SwitchVariant::ResultErr;
+            next_target_block = transformer_target_block;
         } else {
-            next_target_bb = None;
+            next_target_block = None;
         }
     }
 
-    if let Some(opt_some_target_bb) = opt_some_target_bb {
+    if let Some(opt_some_target_block) = opt_some_target_block {
         track_safe_primary_opt_result_variant_transformations(
             switch_target_place,
-            switch_target_bb,
-            switch_target_variant_name,
-            switch_target_variant_idx,
-            opt_some_target_bb,
+            switch_target_block,
+            switch_target_variant,
+            opt_some_target_block,
             basic_blocks,
             tcx,
         );
@@ -489,8 +539,8 @@ pub fn track_safe_result_err_transformations<'tcx>(
 }
 
 /// Returns the target block for the given basic block's terminator call (if any).
-pub fn call_target(bb_data: &BasicBlockData) -> Option<BasicBlock> {
-    let terminator = bb_data.terminator.as_ref()?;
+pub fn call_target(block_data: &BasicBlockData) -> Option<BasicBlock> {
+    let terminator = block_data.terminator.as_ref()?;
     match &terminator.kind {
         TerminatorKind::Call { target, .. } => *target,
         _ => None,
@@ -501,10 +551,10 @@ pub fn call_target(bb_data: &BasicBlockData) -> Option<BasicBlock> {
 /// (i.e. `?` operator) where the given place is the first argument.
 fn try_branch_destination<'tcx>(
     place: Place<'tcx>,
-    bb_data: &BasicBlockData<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    let terminator = bb_data.terminator.as_ref()?;
+    let terminator = block_data.terminator.as_ref()?;
     let TerminatorKind::Call {
         func,
         args,
@@ -537,7 +587,7 @@ fn try_branch_destination<'tcx>(
 /// (e.g. via `Option::inspect`, `Result::ok` calls e.t.c).
 fn safe_option_some_transform_destination<'tcx>(
     place: Place<'tcx>,
-    bb_data: &BasicBlockData<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
     fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
@@ -549,7 +599,7 @@ fn safe_option_some_transform_destination<'tcx>(
                 ))
                 || (adt_name == "Result" && fn_name == "ok"))
     }
-    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
+    safe_transform_destination(place, block_data, crate_adt_and_fn_name_check, tcx)
 }
 
 /// Returns destination place and target block (if any) of a transformation into `Result`
@@ -559,7 +609,7 @@ fn safe_option_some_transform_destination<'tcx>(
 /// (e.g. via `Result::inspect`, `Result::inspect_err` calls e.t.c).
 fn safe_result_transform_destination<'tcx>(
     place: Place<'tcx>,
-    bb_data: &BasicBlockData<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
     fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
@@ -570,7 +620,7 @@ fn safe_result_transform_destination<'tcx>(
                 "copied" | "cloned" | "inspect" | "inspect_err" | "as_ref" | "as_deref"
             )
     }
-    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
+    safe_transform_destination(place, block_data, crate_adt_and_fn_name_check, tcx)
 }
 
 /// Returns destination place and target block (if any) of a transformation into `Result`
@@ -579,7 +629,7 @@ fn safe_result_transform_destination<'tcx>(
 /// (e.g. via `Result::map_err`, `Option::ok_or` calls e.t.c).
 fn safe_result_ok_transform_destination<'tcx>(
     place: Place<'tcx>,
-    bb_data: &BasicBlockData<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
     fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
@@ -597,7 +647,7 @@ fn safe_result_ok_transform_destination<'tcx>(
                 ))
                 || (adt_name == "Option" && matches!(fn_name, "ok_or" | "ok_or_else")))
     }
-    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
+    safe_transform_destination(place, block_data, crate_adt_and_fn_name_check, tcx)
 }
 
 /// Returns destination place and target block (if any) of a transformation into `Result`
@@ -606,7 +656,7 @@ fn safe_result_ok_transform_destination<'tcx>(
 /// (e.g. via `Result::map`, `Result::inspect` calls e.t.c).
 fn safe_result_err_transform_destination<'tcx>(
     place: Place<'tcx>,
-    bb_data: &BasicBlockData<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
     fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
@@ -617,7 +667,7 @@ fn safe_result_err_transform_destination<'tcx>(
                     "map" | "copied" | "cloned" | "inspect" | "inspect_err" | "as_ref" | "as_deref"
                 ))
     }
-    safe_transform_destination(place, bb_data, crate_adt_and_fn_name_check, tcx)
+    safe_transform_destination(place, block_data, crate_adt_and_fn_name_check, tcx)
 }
 
 /// Returns destination place and target block (if any) of a "safe" transformation
@@ -627,11 +677,11 @@ fn safe_result_err_transform_destination<'tcx>(
 /// for details about the target "safe" transformations.
 pub fn safe_transform_destination<'tcx>(
     place: Place<'tcx>,
-    bb_data: &BasicBlockData<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
     crate_adt_and_fn_name_check: fn(&str, &str, &str) -> bool,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    let terminator = bb_data.terminator.as_ref()?;
+    let terminator = block_data.terminator.as_ref()?;
     let TerminatorKind::Call {
         func,
         args,

@@ -103,3 +103,8 @@ pub fn includes_query_type(gen_args: &List<GenericArg>, tcx: TyCtxt) -> bool {
             })
     })
 }
+
+/// Returns a string representation of the `DefPathHash` of the given `DefId`.
+pub fn def_hash_str(def_id: DefId, tcx: TyCtxt) -> String {
+    format!("{:?}", tcx.def_path_hash(def_id))
+}

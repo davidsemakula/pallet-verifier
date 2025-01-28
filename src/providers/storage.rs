@@ -21,10 +21,11 @@ use rustc_span::def_id::DefId;
 use rustc_target::abi::FieldIdx;
 
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     providers::{
-        analyze,
+        analyze::{self, SwitchVariant},
         annotate::{Annotation, CondOp},
         closure::{self, ClosureInvariantEnv, ClosureInvariantInfo, ClosurePlaceIdx},
     },
@@ -48,10 +49,34 @@ pub struct StorageItem<'tcx> {
 
 /// FRAME storage related invariants.
 pub type StorageInvariant<'tcx> = (
-    StorageItem<'tcx>,
+    StorageId,
     BasicBlock,
     FxHashSet<(Location, CondOp, Place<'tcx>)>,
 );
+
+/// Identifier for storage item.
+pub enum StorageId {
+    /// `DefId` of generated storage item.
+    ///
+    /// (i.e. [`StorageItem::prefix`])
+    DefId(DefId),
+    /// String representation of the `DefPathHash` for the above `DefId`.
+    ///
+    /// See [`utils::def_hash_str`].
+    DefHash(String),
+}
+
+impl StorageId {
+    /// Returns a string representation of the `DefPathHash` of the storage id.
+    ///
+    /// See [`utils::def_hash_str`] for details.
+    pub fn as_hash(&self, tcx: TyCtxt) -> String {
+        match self {
+            StorageId::DefId(def_id) => utils::def_hash_str(*def_id, tcx),
+            StorageId::DefHash(hash) => hash.to_string(),
+        }
+    }
+}
 
 /// Returns info about the FRAME storage item from which the given place is derived (if any).
 ///
@@ -191,9 +216,11 @@ pub fn propagate_invariants<'tcx>(
     // Propagates storage invariants (if necessary).
     let basic_blocks = &body.basic_blocks;
     let dominators = basic_blocks.dominators();
-    for (storage_item, use_location, invariants) in storage_invariants {
+    for (storage_id, use_location, invariants) in storage_invariants {
         // Retreives calls for storage type.
-        let Some(storage_calls) = storage_visitor.calls.get(&storage_item.prefix) else {
+        let Some((storage_item, storage_calls)) =
+            storage_visitor.calls.get(&storage_id.as_hash(tcx))
+        else {
             continue;
         };
 
@@ -476,20 +503,13 @@ fn propagate_return_place_invariant<'tcx>(
 
     // Handles `Option<T>` and `Result<T>` return places where T is the storage value type.
     // NOTE: `is_option_ty` and `is_result_ty` also match references.
-    let (mut switch_target_variant_idx, mut switch_target_variant_name) =
-        if is_option_ty(return_ty, value_ty, tcx) {
-            (
-                analyze::variant_idx(LangItem::OptionSome, tcx),
-                "Some".to_string(),
-            )
-        } else if is_result_ty(return_ty, value_ty, tcx) {
-            (
-                analyze::variant_idx(LangItem::ResultOk, tcx),
-                "Ok".to_string(),
-            )
-        } else {
-            return;
-        };
+    let mut switch_target_variant = if is_option_ty(return_ty, value_ty, tcx) {
+        SwitchVariant::OptionSome
+    } else if is_result_ty(return_ty, value_ty, tcx) {
+        SwitchVariant::ResultOk
+    } else {
+        return;
+    };
     // Finds wrapped storage value like type (e.g. the type or a reference to the type).
     let TyKind::Adt(_, gen_args) = return_ty.peel_refs().kind() else {
         unreachable!("Expected `Option` or `Result` struct");
@@ -501,19 +521,18 @@ fn propagate_return_place_invariant<'tcx>(
     // Collects `Option::Some` or `Result::Ok` (or equivalent safe transformation) target blocks
     // for switches based on the discriminant of destination of in successor blocks.
     let mut switch_target_place = *destination;
-    let mut switch_target_bb = block;
+    let mut switch_target_block = block;
     analyze::track_safe_primary_opt_result_variant_transformations(
         &mut switch_target_place,
-        &mut switch_target_bb,
-        &mut switch_target_variant_name,
-        &mut switch_target_variant_idx,
+        &mut switch_target_block,
+        &mut switch_target_variant,
         target,
         basic_blocks,
         tcx,
     );
     let switch_targets = analyze::collect_switch_targets_for_discr_value(
         switch_target_place,
-        switch_target_variant_idx.as_u32() as u128,
+        switch_target_variant.idx(tcx).as_u32() as u128,
         block,
         basic_blocks,
     );
@@ -529,8 +548,8 @@ fn propagate_return_place_invariant<'tcx>(
             // Finds variant downcast to `downcast_ty` places (if any) for the switch target variant.
             let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
                 switch_target_place,
-                &switch_target_variant_name,
-                switch_target_variant_idx,
+                switch_target_variant.name(),
+                switch_target_variant.idx(tcx),
                 downcast_ty,
                 stmt,
             ) else {
@@ -553,6 +572,118 @@ fn propagate_return_place_invariant<'tcx>(
             ));
         }
     }
+}
+
+/// Env var for tracking propagated return place storage invariant.
+pub const ENV_STORAGE_INVARIANT_PREFIX: &str = "PALLET_VERIFIER_STORAGE_INVARIANT";
+
+/// Info needed to apply propagated return place storage invariants.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StorageInvariantEnv {
+    pub call_def_hash: String,
+    pub storage_def_hash: String,
+    pub source: InvariantSource,
+    pub propagated_variant: PropagatedVariant,
+}
+
+impl StorageInvariantEnv {
+    /// Create new storage invariant environment.
+    pub fn new(
+        call_def_id: DefId,
+        storage_def_hash: String,
+        source: InvariantSource,
+        propagated_variant: PropagatedVariant,
+        tcx: TyCtxt,
+    ) -> Self {
+        Self {
+            call_def_hash: utils::def_hash_str(call_def_id, tcx),
+            storage_def_hash,
+            propagated_variant,
+            source,
+        }
+    }
+
+    /// Create new storage invariant environment.
+    pub fn new_with_id(
+        call_def_id: DefId,
+        storage_id: StorageId,
+        source: InvariantSource,
+        propagated_variant: PropagatedVariant,
+        tcx: TyCtxt,
+    ) -> Self {
+        Self::new(
+            call_def_id,
+            storage_id.as_hash(tcx),
+            source,
+            propagated_variant,
+            tcx,
+        )
+    }
+}
+
+/// A propagated return place variant of `Result` or `Option` type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PropagatedVariant {
+    /// `Option::Some` or `Result::Ok` (or a "safe" transformation from either).
+    Primary(SwitchVariant),
+    /// `Option::None` or `Result::Err` (or a "safe" transformation from either).
+    Alt(SwitchVariant),
+    /// An undetermined variant for a `Result` or `Option` type (or a "safe" transformation from either).
+    ///
+    /// NOTE: This is equivalent to the `TOP` abstract value.
+    Unknown(SwitchVariant, SwitchVariant),
+    /// A unification of variants (e.g. with `Result::unwrap_or_else`).
+    ///
+    /// **NOTE:** This is NOT equivalent to the `TOP` abstract value because it's an "unwrapped" value.
+    Union,
+}
+
+impl PropagatedVariant {
+    pub fn as_switch_variant(&self) -> Option<SwitchVariant> {
+        match self {
+            PropagatedVariant::Primary(switch_variant) | PropagatedVariant::Alt(switch_variant) => {
+                Some(*switch_variant)
+            }
+            PropagatedVariant::Unknown(_, _) | PropagatedVariant::Union => None,
+        }
+    }
+}
+
+/// Source operation for the propagated invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InvariantSource {
+    /// `[T]::binary_search*` methods.
+    SliceBinarySearch,
+    /// `Iterator::position` and `Iterator::position` methods.
+    IteratorPosition,
+}
+
+// Sets propagated storage invariant environment.
+pub fn set_invariant_env(invariant_env: &StorageInvariantEnv) {
+    let invariant_env_json =
+        serde_json::to_string(invariant_env).expect("Expected serialized `StorageInvariantEnv`");
+    // SAFETY: `pallet-verifier` is single-threaded.
+    let env_key = call_propagation_env_key(&invariant_env.call_def_hash);
+    std::env::set_var(env_key, invariant_env_json);
+}
+
+/// Retrieves the propagated storage invariant environment (if any).
+pub fn find_invariant_env(def_id: DefId, tcx: TyCtxt) -> Option<StorageInvariantEnv> {
+    // SAFETY: `pallet-verifier` is single-threaded.
+    let hash = utils::def_hash_str(def_id, tcx);
+    let env_key = call_propagation_env_key(&hash);
+    let invariant_env_json = std::env::var(env_key).ok()?;
+    let invariant_env: StorageInvariantEnv = serde_json::from_str(&invariant_env_json).ok()?;
+    if invariant_env.call_def_hash == hash {
+        Some(invariant_env)
+    } else {
+        None
+    }
+}
+
+/// Returns a env key for the given def hash.
+fn call_propagation_env_key(def_hash: &str) -> String {
+    format!("{ENV_STORAGE_INVARIANT_PREFIX}_{def_hash}")
 }
 
 /// Composes a boolean condition for checking if any of the `$needle` word stems is present
@@ -586,7 +717,7 @@ macro_rules! contains_word_stem {
 /// but doesn't verify it.
 fn is_idempotent_call<'tcx>(
     terminator: &Terminator<'tcx>,
-    storage_item: StorageItem<'tcx>,
+    storage_item: &StorageItem<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> bool {
     let TerminatorKind::Call { func, .. } = &terminator.kind else {
@@ -785,8 +916,8 @@ fn first_ty_arg<'tcx>(gen_args: &List<GenericArg<'tcx>>) -> Option<Ty<'tcx>> {
 /// Collects storage type associated function calls.
 pub struct StorageCallVisitor<'tcx> {
     tcx: TyCtxt<'tcx>,
-    /// A list of annotation declarations.
-    pub calls: FxHashMap<DefId, Vec<(Terminator<'tcx>, BasicBlock)>>,
+    /// A map of storage type `DefId` to associated function calls.
+    pub calls: FxHashMap<String, (StorageItem<'tcx>, Vec<(Terminator<'tcx>, BasicBlock)>)>,
 }
 
 impl<'tcx> StorageCallVisitor<'tcx> {
@@ -802,13 +933,14 @@ impl<'tcx> StorageCallVisitor<'tcx> {
         let Some(storage_item) = storage_item(terminator, self.tcx) else {
             return;
         };
+        let hash = utils::def_hash_str(storage_item.prefix, self.tcx);
         let call_info = (terminator.clone(), location.block);
-        match self.calls.get_mut(&storage_item.prefix) {
-            Some(calls) => {
+        match self.calls.get_mut(&hash) {
+            Some((_, calls)) => {
                 calls.push(call_info);
             }
             None => {
-                self.calls.insert(storage_item.prefix, vec![call_info]);
+                self.calls.insert(hash, (storage_item, vec![call_info]));
             }
         }
     }

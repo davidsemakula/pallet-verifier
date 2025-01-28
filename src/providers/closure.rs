@@ -15,15 +15,18 @@ use rustc_target::abi::FieldIdx;
 
 use serde::{Deserialize, Serialize};
 
-use crate::providers::{
-    analyze,
-    annotate::{Annotation, CondOp},
+use crate::{
+    providers::{
+        analyze,
+        annotate::{Annotation, CondOp},
+    },
+    utils,
 };
 
 /// Env var for tracking propagated invariant environment for closure.
 pub const ENV_CLOSURE_INVARIANTS: &str = "PALLET_VERIFIER_CLOSURE_INVARIANTS";
 
-/// Info needed to apply propagated storage invariants to a closure's MIR.
+/// Info needed to apply propagated invariants to a closure's MIR.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClosureInvariantEnv {
     pub def_hash: String,
@@ -34,7 +37,7 @@ impl ClosureInvariantEnv {
     /// Create new closure invariant environment.
     pub fn new(def_id: DefId, invariants: FxHashSet<ClosureInvariantInfo>, tcx: TyCtxt) -> Self {
         Self {
-            def_hash: def_hash_str(def_id, tcx),
+            def_hash: utils::def_hash_str(def_id, tcx),
             invariants,
         }
     }
@@ -235,9 +238,9 @@ pub fn propagate_opt_result_idx_invariant<'tcx>(
         ClosurePlaceIdx::new_arg(0),
         ClosurePlaceIdx::new_capture(captured_collection_idx.as_u32()),
     )]);
+    let closure_invariant_env = ClosureInvariantEnv::new(closure_def_id, invariants, tcx);
 
     // Sets propagated invariant environment for closure.
-    let closure_invariant_env = ClosureInvariantEnv::new(closure_def_id, invariants, tcx);
     set_invariant_env(&closure_invariant_env);
 
     // Composes closure MIR (with propagated invariant environment set).
@@ -245,11 +248,11 @@ pub fn propagate_opt_result_idx_invariant<'tcx>(
 }
 
 // Sets propagated invariant environment for closure.
-pub fn set_invariant_env(closure_invariant_env: &ClosureInvariantEnv) {
-    let closure_invariant_env_json = serde_json::to_string(closure_invariant_env)
-        .expect("Expected serialized `ClosureInvariantEnv`");
+pub fn set_invariant_env(invariant_env: &ClosureInvariantEnv) {
+    let invariant_env_json =
+        serde_json::to_string(invariant_env).expect("Expected serialized `ClosureInvariantEnv`");
     // SAFETY: `pallet-verifier` is single-threaded.
-    std::env::set_var(ENV_CLOSURE_INVARIANTS, closure_invariant_env_json);
+    std::env::set_var(ENV_CLOSURE_INVARIANTS, invariant_env_json);
 }
 
 /// Retrieves the propagated invariant environment for closure (if any).
@@ -261,7 +264,7 @@ pub fn find_invariant_env(def_id: DefId, tcx: TyCtxt) -> Option<ClosureInvariant
     let closure_invariant_env_json = std::env::var(ENV_CLOSURE_INVARIANTS).ok()?;
     let closure_invariant_env: ClosureInvariantEnv =
         serde_json::from_str(&closure_invariant_env_json).ok()?;
-    let hash = def_hash_str(def_id, tcx);
+    let hash = utils::def_hash_str(def_id, tcx);
     if closure_invariant_env.def_hash == hash {
         // Clears the environment.
         std::env::remove_var(ENV_CLOSURE_INVARIANTS);
@@ -271,7 +274,7 @@ pub fn find_invariant_env(def_id: DefId, tcx: TyCtxt) -> Option<ClosureInvariant
     }
 }
 
-/// Applies propagated storage invariants for closure.
+/// Applies propagated invariants for closure.
 pub fn apply_propagated_invariants<'tcx>(
     def_id: DefId,
     closure_invariant_env: ClosureInvariantEnv,
@@ -290,7 +293,7 @@ pub fn apply_propagated_invariants<'tcx>(
     }
 }
 
-/// Applies propagated storage invariant for closure.
+/// Applies propagated invariant for closure.
 fn apply_propagated_invariant<'tcx>(
     def_id: DefId,
     cond_op: CondOp,
@@ -335,7 +338,7 @@ fn apply_propagated_invariant<'tcx>(
         collection_place
     };
 
-    // Adds propagated storage invariant annotation.
+    // Adds propagated invariant annotation.
     let region = match collection_place_ty.kind() {
         TyKind::Ref(region, _, _) => *region,
         _ => Region::new_from_kind(tcx, RegionKind::ReErased),
@@ -411,9 +414,4 @@ fn deref_captured_place<'tcx>(
     };
 
     Ok(derefed_op_place)
-}
-
-/// Returns a string representation of the `DefPathHash` of the given `DefId`.
-fn def_hash_str(def_id: DefId, tcx: TyCtxt) -> String {
-    format!("{:?}", tcx.def_path_hash(def_id))
 }

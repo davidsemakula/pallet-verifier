@@ -8,7 +8,7 @@ use rustc_middle::{
     mir::{
         visit::Visitor, BasicBlock, BasicBlocks, BinOp, Body, Const, ConstValue, HasLocalDecls,
         LocalDecls, Location, MirPass, Operand, Place, PlaceElem, Rvalue, Statement, StatementKind,
-        Terminator, TerminatorKind,
+        Terminator, TerminatorKind, RETURN_PLACE,
     },
     ty::{Ty, TyCtxt, TyKind},
 };
@@ -18,10 +18,12 @@ use rustc_type_ir::UintTy;
 use itertools::Itertools;
 
 use crate::providers::{
-    analyze,
+    analyze::{self, SwitchVariant},
     annotate::{self, Annotation, CondOp},
     closure,
-    storage::{self, StorageInvariant},
+    storage::{
+        self, InvariantSource, PropagatedVariant, StorageId, StorageInvariant, StorageInvariantEnv,
+    },
 };
 
 /// Adds `Iterator` invariant annotations.
@@ -30,7 +32,8 @@ pub struct IteratorInvariants;
 impl<'tcx> MirPass<'tcx> for IteratorInvariants {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         // Generates iterator annotations.
-        let mut visitor = IteratorVisitor::new(tcx, &body.basic_blocks, body.local_decls());
+        let def_id = body.source.def_id();
+        let mut visitor = IteratorVisitor::new(def_id, &body.basic_blocks, body.local_decls(), tcx);
         visitor.visit_body(body);
         let mut annotations = visitor.annotations;
 
@@ -48,9 +51,10 @@ impl<'tcx> MirPass<'tcx> for IteratorInvariants {
 
 /// Collects `Iterator` annotations.
 struct IteratorVisitor<'tcx, 'pass> {
-    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
     basic_blocks: &'pass BasicBlocks<'tcx>,
     local_decls: &'pass LocalDecls<'tcx>,
+    tcx: TyCtxt<'tcx>,
     iterator_assoc_items: FxHashMap<Symbol, DefId>,
     /// A list of annotation declarations.
     annotations: Vec<Annotation<'tcx>>,
@@ -60,9 +64,10 @@ struct IteratorVisitor<'tcx, 'pass> {
 
 impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
     fn new(
-        tcx: TyCtxt<'tcx>,
+        def_id: DefId,
         basic_blocks: &'pass BasicBlocks<'tcx>,
         local_decls: &'pass LocalDecls<'tcx>,
+        tcx: TyCtxt<'tcx>,
     ) -> Self {
         let iterator_trait_def_id = tcx
             .lang_items()
@@ -74,9 +79,10 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             .map(|assoc_item| (assoc_item.name, assoc_item.def_id))
             .collect();
         Self {
-            tcx,
+            def_id,
             basic_blocks,
             local_decls,
+            tcx,
             iterator_assoc_items,
             annotations: Vec::new(),
             storage_invariants: Vec::new(),
@@ -133,6 +139,18 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 && args.len() == 1
             {
                 self.process_len(args, destination, target.as_ref(), location);
+            }
+
+            // Handles propagated return place iterator (r)position invariants.
+            let storage_invariant_env = storage::find_invariant_env(def_id, self.tcx)
+                .filter(|invariant| invariant.source == InvariantSource::IteratorPosition);
+            if let Some(storage_invariant_env) = storage_invariant_env {
+                self.propagate_iterator_position_invariant_env(
+                    storage_invariant_env,
+                    destination,
+                    target.as_ref(),
+                    location,
+                );
             }
         }
     }
@@ -343,26 +361,6 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Tracks `Option::Some` switch target info of return value of
-        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition`.
-        // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
-        // `Result::Ok` transformations - see [`track_switch_target_transformations`] for details).
-        let mut switch_target_place = *destination;
-        let mut switch_target_bb = location.block;
-        let mut switch_target_variant_name = "Some".to_string();
-        let mut switch_target_variant_idx = analyze::variant_idx(LangItem::OptionSome, self.tcx);
-        if let Some(target) = target {
-            analyze::track_safe_primary_opt_result_variant_transformations(
-                &mut switch_target_place,
-                &mut switch_target_bb,
-                &mut switch_target_variant_name,
-                &mut switch_target_variant_idx,
-                *target,
-                self.basic_blocks,
-                self.tcx,
-            );
-        }
-
         // Finds FRAME storage subject (if any).
         let storage_info = storage::storage_subject(
             iterator_subject_place,
@@ -372,23 +370,45 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             dominators,
             self.tcx,
         );
-        let mut storage_invariants = FxHashSet::default();
+
+        // Tracks `Option::Some` switch target info of return value of
+        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition`.
+        // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
+        // `Result::Ok` transformations - see [`track_switch_target_transformations`] for details).
+        let mut switch_target_place = *destination;
+        let mut switch_target_block = location.block;
+        let mut switch_variant = SwitchVariant::OptionSome;
+        if let Some(target) = target {
+            analyze::track_safe_primary_opt_result_variant_transformations(
+                &mut switch_target_place,
+                &mut switch_target_block,
+                &mut switch_variant,
+                *target,
+                self.basic_blocks,
+                self.tcx,
+            );
+        }
 
         // Finds `Option::Some` (or equivalent safe transformation) target blocks
         // for switches based on the discriminant of return value of
         // `std::iter::Iterator::position` or `std::iter::Iterator::rposition` in successor blocks.
-        for target_bb in analyze::collect_switch_targets_for_discr_value(
+        let switch_targets = analyze::collect_switch_targets_for_discr_value(
             switch_target_place,
-            switch_target_variant_idx.as_u32() as u128,
-            switch_target_bb,
+            switch_variant.idx(self.tcx).as_u32() as u128,
+            switch_target_block,
             self.basic_blocks,
-        ) {
+        );
+
+        // Collects collection length/size bound annotations (and storage invariants)
+        // for variant downcast to `usize` places (if any) for the switch target.
+        let mut storage_invariants = FxHashSet::default();
+        for target_bb in switch_targets {
             for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
                 // Finds variant downcast to `usize` places (if any) for the switch target variant.
                 let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
                     switch_target_place,
-                    &switch_target_variant_name,
-                    switch_target_variant_idx,
+                    switch_variant.name(),
+                    switch_variant.idx(self.tcx),
                     self.tcx.types.usize,
                     stmt,
                 ) else {
@@ -420,23 +440,45 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Adds storage invariants.
         if !storage_invariants.is_empty() {
             if let Some((storage_item, use_location)) = storage_info {
-                self.storage_invariants
-                    .push((storage_item, use_location, storage_invariants));
+                self.storage_invariants.push((
+                    StorageId::DefId(storage_item.prefix),
+                    use_location,
+                    storage_invariants,
+                ));
             }
         }
 
         // Propagate position invariant to `Option` (and `Result`) adapter input closures.
-        let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_bb]) else {
-            return;
+        if let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_block]) {
+            let next_block_data = &self.basic_blocks[next_target];
+            closure::propagate_opt_result_idx_invariant(
+                switch_target_place,
+                next_block_data,
+                &[(iterator_subject_place, iterator_subject_bb)],
+                self.basic_blocks,
+                self.tcx,
+            );
         };
-        let next_block_data = &self.basic_blocks[next_target];
-        closure::propagate_opt_result_idx_invariant(
-            switch_target_place,
-            next_block_data,
-            &[(iterator_subject_place, iterator_subject_bb)],
-            self.basic_blocks,
-            self.tcx,
-        );
+
+        // Propagate return place storage index invariant to callers.
+        let is_primary_variant_return_place = switch_target_place
+            .as_local()
+            .is_some_and(|local| local == RETURN_PLACE);
+        if is_primary_variant_return_place {
+            if let Some((storage_item, _)) = storage_info {
+                // Composes propagated return place storage invariant environment.
+                let storage_invariant_env = StorageInvariantEnv::new_with_id(
+                    self.def_id,
+                    StorageId::DefId(storage_item.prefix),
+                    InvariantSource::IteratorPosition,
+                    PropagatedVariant::Primary(switch_variant),
+                    self.tcx,
+                );
+
+                // Sets propagated return place storage invariant environment.
+                storage::set_invariant_env(&storage_invariant_env);
+            }
+        }
     }
 
     /// Analyzes and annotates calls to `std::iter::Iterator::count`.
@@ -558,7 +600,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 // Adds storage invariants.
                 if let Some((storage_item, use_location)) = storage_info {
                     self.storage_invariants.push((
-                        storage_item,
+                        StorageId::DefId(storage_item.prefix),
                         use_location,
                         FxHashSet::from_iter([(annotation_location, cond_op, *destination)]),
                     ));
@@ -598,6 +640,100 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             CondOp::Le,
             *destination,
         ));
+    }
+
+    // Propagates return place iterator (r)position invariants.
+    fn propagate_iterator_position_invariant_env(
+        &mut self,
+        invariant_env: StorageInvariantEnv,
+        destination: &Place<'tcx>,
+        target: Option<&BasicBlock>,
+        location: Location,
+    ) {
+        // Tracks `Option::Some` (or "safe" transformation) switch target info of return value of
+        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition`.
+        // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
+        // `Result::Ok` transformations - see [`track_switch_target_transformations`] for details).
+        let mut switch_target_place = *destination;
+        let mut switch_target_block = location.block;
+        let Some(mut switch_variant) = invariant_env.propagated_variant.as_switch_variant() else {
+            return;
+        };
+        if let Some(target) = target {
+            analyze::track_safe_primary_opt_result_variant_transformations(
+                &mut switch_target_place,
+                &mut switch_target_block,
+                &mut switch_variant,
+                *target,
+                self.basic_blocks,
+                self.tcx,
+            );
+        }
+
+        // Finds `Option::Some` (or equivalent safe transformation) target blocks
+        // for switches based on the discriminant of return value of
+        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition` in successor blocks.
+        let switch_targets = analyze::collect_switch_targets_for_discr_value(
+            switch_target_place,
+            switch_variant.idx(self.tcx).as_u32() as u128,
+            switch_target_block,
+            self.basic_blocks,
+        );
+
+        // Collects collection length/size bound annotations (and storage invariants)
+        // for variant downcast to `usize` places (if any) for the switch target.
+        let mut storage_invariants = FxHashSet::default();
+        for target_bb in switch_targets {
+            for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
+                // Finds variant downcast to `usize` places (if any) for the switch target variant.
+                let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
+                    switch_target_place,
+                    switch_variant.name(),
+                    switch_variant.idx(self.tcx),
+                    self.tcx.types.usize,
+                    stmt,
+                ) else {
+                    continue;
+                };
+
+                // Declares transformed storage invariants.
+                storage_invariants.insert((
+                    Location {
+                        block: target_bb,
+                        statement_index: stmt_idx + 1,
+                    },
+                    CondOp::Lt,
+                    downcast_place,
+                ));
+            }
+        }
+
+        // Adds storage invariants.
+        if !storage_invariants.is_empty() {
+            self.storage_invariants.push((
+                StorageId::DefHash(invariant_env.storage_def_hash.clone()),
+                location.block,
+                storage_invariants,
+            ));
+        }
+
+        // Propagate return place storage index invariant to callers.
+        let is_primary_variant_return_place = switch_target_place
+            .as_local()
+            .is_some_and(|local| local == RETURN_PLACE);
+        if is_primary_variant_return_place {
+            // Composes propagated return place storage invariant environment.
+            let next_invariant_env = StorageInvariantEnv::new(
+                self.def_id,
+                invariant_env.storage_def_hash,
+                InvariantSource::IteratorPosition,
+                PropagatedVariant::Primary(switch_variant),
+                self.tcx,
+            );
+
+            // Sets propagated return place storage invariant environment.
+            storage::set_invariant_env(&next_invariant_env);
+        }
     }
 
     /// Returns the DefId of an `Iterator` assoc item, given it's name.

@@ -173,7 +173,34 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
             let mut intra_calls: FxHashMap<LocalDefId, FxHashSet<LocalDefId>> =
                 FxHashMap::default();
             let hir = tcx.hir();
-            for local_def_id in hir.body_owners() {
+            let is_dispatchable_descendant = |def_id: DefId| {
+                dispatchable_def_ids
+                    .iter()
+                    .any(|ancestor| tcx.is_descendant_of(def_id, ancestor.to_def_id()))
+            };
+            let is_hook_descendant = |def_id: DefId| {
+                hook_fn_def_ids
+                    .iter()
+                    .any(|ancestor| tcx.is_descendant_of(def_id, ancestor.to_def_id()))
+            };
+            for local_def_id in hir.body_owners().sorted_by_key(|local_def_id| {
+                // Process dispatchables and hooks (and their descendant closures) last
+                // because they likely need MIR optimizations propagated from other functions.
+                if dispatchable_def_ids.contains(local_def_id)
+                    || hook_fn_def_ids.contains(local_def_id)
+                    || (matches!(
+                        hir.body_owner_kind(*local_def_id),
+                        rustc_hir::BodyOwnerKind::Closure
+                    ) && (is_dispatchable_descendant(local_def_id.to_def_id())
+                        || is_hook_descendant(local_def_id.to_def_id())))
+                {
+                    2
+                } else if pub_assoc_fn_def_ids.contains(local_def_id) {
+                    1
+                } else {
+                    0
+                }
+            }) {
                 let body_owner_kind = hir.body_owner_kind(local_def_id);
                 if matches!(
                     body_owner_kind,
@@ -225,9 +252,9 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
                 .iter()
                 .chain(&hook_fn_def_ids)
                 .chain(&pub_assoc_fn_def_ids)
-                // Process functions with calls first, so that we can collect type substitutions
-                // for opaque, dynamic and indirect types.
                 .sorted_by_key(|local_def_id| {
+                    // Process functions with calls first, so that we can collect type substitutions
+                    // for opaque, dynamic and indirect types.
                     if concrete_calls.contains_key(local_def_id) {
                         0
                     } else {
@@ -717,19 +744,16 @@ fn pallet_generics<'tcx>(
     let mut trait_generics = FxHashMap::default();
 
     let hir = tcx.hir();
-    for (fn_def_id, (terminator, _)) in concrete_calls
-        .iter()
+    for (fn_def_id, (terminator, _)) in concrete_calls.iter().sorted_by_key(|(fn_def_id, _)| {
         // Prefer generics from dispatchable function calls.
-        .sorted_by_key(|(fn_def_id, _)| {
-            if dispatchable_def_ids.contains(fn_def_id) {
-                0
-            } else if pub_assoc_fn_def_ids.contains(fn_def_id) {
-                1
-            } else {
-                2
-            }
-        })
-    {
+        if dispatchable_def_ids.contains(fn_def_id) {
+            0
+        } else if pub_assoc_fn_def_ids.contains(fn_def_id) {
+            1
+        } else {
+            2
+        }
+    }) {
         let Some(impl_def_id) = tcx
             .impl_of_method(fn_def_id.to_def_id())
             .and_then(|impl_def_id| impl_def_id.as_local())

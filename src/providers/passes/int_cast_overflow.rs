@@ -22,7 +22,7 @@ pub struct IntCastOverflowChecks;
 
 impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        let mut visitor = LossyIntCastVisitor::new(tcx, body.local_decls());
+        let mut visitor = LossyIntCastVisitor::new(body.local_decls(), tcx);
         visitor.visit_body(body);
 
         // Adds integer cast overflow checks.
@@ -32,14 +32,14 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
 
 /// Collects locations and operands for lossy integer cast operations.
 struct LossyIntCastVisitor<'tcx, 'pass> {
-    tcx: TyCtxt<'tcx>,
     local_decls: &'pass LocalDecls<'tcx>,
+    tcx: TyCtxt<'tcx>,
     /// A list of integer cast overflow/underflow checks.
     checks: Vec<Annotation<'tcx>>,
 }
 
 impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
-    fn new(tcx: TyCtxt<'tcx>, local_decls: &'pass LocalDecls<'tcx>) -> Self {
+    fn new(local_decls: &'pass LocalDecls<'tcx>, tcx: TyCtxt<'tcx>) -> Self {
         Self {
             tcx,
             local_decls,
