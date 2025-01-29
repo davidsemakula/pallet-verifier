@@ -178,7 +178,37 @@ pub fn deref_subject<'tcx>(
 ) -> Option<(Place<'tcx>, BasicBlock)> {
     let deref_call =
         pre_anchor_assign_terminator(place, parent_block, anchor_block, basic_blocks, dominators);
-    deref_call.and_then(|(terminator, bb)| deref_operand(&terminator, tcx).map(|place| (place, bb)))
+    deref_call
+        .and_then(|(terminator, block)| deref_operand(&terminator, tcx).map(|place| (place, block)))
+}
+
+/// Recursively finds places for operand/arg and basic blocks of a `Deref` calls (if any) that assign to the given place.
+pub fn deref_subjects_recursive<'tcx>(
+    place: Place<'tcx>,
+    parent_block: BasicBlock,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    dominators: &Dominators<BasicBlock>,
+    tcx: TyCtxt<'tcx>,
+) -> FxHashSet<(Place<'tcx>, BasicBlock)> {
+    let mut deref_subjects = FxHashSet::default();
+    let mut current_place = place;
+    let mut current_block = parent_block;
+
+    while let Some((deref_arg_place, deref_block)) = deref_subject(
+        current_place,
+        current_block,
+        anchor_block,
+        basic_blocks,
+        dominators,
+        tcx,
+    ) {
+        deref_subjects.insert((deref_arg_place, deref_block));
+        current_place = deref_arg_place;
+        current_block = deref_block;
+    }
+
+    deref_subjects
 }
 
 /// Returns place (if any) for the arg/operand of `std::ops::Deref` or `std::ops::DerefMut`.

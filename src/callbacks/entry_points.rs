@@ -173,26 +173,16 @@ impl<'compilation> rustc_driver::Callbacks for EntryPointsCallbacks<'compilation
             let mut intra_calls: FxHashMap<LocalDefId, FxHashSet<LocalDefId>> =
                 FxHashMap::default();
             let hir = tcx.hir();
-            let is_dispatchable_descendant = |def_id: DefId| {
-                dispatchable_def_ids
-                    .iter()
-                    .any(|ancestor| tcx.is_descendant_of(def_id, ancestor.to_def_id()))
-            };
-            let is_hook_descendant = |def_id: DefId| {
-                hook_fn_def_ids
-                    .iter()
-                    .any(|ancestor| tcx.is_descendant_of(def_id, ancestor.to_def_id()))
-            };
             for local_def_id in hir.body_owners().sorted_by_key(|local_def_id| {
-                // Process dispatchables and hooks (and their descendant closures) last
+                // Process closure last, and dispatchables and hooks second last
                 // because they likely need MIR optimizations propagated from other functions.
-                if dispatchable_def_ids.contains(local_def_id)
+                if matches!(
+                    hir.body_owner_kind(*local_def_id),
+                    rustc_hir::BodyOwnerKind::Closure
+                ) {
+                    3
+                } else if dispatchable_def_ids.contains(local_def_id)
                     || hook_fn_def_ids.contains(local_def_id)
-                    || (matches!(
-                        hir.body_owner_kind(*local_def_id),
-                        rustc_hir::BodyOwnerKind::Closure
-                    ) && (is_dispatchable_descendant(local_def_id.to_def_id())
-                        || is_hook_descendant(local_def_id.to_def_id())))
                 {
                     2
                 } else if pub_assoc_fn_def_ids.contains(local_def_id) {

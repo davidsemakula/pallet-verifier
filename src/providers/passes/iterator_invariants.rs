@@ -448,8 +448,23 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             }
         }
 
-        // Propagate position invariant to `Option` (and `Result`) adapter input closures.
+        // Propagate position invariant to `Option` (and `Result`) adapter input closures (if any).
         if let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_block]) {
+            // Collects collection related places (including all deref subjects).
+            let mut collection_def_places = vec![(iterator_subject_place, iterator_subject_bb)];
+            let deref_subjects = analyze::deref_subjects_recursive(
+                iterator_subject_place,
+                iterator_subject_bb,
+                location.block,
+                self.basic_blocks,
+                dominators,
+                self.tcx,
+            );
+            if !deref_subjects.is_empty() {
+                collection_def_places.extend(deref_subjects);
+            }
+
+            // Propagate invariants to closure (if any).
             let next_block_data = &self.basic_blocks[next_target];
             closure::propagate_opt_result_idx_invariant(
                 switch_target_place,

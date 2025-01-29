@@ -226,7 +226,6 @@ pub fn propagate_opt_result_idx_invariant<'tcx>(
                 })
             })
         });
-
     let Some(captured_collection_idx) = captured_collection_idx else {
         return;
     };

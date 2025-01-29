@@ -241,20 +241,36 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             }
         }
 
-        // Propagate index invariant to `Result` (and `Option`) adapter input closures.
+        // Propagate index invariant to `Result` (and `Option`) adapter input closures (if any).
         if len_bound_info.is_some() {
             let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_block])
             else {
                 return;
             };
+
+            // Collects collection related places (including all deref subjects).
+            let mut collection_def_places = vec![
+                (binary_search_arg_place, location.block),
+                (slice_deref_arg_place, slice_deref_bb),
+            ];
+            let deref_subjects = analyze::deref_subjects_recursive(
+                slice_deref_arg_place,
+                slice_deref_bb,
+                location.block,
+                self.basic_blocks,
+                dominators,
+                self.tcx,
+            );
+            if !deref_subjects.is_empty() {
+                collection_def_places.extend(deref_subjects);
+            }
+
+            // Propagate invariants to closure (if any).
             let next_block_data = &self.basic_blocks[next_target];
             closure::propagate_opt_result_idx_invariant(
                 switch_target_place,
                 next_block_data,
-                &[
-                    (binary_search_arg_place, location.block),
-                    (slice_deref_arg_place, slice_deref_bb),
-                ],
+                &collection_def_places,
                 self.basic_blocks,
                 self.tcx,
             );
