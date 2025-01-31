@@ -191,14 +191,12 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             let mut hook_entry_points = Vec::new();
             let mut pub_assoc_fn_entry_points = Vec::new();
             let mut analyze_entry_points =
-                |mut entry_points_info: Vec<(LocalDefId, LocalDefId, Symbol, Option<Symbol>)>,
+                |mut entry_points_info: Vec<(LocalDefId, LocalDefId, Symbol, Option<String>)>,
                  call_kind: CallKind| {
                     if entry_points_info.len() > 1 {
                         entry_points_info.sort_by_key(|(.., fn_name, trait_name)| {
                             (
-                                trait_name
-                                    .map(|trait_name| trait_name.to_ident_string())
-                                    .unwrap_or_default(),
+                                trait_name.clone().unwrap_or_default(),
                                 fn_name.to_ident_string(),
                             )
                         });
@@ -273,7 +271,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
                 if let Some((callee_def_id, call_kind)) = entry_point_info {
                     let fn_name = tcx.item_name(callee_def_id.to_def_id());
                     let trait_name = utils::assoc_item_parent_trait(callee_def_id.to_def_id(), tcx)
-                        .map(|trait_def_id| tcx.item_name(trait_def_id));
+                        .map(|trait_def_id| tcx.def_path_str(trait_def_id));
                     let info = (local_def_id, callee_def_id, fn_name, trait_name);
                     match call_kind {
                         CallKind::Dispatchable => dispatchable_entry_points.push(info),

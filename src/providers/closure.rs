@@ -1,4 +1,4 @@
-//! Common utilities and helpers for analyzing an annotating closures.
+//! Common utilities and helpers for analyzing and annotating closures.
 
 use rustc_hash::FxHashSet;
 use rustc_hir::def_id::DefId;

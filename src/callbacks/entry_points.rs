@@ -550,8 +550,10 @@ fn dispatchable_ids(
 
 /// Finds definitions of a pallet's public associated functions.
 ///
-/// **NOTE:** This currently only returns public associated functions of
-/// inherent and local trait implementations of the `Pallet<T>` struct.
+/// **NOTE:** This currently only returns:
+/// - public associated functions of inherent implementations
+/// - associated functions of implementations of local public traits
+/// - associated functions of implementations of traits from `pallet-*` dependencies
 fn pallet_pub_assoc_fn_ids(
     pallet_struct_def_id: LocalDefId,
     tcx: TyCtxt<'_>,
@@ -602,11 +604,16 @@ fn pallet_pub_assoc_fn_ids(
         .all_local_trait_impls(())
         .into_iter()
         .filter(|(trait_def_id, _)| {
-            trait_def_id
+            let is_pub_local_trait = trait_def_id
                 .as_local()
                 .is_some_and(|trait_def_id| !is_test_only(trait_def_id))
                 && tcx.visibility(*trait_def_id).is_public()
-                && is_visible_from_crate_root(**trait_def_id, tcx)
+                && is_visible_from_crate_root(**trait_def_id, tcx);
+            let is_pallet_dep = || {
+                let crate_name = tcx.crate_name(trait_def_id.krate);
+                crate_name.as_str().starts_with("pallet_") && !trait_def_id.is_local()
+            };
+            is_pub_local_trait || is_pallet_dep()
         })
         .flat_map(|(_, trait_impls)| {
             trait_impls.iter().filter(|impl_def_id| {
@@ -614,7 +621,7 @@ fn pallet_pub_assoc_fn_ids(
                 let is_pallet_struct_impl = impl_ty
                     .ty_adt_def()
                     .is_some_and(|adt_def| adt_def.did() == pallet_struct_def_id.to_def_id());
-                is_pallet_struct_impl
+                is_pallet_struct_impl && !is_test_only(**impl_def_id)
             })
         });
     let pallet_local_trait_assoc_fns = pallet_local_trait_impls.flat_map(|impl_def_id| {
@@ -1594,7 +1601,12 @@ fn process_used_items(
                         def_path,
                         match item_alias {
                             Some(name) => format!(" as {name}"),
-                            None => String::new(),
+                            None =>
+                                if item_kind == DefKind::Trait {
+                                    String::from(" as _")
+                                } else {
+                                    String::new()
+                                },
                         }
                     ));
                 } else {
