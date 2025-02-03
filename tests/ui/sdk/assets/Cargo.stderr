@@ -1,0 +1,12 @@
+warning: possible attempt to add with overflow
+  --> src/impl_fungibles.rs:255:3
+   |
+LL |         Self::calc_metadata_deposit(&name, &symbol)
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: related location
+  --> src/functions.rs:1019:21
+   |
+LL |             .saturating_mul(((name.len() + symbol.len()) as u32).into())
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+

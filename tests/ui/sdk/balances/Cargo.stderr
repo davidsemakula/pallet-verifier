@@ -1,0 +1,62 @@
+warning: possible attempt to add with overflow
+  --> src/impl_currency.rs:947:3
+   |
+LL | /         Self::locks(who)
+LL | |             .into_iter()
+LL | |             .filter(|l| l.id == id)
+LL | |             .fold(Zero::zero(), |acc, l| acc + l.amount)
+   | |________________________________________________________^
+   |
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/filter.rs:157:9
+   |
+LL |         self.iter.fold(init, filter_fold(self.predicate, fold))
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2640:21
+   |
+LL |             accum = f(accum, x);
+   |                     ^^^^^^^^^^^
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/filter.rs:41:44
+   |
+LL |     move |acc, item| if predicate(&item) { fold(acc, item) } else { acc }
+   |                                            ^^^^^^^^^^^^^^^
+note: related location
+  --> src/impl_currency.rs:950:33
+   |
+LL |             .fold(Zero::zero(), |acc, l| acc + l.amount)
+   |                                          ^^^^^^^^^^^^^^
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:110:1
+   |
+LL | add_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this warning originates in the macro `add_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: possible attempt to subtract with overflow
+  --> src/impl_currency.rs:865:6
+   |
+LL |                     reserves[index].amount -= actual;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:833:1
+   |
+LL | sub_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this warning originates in the macro `sub_assign_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: possible attempt to subtract with overflow
+  --> src/impl_currency.rs:867:9
+   |
+LL |                     Ok(value - actual)
+   |                        ^^^^^^^^^^^^^^
+   |
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:219:1
+   |
+LL | sub_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this warning originates in the macro `sub_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+

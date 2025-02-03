@@ -8,6 +8,7 @@ use rustc_ast::BindingAnnotation;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{
     def::{DefKind, Res},
+    definitions::{DefPathData, DisambiguatedDefPathData},
     intravisit::Visitor as _,
     HirId, PatKind,
 };
@@ -18,13 +19,14 @@ use rustc_middle::{
     },
     query,
     ty::{
-        AssocItemContainer, AssocKind, GenericArg, GenericParamDefKind, ImplSubject, Ty, TyCtxt,
-        TyKind, Visibility,
+        AssocItem, AssocItemContainer, AssocKind, GenericArg, GenericParamDefKind, ImplSubject, Ty,
+        TyCtxt, TyKind, Visibility,
     },
 };
 use rustc_span::{
     def_id::{DefId, DefPathHash, LocalDefId, LocalModDefId, CRATE_DEF_ID},
     source_map::SourceMap,
+    symbol::Ident,
     BytePos, Pos, Span, Symbol,
 };
 
@@ -554,6 +556,7 @@ fn dispatchable_ids(
 /// - public associated functions of inherent implementations
 /// - associated functions of implementations of local public traits
 /// - associated functions of implementations of traits from `pallet-*` dependencies
+/// - associated functions of implementations of traits from `frame-support::traits::tokens`
 fn pallet_pub_assoc_fn_ids(
     pallet_struct_def_id: LocalDefId,
     tcx: TyCtxt<'_>,
@@ -600,6 +603,23 @@ fn pallet_pub_assoc_fn_ids(
     });
 
     // Collects assoc `fn`s for local trait `impl`s of `Pallet<T>` struct.
+    fn is_frame_support_tokens_trait(trait_def_id: DefId, tcx: TyCtxt) -> bool {
+        fn name_from_type_ns(def_path_data: &DisambiguatedDefPathData) -> Option<&str> {
+            match &def_path_data.data {
+                DefPathData::TypeNs(name) => Some(name.as_str()),
+                _ => None,
+            }
+        }
+        let crate_name = tcx.crate_name(trait_def_id.krate);
+        crate_name.as_str() == "frame_support"
+            && match tcx.def_path(trait_def_id).data.as_slice() {
+                [traits_mod, tokens_mod, ..] => {
+                    name_from_type_ns(traits_mod) == Some("traits")
+                        && name_from_type_ns(tokens_mod) == Some("tokens")
+                }
+                _ => false,
+            }
+    }
     let pallet_local_trait_impls = tcx
         .all_local_trait_impls(())
         .into_iter()
@@ -613,7 +633,9 @@ fn pallet_pub_assoc_fn_ids(
                 let crate_name = tcx.crate_name(trait_def_id.krate);
                 crate_name.as_str().starts_with("pallet_") && !trait_def_id.is_local()
             };
-            is_pub_local_trait || is_pallet_dep()
+            is_pub_local_trait
+                || is_pallet_dep()
+                || is_frame_support_tokens_trait(**trait_def_id, tcx)
         })
         .flat_map(|(_, trait_impls)| {
             trait_impls.iter().filter(|impl_def_id| {
@@ -696,16 +718,7 @@ impl<'tcx> Generics<'tcx> {
         tcx: TyCtxt,
         trait_generics: FxHashMap<DefId, (Vec<Ty<'tcx>>, FxHashMap<Symbol, Ty<'tcx>>)>,
     ) -> Self {
-        let config_super_traits = tcx
-            .explicit_predicates_of(config_trait_def_id)
-            .predicates
-            .iter()
-            .filter_map(|(clause, _)| {
-                clause
-                    .as_trait_clause()
-                    .map(|trait_clause| trait_clause.skip_binder().trait_ref.def_id)
-            })
-            .collect();
+        let config_super_traits = super_traits(config_trait_def_id.to_def_id(), tcx).collect();
         Self {
             config_trait_def_id,
             config_super_traits,
@@ -840,6 +853,18 @@ fn pallet_generics<'tcx>(
             trait_generics,
         )
     })
+}
+
+/// Returns the super traits of the given trait.
+fn super_traits(def_id: DefId, tcx: TyCtxt) -> impl Iterator<Item = DefId> + '_ {
+    tcx.explicit_predicates_of(def_id)
+        .predicates
+        .iter()
+        .filter_map(|(clause, _)| {
+            clause
+                .as_trait_clause()
+                .map(|trait_clause| trait_clause.skip_binder().trait_ref.def_id)
+        })
 }
 
 /// Composes an entry point (returns a `name`, `content` and "used item" `DefId`s).
@@ -977,7 +1002,7 @@ fn compose_entry_point<'tcx>(
         let param_pat = source_map
             .span_to_snippet(pat.span)
             .expect("Expected snippet for span");
-        let unique_pat = format!("{param_pat}__{fn_name}");
+        let unique_pat = format!("{param_pat}__{idx}__{fn_name}");
         let unique_param_name = || {
             let mut param_name_only = None;
             if let PatKind::Binding(annotation, _, ident, _) = fn_param.pat.kind {
@@ -986,7 +1011,7 @@ fn compose_entry_point<'tcx>(
                 }
             }
             format!(
-                "{}__{fn_name}",
+                "{}__{idx}__{fn_name}",
                 param_name_only
                     .as_ref()
                     .map(|ident| ident.as_str())
@@ -1324,6 +1349,7 @@ fn tractable_param_hir_type<'tcx>(
     let mut int_const_generic_params = Vec::new();
     let mut fq_item_paths = Vec::new();
     let mut config_related_types = FxHashMap::default();
+    let mut replaced_ty_relative_spans: FxHashSet<Span> = FxHashSet::default();
 
     for gen_ty in visitor.types {
         let has_raw_indirection_dynamic_or_opaque_types = matches!(
@@ -1383,11 +1409,29 @@ fn tractable_param_hir_type<'tcx>(
                             used_items.insert(def_id);
                         }
                     }
-                    Res::SelfTyParam { trait_: def_id }
-                    | Res::SelfTyAlias {
+                    Res::SelfTyAlias {
                         alias_to: def_id, ..
+                    } => {
+                        let is_replaced_ty_relative_parent = replaced_ty_relative_spans
+                            .iter()
+                            .any(|span| span.contains(gen_ty.span));
+                        if !is_replaced_ty_relative_parent {
+                            let specialized_user_ty = def_id
+                                .as_local()
+                                .and_then(|local_def_id| tcx.hir_node_by_def_id(local_def_id).ty())
+                                .and_then(|self_ty| {
+                                    tractable_param_hir_type(self_ty, generics, used_items, tcx)
+                                });
+                            if let Some(specialized_user_ty) = specialized_user_ty {
+                                fq_item_paths.push((gen_ty.span, specialized_user_ty));
+                            } else {
+                                used_items.insert(def_id);
+                            }
+                        } else {
+                            used_items.insert(def_id);
+                        }
                     }
-                    | Res::SelfCtor(def_id) => {
+                    Res::SelfTyParam { trait_: def_id } | Res::SelfCtor(def_id) => {
                         used_items.insert(def_id);
                     }
                     _ => (),
@@ -1398,6 +1442,10 @@ fn tractable_param_hir_type<'tcx>(
                             .as_generic_param()
                             .is_some_and(|(_, generic_param_name)| {
                                 generic_param_name.name == config_param_name
+                                    || generic_param_name
+                                        .name
+                                        .as_str()
+                                        .starts_with(&format!("{}#", config_param_name))
                             });
                     if is_config_param {
                         config_related_types.insert(rel_ty.span, segment);
@@ -1410,22 +1458,19 @@ fn tractable_param_hir_type<'tcx>(
                             ..
                         } = path.res
                         {
-                            let specialized_user_ty = tcx
-                                .associated_items(impl_def_id)
-                                .find_by_name_and_kind(
-                                    tcx,
-                                    segment.ident,
-                                    rustc_middle::ty::AssocKind::Type,
-                                    impl_def_id,
-                                )
-                                .and_then(|assoc_item| assoc_item.def_id.as_local())
-                                .and_then(|assoc_ty_local_def_id| {
-                                    tcx.hir_node_by_def_id(assoc_ty_local_def_id).ty()
-                                })
-                                .and_then(|assoc_ty| {
-                                    tractable_param_hir_type(assoc_ty, generics, used_items, tcx)
-                                });
+                            let specialized_user_ty =
+                                find_assoc_item_by_name_and_kind(segment.ident, impl_def_id, tcx)
+                                    .and_then(|assoc_item| assoc_item.def_id.as_local())
+                                    .and_then(|assoc_ty_local_def_id| {
+                                        tcx.hir_node_by_def_id(assoc_ty_local_def_id).ty()
+                                    })
+                                    .and_then(|assoc_ty| {
+                                        tractable_param_hir_type(
+                                            assoc_ty, generics, used_items, tcx,
+                                        )
+                                    });
                             if let Some(specialized_user_ty) = specialized_user_ty {
+                                replaced_ty_relative_spans.insert(gen_ty.span);
                                 fq_item_paths.push((gen_ty.span, specialized_user_ty));
                             }
                         }
@@ -1530,6 +1575,43 @@ fn tractable_param_hir_type<'tcx>(
         }
     }
     Some(user_ty)
+}
+
+/// Finds an assoc item of given `impl`, or an `impl` of a super trait of the given `impl` by name.
+fn find_assoc_item_by_name_and_kind(
+    name: Ident,
+    impl_def_id: DefId,
+    tcx: TyCtxt<'_>,
+) -> Option<&AssocItem> {
+    tcx.associated_items(impl_def_id)
+        .find_by_name_and_kind(tcx, name, rustc_middle::ty::AssocKind::Type, impl_def_id)
+        .or_else(|| {
+            // Finds trait and Self ty of impl.
+            let trait_ref = tcx.impl_trait_ref(impl_def_id)?.skip_binder();
+            let trait_def_id = trait_ref.def_id;
+            let self_ty = trait_ref.self_ty();
+            let self_ty_def_id = self_ty.ty_adt_def()?.did();
+
+            // Find assoc item by name for a super trait impl.
+            super_traits(trait_def_id, tcx)
+                .filter(|trait_def_id| !tcx.trait_is_auto(*trait_def_id))
+                .find_map(|super_trait_def_id| {
+                    tcx.trait_impls_of(super_trait_def_id)
+                        .non_blanket_impls()
+                        .iter()
+                        .find_map(|(super_self_ty, super_impls_)| {
+                            let super_self_ty_def_id = super_self_ty.def()?;
+                            if super_self_ty_def_id == self_ty_def_id {
+                                super_impls_.iter().find_map(|super_impl_def_id| {
+                                    // Recurse.
+                                    find_assoc_item_by_name_and_kind(name, *super_impl_def_id, tcx)
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                })
+        })
 }
 
 /// Collects use declarations or copies/re-defines used items depending on item kind, source,
