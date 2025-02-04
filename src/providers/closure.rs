@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Env var for tracking propagated invariant environment for closure.
-pub const ENV_CLOSURE_INVARIANTS: &str = "PALLET_VERIFIER_CLOSURE_INVARIANTS";
+pub const ENV_CLOSURE_INVARIANT_PREFIX: &str = "PALLET_VERIFIER_CLOSURE_INVARIANT";
 
 /// Info needed to apply propagated invariants to a closure's MIR.
 #[derive(Debug, Serialize, Deserialize)]
@@ -246,31 +246,28 @@ pub fn propagate_opt_result_idx_invariant<'tcx>(
     let _ = tcx.optimized_mir(closure_def_id);
 }
 
+/// Returns a env key for the given def hash.
+fn closure_invariant_env_key(def_hash: &str) -> String {
+    format!("{ENV_CLOSURE_INVARIANT_PREFIX}_{def_hash}")
+}
+
 // Sets propagated invariant environment for closure.
 pub fn set_invariant_env(invariant_env: &ClosureInvariantEnv) {
     let invariant_env_json =
         serde_json::to_string(invariant_env).expect("Expected serialized `ClosureInvariantEnv`");
     // SAFETY: `pallet-verifier` is single-threaded.
-    std::env::set_var(ENV_CLOSURE_INVARIANTS, invariant_env_json);
+    let env_key = closure_invariant_env_key(&invariant_env.def_hash);
+    std::env::set_var(env_key, invariant_env_json);
 }
 
 /// Retrieves the propagated invariant environment for closure (if any).
-///
-/// **NOTE**: This function clears the environment after it successfully retrieves it,
-/// so it should only be called once (if it succeeds i.e. return `Some`).
 pub fn find_invariant_env(def_id: DefId, tcx: TyCtxt) -> Option<ClosureInvariantEnv> {
     // SAFETY: `pallet-verifier` is single-threaded.
-    let closure_invariant_env_json = std::env::var(ENV_CLOSURE_INVARIANTS).ok()?;
-    let closure_invariant_env: ClosureInvariantEnv =
-        serde_json::from_str(&closure_invariant_env_json).ok()?;
     let hash = utils::def_hash_str(def_id, tcx);
-    if closure_invariant_env.def_hash == hash {
-        // Clears the environment.
-        std::env::remove_var(ENV_CLOSURE_INVARIANTS);
-        Some(closure_invariant_env)
-    } else {
-        None
-    }
+    let env_key = closure_invariant_env_key(&hash);
+    let invariant_env_json = std::env::var(env_key).ok()?;
+    let invariant_env: ClosureInvariantEnv = serde_json::from_str(&invariant_env_json).ok()?;
+    (invariant_env.def_hash == hash).then_some(invariant_env)
 }
 
 /// Applies propagated invariants for closure.

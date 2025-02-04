@@ -674,11 +674,7 @@ pub fn find_invariant_env(def_id: DefId, tcx: TyCtxt) -> Option<StorageInvariant
     let env_key = call_propagation_env_key(&hash);
     let invariant_env_json = std::env::var(env_key).ok()?;
     let invariant_env: StorageInvariantEnv = serde_json::from_str(&invariant_env_json).ok()?;
-    if invariant_env.call_def_hash == hash {
-        Some(invariant_env)
-    } else {
-        None
-    }
+    (invariant_env.call_def_hash == hash).then_some(invariant_env)
 }
 
 /// Returns a env key for the given def hash.
