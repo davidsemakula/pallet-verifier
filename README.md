@@ -68,9 +68,11 @@ A tool for detecting common security vulnerabilities and insecure patterns in FR
 Usage: cargo verify-pallet
 
 Options:
-    -h, --help               Print help
-    -V, --version            Print version
-    --pointer-width <32|64>  The pointer width for the target execution environment
+    -h, --help                   Print help
+    -V, --version                Print version
+    --pointer-width <32|64>      The pointer width for the target execution environment
+    --allow-hook-panics <list>   The hooks in which no warnings should be reported for local panics.
+                                     Accepts a comma separated list from: `on_initialize`,`on_finalize`,`on_idle`,`on_poll`,`on_runtime_upgrade`,`offchain_worker`,`integrity_test`
 ```
 
 ### Library Documentation
