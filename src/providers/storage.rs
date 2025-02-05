@@ -217,7 +217,7 @@ pub fn propagate_invariants<'tcx>(
     let basic_blocks = &body.basic_blocks;
     let dominators = basic_blocks.dominators();
     for (storage_id, use_location, invariants) in storage_invariants {
-        // Retreives calls for storage type.
+        // Retrieves calls for storage type.
         let Some((storage_item, storage_calls)) =
             storage_visitor.calls.get(&storage_id.as_hash(tcx))
         else {
@@ -238,8 +238,8 @@ pub fn propagate_invariants<'tcx>(
             FxHashMap::default();
 
         for (terminator, block) in dominated_storage_calls {
-            // Don't propagate invariant if the current call is downstream from a
-            // intermediate storage call than can (possibly) mutate the storage value.
+            // Don't propagate invariant if the current call is downstream from an
+            // intermediate storage call that can (possibly) mutate the storage value.
             let is_possibly_mutated_by_predecessor = mutable_call_locations
                 .iter()
                 .any(|(_, successors)| successors.contains(block));
@@ -261,7 +261,7 @@ pub fn propagate_invariants<'tcx>(
             let live_domain = live_locals.get();
             let borrowed_domain = borrowed_locals.get();
 
-            // Progagates each storage invariant if the target invariant place
+            // Propagates each storage invariant if the target invariant place
             // is either live or borrowed and the target call uses the storage value type.
             for (annotation_location, cond_op, invariant_place) in &invariants {
                 // Finds the live or borrowed invariant propagation place.
