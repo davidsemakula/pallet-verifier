@@ -642,11 +642,31 @@ fn emit_diagnostics(
             })
         })
     };
+    // Returns the crate name for the given span.
+    let span_crate_name = |mspan: &MultiSpan| {
+        mspan.primary_span().and_then(|span| {
+            source_map
+                .span_to_location_info(span)
+                .0
+                .map(|source_file| tcx.crate_name(source_file.cnum))
+        })
+    };
+    // Checks if span points to the (slice) `iterator!` macro from the std/core crate.
+    let is_span_from_std_iterator_macro = |mspan: &MultiSpan| {
+        span_crate_name(mspan).is_some_and(|name| matches!(name.as_str(), "std" | "core"))
+            && mspan.primary_span().is_some_and(|span| {
+                span.macro_backtrace()
+                    .any(|expn_data| match expn_data.kind {
+                        ExpnKind::Macro(MacroKind::Bang, symbol) => symbol.as_str() == "iterator",
+                        _ => false,
+                    })
+            })
+    };
 
     for mut diagnostic in diagnostics {
-        // Ignores direct calls panicking macros  (i.e. `panic!`, `assert!`, `unreachable!` e.t.c)
-        // and `Option/Result::expect` calls either `integrity_test` hook (default) or
-        // any hooks specified by the `allow_hook_panics` arg.
+        // Ignores direct calls to panicking macros (i.e. `panic!`, `assert!`, `unreachable!` e.t.c
+        // - except `unimplemented!`) and `Option/Result::expect` calls for either the
+        // `integrity_test` hook (default) or any hooks specified by the `allow_hook_panics` arg.
         let last_mspan = diagnostic
             .children
             .last()
@@ -796,6 +816,27 @@ fn emit_diagnostics(
                         || is_span_from_pallet_struct(mspan)
                 })
         {
+            diagnostic.cancel();
+            continue;
+        }
+
+        // Ignores warnings about overflows rooted in the (slice) `iterator!` macro from std/core crate.
+        let is_overflow_msg = diagnostic
+            .messages
+            .first()
+            .and_then(|(msg, _)| msg.as_str())
+            .is_some_and(|msg| msg.contains("overflow"));
+        let is_rooted_in_iterator_macro = || {
+            relevant_spans
+                .iter()
+                .rev()
+                .take_while(|mspan| {
+                    span_crate_name(mspan)
+                        .is_some_and(|name| matches!(name.as_str(), "std" | "core" | "alloc"))
+                })
+                .any(is_span_from_std_iterator_macro)
+        };
+        if is_overflow_msg && is_rooted_in_iterator_macro() {
             diagnostic.cancel();
             continue;
         }
