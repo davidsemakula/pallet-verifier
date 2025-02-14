@@ -7,19 +7,15 @@ mod passes;
 mod storage;
 
 use rustc_hir::def::DefKind;
-use rustc_middle::{
-    mir::{Body, MirPass},
-    query,
-    ty::TyCtxt,
-};
+use rustc_middle::{mir::Body, ty::TyCtxt, util::Providers};
 use rustc_span::def_id::LocalDefId;
 
-use passes::{IntCastOverflowChecks, IteratorInvariants, SliceInvariants};
+use passes::{IntCastOverflowChecks, IteratorInvariants, MirPass, SliceInvariants};
 
 /// Overrides the `optimized_mir` query.
 pub fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
     // Runs default optimized MIR query.
-    let mut providers = query::Providers::default();
+    let mut providers = Providers::default();
     rustc_mir_transform::provide(&mut providers);
     let mut body = (providers.optimized_mir)(tcx, did).clone();
 

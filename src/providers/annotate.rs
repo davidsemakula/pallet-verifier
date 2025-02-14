@@ -12,7 +12,7 @@ use rustc_middle::{
         HasLocalDecls, LocalDecl, LocalDecls, Location, Operand, Place, Rvalue, Statement,
         StatementKind, Terminator, TerminatorKind, UnwindAction,
     },
-    ty::{GenericArg, List, Region, ScalarInt, Ty, TyCtxt, TyKind, TypeAndMut},
+    ty::{GenericArg, List, Region, ScalarInt, Ty, TyCtxt, TyKind},
 };
 use rustc_span::{def_id::DefId, source_map::dummy_spanned, Span};
 
@@ -73,7 +73,7 @@ impl<'tcx> Annotation<'tcx> {
         let terminator = basic_block.terminator.clone();
 
         // Adds successor block.
-        let mut successor_block_data = BasicBlockData::new(terminator);
+        let mut successor_block_data = BasicBlockData::new(terminator, false);
         successor_block_data.statements = successors;
         let successor_block = body.basic_blocks_mut().push(successor_block_data);
 
@@ -149,10 +149,8 @@ impl<'tcx> Annotation<'tcx> {
                         let current_arg_ref_ty = Ty::new_ref(
                             tcx,
                             collection_region,
-                            TypeAndMut {
-                                ty: current_arg_ty,
-                                mutbl: rustc_ast::Mutability::Not,
-                            },
+                            current_arg_ty,
+                            rustc_ast::Mutability::Not,
                         );
                         let current_arg_ref_local_decl =
                             LocalDecl::with_source_info(current_arg_ref_ty, source_info);
@@ -173,7 +171,7 @@ impl<'tcx> Annotation<'tcx> {
                     };
 
                     // Creates an empty next block.
-                    let next_block_data = BasicBlockData::new(None);
+                    let next_block_data = BasicBlockData::new(None, false);
                     let next_block = body.basic_blocks_mut().push(next_block_data);
 
                     // Creates collection length/size "builder" call.
@@ -191,7 +189,7 @@ impl<'tcx> Annotation<'tcx> {
                         source_info,
                         kind: TerminatorKind::Call {
                             func: len_builder_handle,
-                            args: vec![dummy_spanned(Operand::Move(current_arg_ref_place))],
+                            args: Box::new([dummy_spanned(Operand::Move(current_arg_ref_place))]),
                             destination: len_builder_destination_place,
                             target: Some(next_block),
                             unwind: UnwindAction::Unreachable,
@@ -252,7 +250,7 @@ impl<'tcx> Annotation<'tcx> {
             source_info,
             kind: TerminatorKind::Call {
                 func: annotation_handle,
-                args: annotation_args,
+                args: annotation_args.into(),
                 destination: annotation_place,
                 target: Some(successor_block),
                 unwind: UnwindAction::Unreachable,
@@ -316,20 +314,11 @@ pub fn compose_slice_len_annotation<'tcx>(
         .lang_items()
         .get(LangItem::SliceLen)
         .expect("Expected `[T]::len` lang item");
-    let slice_len_generics = tcx.generics_of(slice_len_def_id);
-    let slice_len_host_param_def = slice_len_generics
-        .params
-        .first()
-        .expect("Expected `host` generic param");
-    let slice_len_host_param_value = slice_len_host_param_def
-        .default_value(tcx)
-        .expect("Expected `host` generic param default value")
-        .skip_binder();
     let gen_ty = slice_ty
         .walk()
         .nth(1)
         .expect("Expected a generic arg for `[T]`");
-    let gen_args = tcx.mk_args(&[gen_ty, slice_len_host_param_value]);
+    let gen_args = tcx.mk_args(&[gen_ty]);
     Some(Annotation::Len(
         annotation_location,
         cond_op,

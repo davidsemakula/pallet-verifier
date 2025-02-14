@@ -1,13 +1,13 @@
-//! `rustc` `MirPass` for adding annotations for `Iterator` invariants.
+//! `rustc` [`MirPass`] for adding annotations for `Iterator` invariants.
 
 use rustc_const_eval::interpret::Scalar;
-use rustc_data_structures::graph::{dominators::Dominators, WithSuccessors};
+use rustc_data_structures::graph::{dominators::Dominators, Successors};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
         visit::Visitor, BasicBlock, BasicBlocks, BinOp, Body, Const, ConstValue, HasLocalDecls,
-        LocalDecls, Location, MirPass, Operand, Place, PlaceElem, Rvalue, Statement, StatementKind,
+        LocalDecls, Location, Operand, Place, PlaceElem, Rvalue, Statement, StatementKind,
         Terminator, TerminatorKind, RETURN_PLACE,
     },
     ty::{Ty, TyCtxt, TyKind},
@@ -21,6 +21,7 @@ use crate::providers::{
     analyze::{self, SwitchVariant},
     annotate::{self, Annotation, CondOp},
     closure,
+    passes::MirPass,
     storage::{
         self, InvariantSource, PropagatedVariant, StorageId, StorageInvariant, StorageInvariantEnv,
     },
@@ -762,7 +763,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
     }
 }
 
-impl<'tcx, 'pass> Visitor<'tcx> for IteratorVisitor<'tcx, 'pass> {
+impl<'tcx> Visitor<'tcx> for IteratorVisitor<'tcx, '_> {
     fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
         self.process_terminator(terminator, location);
         self.super_terminator(terminator, location);
@@ -1068,7 +1069,8 @@ fn unit_incr_assign_places<'tcx>(stmt: &Statement<'tcx>) -> Option<(Place<'tcx>,
     let StatementKind::Assign(assign) = &stmt.kind else {
         return None;
     };
-    let Rvalue::CheckedBinaryOp(BinOp::Add, operands) = &assign.1 else {
+    // TODO: is `BinOp::Add` necessary?.
+    let Rvalue::BinaryOp(BinOp::Add | BinOp::AddWithOverflow, operands) = &assign.1 else {
         return None;
     };
     let (const_operand, op_place) = match (&operands.0, &operands.1) {
@@ -1083,7 +1085,7 @@ fn unit_incr_assign_places<'tcx>(stmt: &Statement<'tcx>) -> Option<(Place<'tcx>,
     let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_operand.const_ else {
         return None;
     };
-    let is_scalar_one = scalar.to_bits(scalar.size()).is_ok_and(|val| val == 1);
+    let is_scalar_one = scalar.try_to_bits(scalar.size()).is_ok_and(|val| val == 1);
     is_scalar_one.then_some((assign.0, *op_place))
 }
 
@@ -1123,7 +1125,7 @@ fn is_zero_initialized_before_anchor<'tcx>(
         let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_operand.const_ else {
             return Some(false);
         };
-        let is_scalar_zero = scalar.to_bits(scalar.size()).is_ok_and(|val| val == 0);
+        let is_scalar_zero = scalar.try_to_bits(scalar.size()).is_ok_and(|val| val == 0);
         Some(is_scalar_zero)
     }
 

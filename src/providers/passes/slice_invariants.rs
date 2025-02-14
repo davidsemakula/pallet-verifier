@@ -1,11 +1,11 @@
-//! `rustc` `MirPass` for adding annotations for slice (i.e. `[T]`) invariants.
+//! `rustc` [`MirPass`] for adding annotations for slice (i.e. `[T]`) invariants.
 
 use rustc_hash::FxHashSet;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{
         visit::Visitor, BasicBlock, BasicBlocks, Body, HasLocalDecls, LocalDecls, Location,
-        MirPass, Operand, Place, Terminator, TerminatorKind, RETURN_PLACE,
+        Operand, Place, Terminator, TerminatorKind, RETURN_PLACE,
     },
     ty::TyCtxt,
 };
@@ -16,6 +16,7 @@ use crate::providers::{
     analyze::{self, SwitchVariant},
     annotate::{self, Annotation, CondOp},
     closure,
+    passes::MirPass,
     storage::{
         self, InvariantSource, PropagatedVariant, StorageId, StorageInvariant, StorageInvariantEnv,
     },
@@ -529,7 +530,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
     }
 }
 
-impl<'tcx, 'pass> Visitor<'tcx> for SliceVisitor<'tcx, 'pass> {
+impl<'tcx> Visitor<'tcx> for SliceVisitor<'tcx, '_> {
     fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
         self.process_terminator(terminator, location);
         self.super_terminator(terminator, location);

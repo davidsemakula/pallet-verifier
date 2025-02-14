@@ -81,7 +81,7 @@ impl ClosurePlaceIdx {
                 let TyKind::Closure(_, closure_args) = closure_ty.kind() else {
                     panic!("Expected a closure, found {:?}", def_id);
                 };
-                let closure_args = ClosureArgs { args: closure_args };
+                let closure_args = ClosureArgs::<TyCtxt> { args: closure_args };
                 let captured_locals_ty = closure_args.upvar_tys()[idx as usize];
 
                 // Finds the captured place.
@@ -104,7 +104,7 @@ pub fn capturing_closure_info<'tcx, 'analysis>(
 ) -> Option<(
     DefId,
     &'analysis IndexVec<FieldIdx, Operand<'tcx>>,
-    ClosureArgs<'tcx>,
+    ClosureArgs<TyCtxt<'tcx>>,
 )> {
     // A direct const operand indicates a non-capturing closure which requires no annotation.
     let arg_place = arg.place()?;

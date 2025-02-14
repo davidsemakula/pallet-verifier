@@ -17,6 +17,7 @@ use cli_utils::{
 };
 
 const COMMAND: &str = "cargo verify-pallet";
+const WASM32_TARGET: &str = "wasm32-wasip1";
 
 /// Env var set to the name of the top-level package being analyzed
 /// (i.e. the package name in the `Cargo.toml` in the directory where `cargo verify-pallet`) is invoked.
@@ -139,7 +140,8 @@ fn call_cargo() {
     // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
     // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#debug-assertions>
     // Ref: <https://doc.rust-lang.org/rustc/codegen-options/index.html#overflow-checks>
-    let flags = "-Zalways-encode-mir=yes -Cdebug-assertions=no -Coverflow-checks=yes -Zdeduplicate-diagnostics=no";
+    let flags = "-Zalways-encode-mir=yes -Cdebug-assertions=no -Coverflow-checks=yes \
+                    -Zdeduplicate-diagnostics=no -Aunexpected-cfgs";
     cmd.env(
         "RUSTFLAGS",
         env::var("RUSTFLAGS")
@@ -165,9 +167,10 @@ fn call_cargo() {
     };
     let mut target_platform = None;
     if pointer_width == 32 && cfg!(not(target_pointer_width = "32")) {
-        cmd.arg("--target=wasm32-wasi");
-        cmd.env(ENV_TARGET, "wasm32-wasi");
-        target_platform = Some("wasm32-wasi");
+        cmd.arg("--target");
+        cmd.arg(WASM32_TARGET);
+        cmd.env(ENV_TARGET, WASM32_TARGET);
+        target_platform = Some(WASM32_TARGET);
     } else if pointer_width == 64 && cfg!(not(target_pointer_width = "64")) {
         eprintln!("Unsupported host for 64-bit analysis");
         exit(1);

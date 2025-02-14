@@ -1,11 +1,11 @@
-//! `rustc` `MirPass` for adding integer cast overflow checks.
+//! `rustc` [`MirPass`] for adding integer cast overflow checks.
 
 use rustc_abi::Size;
 use rustc_const_eval::interpret::Scalar;
 use rustc_middle::{
     mir::{
         visit::Visitor, Body, CastKind, Const, ConstValue, HasLocalDecls, LocalDecls, Location,
-        MirPass, Operand, Rvalue,
+        Operand, Rvalue,
     },
     ty::{ScalarInt, TyCtxt, TyKind},
 };
@@ -13,7 +13,10 @@ use rustc_span::Span;
 use rustc_type_ir::{IntTy, UintTy};
 
 use crate::{
-    providers::annotate::{self, Annotation, CondOp},
+    providers::{
+        annotate::{self, Annotation, CondOp},
+        passes::MirPass,
+    },
     utils,
 };
 
@@ -217,13 +220,15 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
             };
 
             // Declares cast overflow checks (if necessary).
-            let mut add_check = |assert_cond, bound_scalar| {
+            let mut add_check = |assert_cond: CondOp, bound_scalar: ScalarInt| {
                 let mut requires_check = true;
                 if let Operand::Constant(const_op) = operand {
                     if let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_op.const_
                     {
-                        if (assert_cond == CondOp::Le && scalar <= bound_scalar)
-                            || (assert_cond == CondOp::Gt && scalar >= bound_scalar)
+                        let scalar_u128 = scalar.to_bits(scalar.size());
+                        let bound_u128 = bound_scalar.to_bits(bound_scalar.size());
+                        if (assert_cond == CondOp::Le && scalar_u128 <= bound_u128)
+                            || (assert_cond == CondOp::Gt && scalar_u128 >= bound_u128)
                         {
                             requires_check = false;
                         }
@@ -255,7 +260,7 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
     }
 }
 
-impl<'tcx, 'pass> Visitor<'tcx> for LossyIntCastVisitor<'tcx, 'pass> {
+impl<'tcx> Visitor<'tcx> for LossyIntCastVisitor<'tcx, '_> {
     fn visit_rvalue(&mut self, rvalue: &Rvalue<'tcx>, location: Location) {
         self.process_rvalue(rvalue, location);
         self.super_rvalue(rvalue, location);

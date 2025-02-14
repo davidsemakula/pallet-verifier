@@ -15,7 +15,6 @@
 //! [symbex]: https://en.wikipedia.org/wiki/Symbolic_execution
 
 #![feature(rustc_private)]
-#![feature(new_uninit)]
 
 extern crate rustc_abi;
 extern crate rustc_ast;

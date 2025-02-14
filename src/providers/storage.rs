@@ -36,6 +36,7 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 pub struct StorageItem<'tcx> {
     /// Storage item type (i.e. the `#[pallet::storage]` annotated type alias).
+    #[allow(dead_code)]
     pub ty: Ty<'tcx>,
     /// `DefId` of storage prefix
     /// (i.e. the generated `_GeneratedPrefixForStorage<Name>` named struct,
@@ -44,6 +45,7 @@ pub struct StorageItem<'tcx> {
     /// Underlying storage value type (e.g. `Vec<u8>` in `StorageValue<_, Vec<u8>, ValueQuery>`).
     pub value_ty: Ty<'tcx>,
     /// Generic args of the storage item type.
+    #[allow(dead_code)]
     pub args: &'tcx List<GenericArg<'tcx>>,
 }
 
@@ -133,7 +135,7 @@ fn storage_item<'tcx>(
 
     let assoc_item = tcx.opt_associated_item(fn_def_id)?;
     let (call_gen_args, self_ty) = match assoc_item.container {
-        AssocItemContainer::ImplContainer => {
+        AssocItemContainer::Impl => {
             let impl_def_id = tcx.impl_of_method(fn_def_id)?;
             let impl_subject = tcx.impl_subject(impl_def_id).instantiate(tcx, fn_gen_args);
             let ImplSubject::Inherent(self_ty) = impl_subject else {
@@ -141,7 +143,7 @@ fn storage_item<'tcx>(
             };
             (fn_gen_args, self_ty)
         }
-        AssocItemContainer::TraitContainer => {
+        AssocItemContainer::Trait => {
             let trait_def_id = assoc_item.container_id(tcx);
             let is_frame_storage_trait = tcx.crate_name(trait_def_id.krate).as_str()
                 == "frame_support"
@@ -171,7 +173,7 @@ fn storage_item<'tcx>(
     }
     let self_ty_generics = tcx.generics_of(self_def_id);
     let value_param_def = self_ty_generics
-        .params
+        .own_params
         .iter()
         .find(|param| param.name.as_str() == "Value")?;
     let value_ty = call_gen_args
@@ -205,12 +207,10 @@ pub fn propagate_invariants<'tcx>(
     // Ref: <https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_dataflow/impls/struct.MaybeLiveLocals.html>
     // Ref: <https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_dataflow/impls/struct.MaybeBorrowedLocals.html>
     let mut live_locals = MaybeLiveLocals
-        .into_engine(tcx, body)
-        .iterate_to_fixpoint()
+        .iterate_to_fixpoint(tcx, body, None)
         .into_results_cursor(body);
     let mut borrowed_locals = MaybeBorrowedLocals
-        .into_engine(tcx, body)
-        .iterate_to_fixpoint()
+        .iterate_to_fixpoint(tcx, body, None)
         .into_results_cursor(body);
 
     // Propagates storage invariants (if necessary).

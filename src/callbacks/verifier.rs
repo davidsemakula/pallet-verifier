@@ -1,7 +1,7 @@
 //! `rustc` callbacks and utilities for analyzing FRAME pallet with MIRAI.
 
 use rustc_driver::Compilation;
-use rustc_errors::{DiagnosticBuilder, Level, MultiSpan, Style, SubDiagnostic};
+use rustc_errors::{Diag, DiagMessage, Level, MultiSpan, Style, Subdiag};
 use rustc_hash::FxHashSet;
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_interface::interface::Compiler;
@@ -19,7 +19,7 @@ use std::{cell::RefCell, collections::HashMap, process, rc::Rc};
 use itertools::Itertools;
 use mirai::{
     body_visitor::BodyVisitor, call_graph::CallGraph, constant_domain::ConstantValueCache,
-    crate_visitor::CrateVisitor, known_names::KnownNamesCache, summaries::PersistentSummaryCache,
+    crate_visitor::CrateVisitor, known_names::KnownNamesCache, summaries::SummaryCache,
     type_visitor::TypeCache,
 };
 use owo_colors::OwoColorize;
@@ -49,7 +49,7 @@ impl<'compilation> VerifierCallbacks<'compilation> {
     }
 }
 
-impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
+impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
         // Overrides `optimized_mir` query.
         config.override_queries = Some(|_, providers| {
@@ -94,11 +94,7 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
         });
     }
 
-    fn after_analysis<'tcx>(
-        &mut self,
-        compiler: &Compiler,
-        queries: &'tcx rustc_interface::Queries<'tcx>,
-    ) -> Compilation {
+    fn after_analysis(&mut self, compiler: &Compiler, tcx: TyCtxt) -> Compilation {
         println!(
             "{} FRAME pallet with MIRAI ...",
             "Analyzing".style(utils::highlight_style())
@@ -115,199 +111,191 @@ impl<'compilation> rustc_driver::Callbacks for VerifierCallbacks<'compilation> {
             return Compilation::Stop;
         };
 
-        queries.global_ctxt().unwrap().enter(|tcx| {
-            // Creates MIRAI crate visitor.
-            // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L130-L174>
-            let call_graph_config = mirai_config.options.call_graph_config.to_owned();
-            let mut crate_visitor = CrateVisitor {
-                buffered_diagnostics: Vec::new(),
-                constant_time_tag_cache: None,
-                constant_time_tag_not_found: false,
-                constant_value_cache: ConstantValueCache::default(),
-                diagnostics_for: HashMap::new(),
-                file_name: mirai_config.file_name.as_str(),
-                known_names_cache: KnownNamesCache::create_cache_from_language_items(),
-                options: &mirai_config.options,
-                session: &compiler.sess,
-                generic_args_cache: HashMap::new(),
-                summary_cache: PersistentSummaryCache::new(
-                    tcx,
-                    mirai_config.summary_store_path.to_owned(),
-                ),
-                tcx,
-                test_run: false,
-                type_cache: Rc::new(RefCell::new(TypeCache::new())),
-                call_graph: CallGraph::new(call_graph_config, tcx),
-            };
+        // Creates MIRAI crate visitor.
+        // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L130-L174>
+        let call_graph_config = mirai_config.options.call_graph_config.to_owned();
+        let mut crate_visitor = CrateVisitor {
+            buffered_diagnostics: Vec::new(),
+            constant_time_tag_cache: None,
+            constant_time_tag_not_found: false,
+            constant_value_cache: ConstantValueCache::default(),
+            diagnostics_for: HashMap::new(),
+            file_name: mirai_config.file_name.as_str(),
+            known_names_cache: KnownNamesCache::create_cache(),
+            options: &mirai_config.options,
+            session: &compiler.sess,
+            generic_args_cache: HashMap::new(),
+            summary_cache: SummaryCache::new(mirai_config.summary_store_path.to_owned()),
+            tcx,
+            test_run: false,
+            type_cache: Rc::new(RefCell::new(TypeCache::new())),
+            call_graph: CallGraph::new(call_graph_config, tcx),
+        };
 
-            // Finds "contracts" module and collects test module spans.
-            let hir = tcx.hir();
-            let mut contracts_mod_def_id = None;
-            let mut test_mod_spans = FxHashSet::default();
-            hir.for_each_module(|mod_def_id| {
-                if tcx.item_name(mod_def_id.to_def_id()).as_str() == CONTRACTS_MOD_NAME {
-                    contracts_mod_def_id = Some(mod_def_id);
-                } else {
-                    let (mod_data, mod_decl_span, mod_hir_id) = hir.get_module(mod_def_id);
-                    let mod_body_span = mod_data.spans.inner_span;
-                    if utils::has_cfg_test_attr(mod_hir_id, tcx)
-                        && !test_mod_spans.iter().any(|span: &Span| {
-                            span.contains(mod_decl_span) || span.contains(mod_body_span)
-                        })
-                    {
-                        test_mod_spans.insert(mod_body_span);
-                    }
+        // Finds "contracts" module and collects test module spans.
+        let hir = tcx.hir();
+        let mut contracts_mod_def_id = None;
+        let mut test_mod_spans = FxHashSet::default();
+        hir.for_each_module(|mod_def_id| {
+            if tcx.item_name(mod_def_id.to_def_id()).as_str() == CONTRACTS_MOD_NAME {
+                contracts_mod_def_id = Some(mod_def_id);
+            } else {
+                let (mod_data, mod_decl_span, mod_hir_id) = hir.get_module(mod_def_id);
+                let mod_body_span = mod_data.spans.inner_span;
+                if utils::has_cfg_test_attr(mod_hir_id, tcx)
+                    && !test_mod_spans.iter().any(|span: &Span| {
+                        span.contains(mod_decl_span) || span.contains(mod_body_span)
+                    })
+                {
+                    test_mod_spans.insert(mod_body_span);
                 }
-            });
+            }
+        });
 
-            // Creates "summaries" for "contracts" (if any) with MIRAI.
-            // Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#summaries>
-            if let Some(contracts_mod_def_id) = contracts_mod_def_id {
-                println!(
-                    "{} summaries for FRAME and Substrate functions ...",
-                    "Creating".style(utils::highlight_style())
+        // Creates "summaries" for "contracts" (if any) with MIRAI.
+        // Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#summaries>
+        if let Some(contracts_mod_def_id) = contracts_mod_def_id {
+            println!(
+                "{} summaries for FRAME and Substrate functions ...",
+                "Creating".style(utils::highlight_style())
+            );
+            // Collect "contract" `fn` ids.
+            let mut visitor = ContractsVisitor::new(tcx);
+            hir.visit_item_likes_in_module(contracts_mod_def_id, &mut visitor);
+
+            for contract_def_id in visitor.fns {
+                // Analyzes "contract" with MIRAI and produces "summaries".
+                let mut diagnostics = Vec::new();
+                analyze(
+                    contract_def_id.to_def_id(),
+                    &mut crate_visitor,
+                    &mut diagnostics,
+                    true,
+                    tcx,
                 );
-                // Collect "contract" `fn` ids.
-                let mut visitor = ContractsVisitor::new(tcx);
-                hir.visit_item_likes_in_module(contracts_mod_def_id, &mut visitor);
 
-                for contract_def_id in visitor.fns {
-                    // Analyzes "contract" with MIRAI and produces "summaries".
-                    let mut diagnostics = Vec::new();
-                    analyze(
-                        contract_def_id.to_def_id(),
-                        &mut crate_visitor,
-                        &mut diagnostics,
-                        true,
+                // Ignores/cancels diagnostics from "contracts".
+                diagnostics.into_iter().for_each(Diag::cancel);
+            }
+        }
+
+        // Finds and analyzes the generated entry points.
+        let mut dispatchable_entry_points = Vec::new();
+        let mut hook_entry_points = Vec::new();
+        let mut pub_assoc_fn_entry_points = Vec::new();
+        let mut analyze_entry_points =
+            |mut entry_points_info: Vec<(LocalDefId, LocalDefId, Symbol, Option<String>)>,
+             call_kind: CallKind| {
+                if entry_points_info.len() > 1 {
+                    entry_points_info.sort_by_key(|(.., fn_name, trait_name)| {
+                        (
+                            trait_name.clone().unwrap_or_default(),
+                            fn_name.to_ident_string(),
+                        )
+                    });
+                }
+                for (entry_point_def_id, callee_def_id, fn_name, trait_name) in entry_points_info {
+                    println!(
+                        "{} {call_kind}: `{}{fn_name}` ...",
+                        "Analyzing".style(utils::highlight_style()),
+                        trait_name
+                            .map(|trait_name| format!("<Self as {trait_name}>::"))
+                            .unwrap_or_default()
                     );
 
-                    // Ignores/cancels diagnostics from "contracts".
-                    diagnostics.into_iter().for_each(DiagnosticBuilder::cancel);
+                    // Analyzes entry point with MIRAI and collects diagnostics.
+                    let mut diagnostics = Vec::new();
+                    analyze(
+                        entry_point_def_id.to_def_id(),
+                        &mut crate_visitor,
+                        &mut diagnostics,
+                        false,
+                        tcx,
+                    );
+
+                    // Emit diagnostics for generated entry point (if necessary).
+                    emit_diagnostics(
+                        diagnostics,
+                        entry_point_def_id,
+                        callee_def_id,
+                        tcx,
+                        &test_mod_spans,
+                        self.allow_hook_panics.as_ref(),
+                    );
                 }
-            }
-
-            // Finds and analyzes the generated entry points.
-            let mut dispatchable_entry_points = Vec::new();
-            let mut hook_entry_points = Vec::new();
-            let mut pub_assoc_fn_entry_points = Vec::new();
-            let mut analyze_entry_points =
-                |mut entry_points_info: Vec<(LocalDefId, LocalDefId, Symbol, Option<String>)>,
-                 call_kind: CallKind| {
-                    if entry_points_info.len() > 1 {
-                        entry_points_info.sort_by_key(|(.., fn_name, trait_name)| {
-                            (
-                                trait_name.clone().unwrap_or_default(),
-                                fn_name.to_ident_string(),
-                            )
-                        });
-                    }
-                    for (entry_point_def_id, callee_def_id, fn_name, trait_name) in
-                        entry_points_info
-                    {
-                        println!(
-                            "{} {call_kind}: `{}{fn_name}` ...",
-                            "Analyzing".style(utils::highlight_style()),
-                            trait_name
-                                .map(|trait_name| format!("<Self as {trait_name}>::"))
-                                .unwrap_or_default()
-                        );
-
-                        // Analyzes entry point with MIRAI and collects diagnostics.
-                        let mut diagnostics = Vec::new();
-                        analyze(
-                            entry_point_def_id.to_def_id(),
-                            &mut crate_visitor,
-                            &mut diagnostics,
-                            false,
-                        );
-
-                        // Emit diagnostics for generated entry point (if necessary).
-                        emit_diagnostics(
-                            diagnostics,
-                            entry_point_def_id,
-                            callee_def_id,
-                            tcx,
-                            &test_mod_spans,
-                            self.allow_hook_panics.as_ref(),
-                        );
-                    }
-                };
-            for local_def_id in hir.body_owners() {
-                let entry_point_info =
-                    tcx.opt_item_name(local_def_id.to_def_id())
-                        .and_then(|def_name| {
-                            self.entry_points
-                                .iter()
-                                .find_map(|(name, (target_hash, call_kind))| {
-                                    if name == def_name.as_str() {
-                                        let mut def_hash_to_id_error = || {
-                                            let mut error =
-                                                compiler.sess.dcx().struct_err(format!(
-                                        "Couldn't find definition for {call_kind}: `{}`",
-                                        def_name.as_str().replace(ENTRY_POINT_FN_PREFIX, "")
-                                    ));
-                                            error.note(
-                                                "This is most likely a bug in pallet-verifier.",
-                                            );
-                                            error.help(
-                                                "Please consider filling a bug report at \
+            };
+        for local_def_id in hir.body_owners() {
+            let entry_point_info =
+                tcx.opt_item_name(local_def_id.to_def_id())
+                    .and_then(|def_name| {
+                        self.entry_points
+                            .iter()
+                            .find_map(|(name, (target_hash, call_kind))| {
+                                if name == def_name.as_str() {
+                                    let Some(callee_def_id) =
+                                        tcx.def_path_hash_to_def_id(*target_hash)
+                                    else {
+                                        let mut error = compiler.sess.dcx().struct_err(format!(
+                                            "Couldn't find definition for {call_kind}: `{}`",
+                                            def_name.as_str().replace(ENTRY_POINT_FN_PREFIX, "")
+                                        ));
+                                        error.note("This is most likely a bug in pallet-verifier.");
+                                        error.help(
+                                            "Please consider filling a bug report at \
                                         https://github.com/davidsemakula/pallet-verifier/issues",
-                                            );
-                                            error.emit();
-                                            process::exit(rustc_driver::EXIT_FAILURE)
-                                        };
-                                        let callee_def_id = tcx.def_path_hash_to_def_id(
-                                            *target_hash,
-                                            &mut def_hash_to_id_error,
                                         );
-                                        callee_def_id
-                                            .as_local()
-                                            .map(|callee_def_id| (callee_def_id, call_kind))
-                                    } else {
-                                        None
-                                    }
-                                })
-                        });
-                if let Some((callee_def_id, call_kind)) = entry_point_info {
-                    let fn_name = tcx.item_name(callee_def_id.to_def_id());
-                    let trait_name = utils::assoc_item_parent_trait(callee_def_id.to_def_id(), tcx)
-                        .map(|trait_def_id| tcx.def_path_str(trait_def_id));
-                    let info = (local_def_id, callee_def_id, fn_name, trait_name);
-                    match call_kind {
-                        CallKind::Dispatchable => dispatchable_entry_points.push(info),
-                        CallKind::Hook => hook_entry_points.push(info),
-                        CallKind::PubAssocFn => pub_assoc_fn_entry_points.push(info),
-                    }
+                                        error.emit();
+                                        process::exit(rustc_driver::EXIT_FAILURE)
+                                    };
+                                    callee_def_id
+                                        .as_local()
+                                        .map(|callee_def_id| (callee_def_id, call_kind))
+                                } else {
+                                    None
+                                }
+                            })
+                    });
+            if let Some((callee_def_id, call_kind)) = entry_point_info {
+                let fn_name = tcx.item_name(callee_def_id.to_def_id());
+                let trait_name = utils::assoc_item_parent_trait(callee_def_id.to_def_id(), tcx)
+                    .map(|trait_def_id| tcx.def_path_str(trait_def_id));
+                let info = (local_def_id, callee_def_id, fn_name, trait_name);
+                match call_kind {
+                    CallKind::Dispatchable => dispatchable_entry_points.push(info),
+                    CallKind::Hook => hook_entry_points.push(info),
+                    CallKind::PubAssocFn => pub_assoc_fn_entry_points.push(info),
                 }
             }
+        }
 
-            // Analyze dispatchables.
-            if !dispatchable_entry_points.is_empty() {
-                println!(
-                    "{} dispatchables ...",
-                    "Analyzing".style(utils::highlight_style())
-                );
-                analyze_entry_points(dispatchable_entry_points, CallKind::Dispatchable);
-            }
+        // Analyze dispatchables.
+        if !dispatchable_entry_points.is_empty() {
+            println!(
+                "{} dispatchables ...",
+                "Analyzing".style(utils::highlight_style())
+            );
+            analyze_entry_points(dispatchable_entry_points, CallKind::Dispatchable);
+        }
 
-            // Analyze hooks.
-            if !hook_entry_points.is_empty() {
-                println!("{} hooks ...", "Analyzing".style(utils::highlight_style()));
-                analyze_entry_points(hook_entry_points, CallKind::Hook);
-            }
+        // Analyze hooks.
+        if !hook_entry_points.is_empty() {
+            println!("{} hooks ...", "Analyzing".style(utils::highlight_style()));
+            analyze_entry_points(hook_entry_points, CallKind::Hook);
+        }
 
-            // Analyze pub assoc `fn`s.
-            if !pub_assoc_fn_entry_points.is_empty() {
-                println!(
-                    "{} pub assoc fns ...",
-                    "Analyzing".style(utils::highlight_style())
-                );
-                analyze_entry_points(pub_assoc_fn_entry_points, CallKind::PubAssocFn);
-            }
+        // Analyze pub assoc `fn`s.
+        if !pub_assoc_fn_entry_points.is_empty() {
+            println!(
+                "{} pub assoc fns ...",
+                "Analyzing".style(utils::highlight_style())
+            );
+            analyze_entry_points(pub_assoc_fn_entry_points, CallKind::PubAssocFn);
+        }
 
-            // Outputs call graph.
-            crate_visitor.call_graph.output();
-        });
+        // Outputs call graph.
+        crate_visitor.call_graph.output();
+
+        // Continue compilation.
         Compilation::Continue
     }
 }
@@ -331,11 +319,12 @@ struct MiraiConfig {
 //
 // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/crate_visitor.rs#L126-L127>
 // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/crate_visitor.rs#L171-L194>
-fn analyze<'analysis>(
+fn analyze<'analysis, 'tcx>(
     def_id: DefId,
-    crate_visitor: &mut CrateVisitor<'analysis, '_>,
-    diagnostics: &mut Vec<DiagnosticBuilder<'analysis, ()>>,
+    crate_visitor: &mut CrateVisitor<'analysis, 'tcx>,
+    diagnostics: &mut Vec<Diag<'analysis, ()>>,
     is_contract: bool,
+    tcx: TyCtxt<'tcx>,
 ) {
     crate_visitor.call_graph.add_croot(def_id);
     let mut active_calls_map: HashMap<DefId, u64> = HashMap::new();
@@ -351,13 +340,15 @@ fn analyze<'analysis>(
     if is_contract {
         // Caches local "contract" "summaries".
         // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/crate_visitor.rs#L184-L191>
-        crate_visitor.summary_cache.set_summary_for(def_id, summary);
+        crate_visitor
+            .summary_cache
+            .set_summary_for(def_id, tcx, summary);
     }
 }
 
 /// Emit diagnostics for generated entry point (if necessary).
 fn emit_diagnostics(
-    diagnostics: Vec<DiagnosticBuilder<()>>,
+    diagnostics: Vec<Diag<()>>,
     entry_point_def_id: LocalDefId,
     callee_def_id: LocalDefId,
     tcx: TyCtxt,
@@ -841,13 +832,32 @@ fn emit_diagnostics(
             continue;
         }
 
-        // Updates diagnostic to only include relevant sub-diagnostics.
+        // Sanitizes diagnostic messages and updates diagnostic to only include relevant sub-diagnostics.
+        let sanitized_msgs = diagnostic
+            .messages
+            .iter()
+            .map(|(msg, style)| {
+                let new_msg = msg
+                    .as_str()
+                    .map(|text| {
+                        let new_text = text
+                            .strip_prefix("[MIRAI]")
+                            .unwrap_or(text)
+                            .trim()
+                            .to_string();
+                        DiagMessage::from(new_text)
+                    })
+                    .unwrap_or_else(|| msg.clone());
+                (new_msg, *style)
+            })
+            .collect();
+        diagnostic.messages = sanitized_msgs;
         if let Some((first_local_span, child_spans)) = relevant_spans.split_first() {
             if let Some(first_local_span) = first_local_span.primary_span() {
                 diagnostic.replace_span_with(first_local_span, true);
                 diagnostic.children = child_spans
                     .iter()
-                    .map(|span| SubDiagnostic {
+                    .map(|span| Subdiag {
                         level: Level::Note,
                         messages: vec![("related location".into(), Style::NoStyle)],
                         span: span.clone(),

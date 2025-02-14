@@ -8,7 +8,7 @@ extern crate rustc_session;
 
 mod cli_utils;
 
-use rustc_driver::EXIT_FAILURE;
+use rustc_driver::{RunCompiler, EXIT_FAILURE, EXIT_SUCCESS};
 use rustc_hash::FxHashSet;
 
 use std::{
@@ -133,6 +133,7 @@ fn main() {
                 // Enables compilation of unit tests and test harness generation.
                 // Ref: <https://doc.rust-lang.org/rustc/command-line-arguments.html#--test-build-a-test-harness>
                 "--test",
+                "--check-cfg=cfg(test)",
                 // Enables dumping MIR for all functions.
                 // Ref: <https://github.com/rust-lang/rust/blob/master/compiler/rustc_session/src/options.rs#L1632>
                 // Ref: <https://hackmd.io/@rust-compiler-team/r1JECK_76#metadata-and-depinfo>
@@ -149,15 +150,21 @@ fn main() {
     }
 
     // Generates "tractable" entry points for FRAME pallet (if possible).
-    let Ok((entry_points_content, entry_points_info)) = generate_entry_points(&args) else {
-        // Exit if entry point generation failed,
-        // presumably, the compiler already emitted an error in this case.
-        exit(rustc_driver::EXIT_FAILURE);
+    let (entry_points_content, entry_points_info) = match generate_entry_points(&args) {
+        Ok(res) => res,
+        Err(exit_code) => {
+            // Exit if entry point generation failed,
+            // presumably, the compiler already emitted an error in this case.
+            exit(exit_code)
+        }
     };
 
     // Analyzes FRAME pallet with MIRAI.
     // Enables compilation of MIRAI only code.
-    args.push("--cfg=mirai".to_owned());
+    args.extend([
+        "--cfg=mirai".to_owned(),
+        "--check-cfg=cfg(mirai)".to_owned(),
+    ]);
     exit(analyze_with_mirai(
         &args,
         entry_points_content,
@@ -167,9 +174,10 @@ fn main() {
 }
 
 /// Compiles and analyzes target crate (presumably a FRAME pallet) to generate "tractable" entry points.
+///
 /// Returns a tuple of the raw entry point content (as a `String`),
 /// as well some entry points metadata (as [`EntryPointsInfo`]) if successful.
-fn generate_entry_points(args: &[String]) -> Result<(String, EntrysPointInfo), ()> {
+fn generate_entry_points(args: &[String]) -> Result<(String, EntrysPointInfo), i32> {
     let dep_renames = env::var(ENV_DEP_RENAMES).ok().and_then(|dep_renames_json| {
         serde_json::from_str::<rustc_hash::FxHashMap<String, String>>(&dep_renames_json).ok()
     });
@@ -183,12 +191,15 @@ fn generate_entry_points(args: &[String]) -> Result<(String, EntrysPointInfo), (
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(target_path, &[], true);
     compiler.set_file_loader(Some(Box::new(file_loader)));
-    compiler.run().map_err(|_| ()).and_then(|_| {
-        callbacks
+
+    match run_compiler(compiler) {
+        // Returns entry point content if compilation was successful (and entry points were generated).
+        EXIT_SUCCESS => callbacks
             .entry_points_content()
             .map(|content| (content, callbacks.entry_points_info()))
-            .ok_or(())
-    })
+            .ok_or(EXIT_FAILURE),
+        exit_code => Err(exit_code),
+    }
 }
 
 /// Analyzes FRAME pallet with MIRAI.
@@ -215,7 +226,7 @@ fn analyze_with_mirai(
         true,
     );
     compiler.set_file_loader(Some(Box::new(file_loader)));
-    rustc_driver::catch_with_exit_code(|| compiler.run())
+    run_compiler(compiler)
 }
 
 /// Compiles annotated dependencies.
@@ -225,7 +236,7 @@ fn compile_annotated_dependency(args: &[String]) -> i32 {
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(target_path, &[], false);
     compiler.set_file_loader(Some(Box::new(file_loader)));
-    rustc_driver::catch_with_exit_code(|| compiler.run())
+    run_compiler(compiler)
 }
 
 /// Compiles dependencies.
@@ -242,7 +253,7 @@ fn compile_dependency(args: &[String]) -> i32 {
         let file_loader = file_loader_builder.build();
         compiler.set_file_loader(Some(Box::new(file_loader)));
     }
-    rustc_driver::catch_with_exit_code(|| compiler.run())
+    run_compiler(compiler)
 }
 
 /// [VirtualFileLoader] input path for `mirai-annotations` crate source.
@@ -299,7 +310,15 @@ fn compile_annotations_crate() -> i32 {
     let file_loader = file_loader_builder.build();
     let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
     compiler.set_file_loader(Some(Box::new(file_loader)));
-    rustc_driver::catch_with_exit_code(|| compiler.run())
+    run_compiler(compiler)
+}
+
+/// Runs compiler and returns the exit code.
+fn run_compiler(compiler: RunCompiler) -> i32 {
+    rustc_driver::catch_with_exit_code(|| {
+        compiler.run();
+        Ok(())
+    })
 }
 
 /// Creates "virtual" `FileLoader` for "analysis-only" external crates and "virtual" modules

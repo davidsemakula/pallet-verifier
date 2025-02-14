@@ -1,6 +1,6 @@
 //! Common utilities and helpers for traversing and analyzing MIR.
 
-use rustc_data_structures::graph::{dominators::Dominators, WithStartNode, WithSuccessors};
+use rustc_data_structures::graph::{dominators::Dominators, StartNode, Successors};
 use rustc_hash::FxHashSet;
 use rustc_hir::LangItem;
 use rustc_middle::{
@@ -278,13 +278,13 @@ pub fn collection_len_call<'tcx>(
 
     // Finds associated function by name.
     let assoc_fn_def = |name: &str| {
-        tcx.inherent_impls(adt_def_id).ok().and_then(|impls_| {
-            impls_.iter().find_map(|impl_def_id| {
+        tcx.inherent_impls(adt_def_id)
+            .iter()
+            .find_map(|impl_def_id| {
                 tcx.associated_items(impl_def_id)
                     .find_by_name_and_kind(tcx, Ident::from_str(name), AssocKind::Fn, *impl_def_id)
                     .map(|assoc_item| assoc_item.def_id)
             })
-        })
     };
 
     // Finds associated function on `Deref` target.

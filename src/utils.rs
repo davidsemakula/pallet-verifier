@@ -1,6 +1,6 @@
 //! Common analysis utilities.
 
-use rustc_ast::NestedMetaItem;
+use rustc_ast::MetaItemInner;
 use rustc_hir::{def_id::CrateNum, HirId};
 use rustc_middle::ty::{GenericArg, List, TyCtxt};
 use rustc_span::{def_id::DefId, Symbol};
@@ -50,7 +50,7 @@ pub fn has_cfg_test_attr(hir_id: HirId, tcx: TyCtxt) -> bool {
         is_cfg_path
             && attr.meta_item_list().is_some_and(|meta_items| {
                 let test_symbol = Symbol::intern("test");
-                let is_test_path = |meta_items: &[NestedMetaItem]| {
+                let is_test_path = |meta_items: &[MetaItemInner]| {
                     meta_items
                         .iter()
                         .any(|meta_item| meta_item.has_name(test_symbol))
