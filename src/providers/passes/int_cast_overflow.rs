@@ -4,10 +4,10 @@ use rustc_abi::Size;
 use rustc_const_eval::interpret::Scalar;
 use rustc_middle::{
     mir::{
-        visit::Visitor, Body, CastKind, Const, ConstValue, HasLocalDecls, LocalDecls, Location,
-        Operand, Rvalue,
+        visit::Visitor, BasicBlocks, Body, CastKind, Const, ConstValue, HasLocalDecls, LocalDecls,
+        Location, Operand, Rvalue, StatementKind,
     },
-    ty::{ScalarInt, TyCtxt, TyKind},
+    ty::{AdtKind, ScalarInt, TyCtxt, TyKind, VariantDiscr},
 };
 use rustc_span::Span;
 use rustc_type_ir::{IntTy, UintTy};
@@ -25,7 +25,7 @@ pub struct IntCastOverflowChecks;
 
 impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        let mut visitor = LossyIntCastVisitor::new(body.local_decls(), tcx);
+        let mut visitor = LossyIntCastVisitor::new(&body.basic_blocks, body.local_decls(), tcx);
         visitor.visit_body(body);
 
         // Adds integer cast overflow checks.
@@ -35,6 +35,7 @@ impl<'tcx> MirPass<'tcx> for IntCastOverflowChecks {
 
 /// Collects locations and operands for lossy integer cast operations.
 struct LossyIntCastVisitor<'tcx, 'pass> {
+    basic_blocks: &'pass BasicBlocks<'tcx>,
     local_decls: &'pass LocalDecls<'tcx>,
     tcx: TyCtxt<'tcx>,
     /// A list of integer cast overflow/underflow checks.
@@ -42,10 +43,15 @@ struct LossyIntCastVisitor<'tcx, 'pass> {
 }
 
 impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
-    fn new(local_decls: &'pass LocalDecls<'tcx>, tcx: TyCtxt<'tcx>) -> Self {
+    fn new(
+        basic_blocks: &'pass BasicBlocks<'tcx>,
+        local_decls: &'pass LocalDecls<'tcx>,
+        tcx: TyCtxt<'tcx>,
+    ) -> Self {
         Self {
-            tcx,
+            basic_blocks,
             local_decls,
+            tcx,
             checks: Vec::new(),
         }
     }
@@ -218,6 +224,49 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                 }
                 _ => None,
             };
+
+            // Ignores enum discriminant casts if the number of discriminant are within bounds.
+            let enum_def = operand.place().and_then(|op_place| {
+                self.basic_blocks[location.block]
+                    .statements
+                    .iter()
+                    .find_map(|stmt| {
+                        let StatementKind::Assign(assign) = &stmt.kind else {
+                            return None;
+                        };
+                        if assign.0 != op_place {
+                            return None;
+                        }
+                        let Rvalue::Discriminant(discr_place) = assign.1 else {
+                            return None;
+                        };
+                        let src_ty = discr_place.ty(self.local_decls, self.tcx).ty;
+                        let adt_def = src_ty.ty_adt_def()?;
+                        matches!(adt_def.adt_kind(), AdtKind::Enum).then_some(adt_def)
+                    })
+            });
+            if let Some(enum_def) = enum_def {
+                let bound_u128 = max_scalar
+                    .map(|max_scalar| max_scalar.to_bits(max_scalar.size()))
+                    .unwrap_or_else(|| u8::MAX as u128);
+                let contains_oversize_discrs = || {
+                    enum_def
+                        .variants()
+                        .iter()
+                        .any(|variant| match variant.discr {
+                            VariantDiscr::Explicit(discr_def_id) => self
+                                .tcx
+                                .const_eval_poly(discr_def_id)
+                                .ok()
+                                .and_then(|res| res.try_to_bits(Size::from_bits(pointer_width)))
+                                .is_some_and(|val| val >= bound_u128),
+                            VariantDiscr::Relative(_) => false,
+                        })
+                };
+                if enum_def.variants().len() as u128 <= bound_u128 && !contains_oversize_discrs() {
+                    return;
+                }
+            }
 
             // Declares cast overflow checks (if necessary).
             let mut add_check = |assert_cond: CondOp, bound_scalar: ScalarInt| {
