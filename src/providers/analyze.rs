@@ -707,7 +707,7 @@ fn safe_result_err_transform_destination<'tcx>(
 /// Returns destination place and target block (if any) of a "safe" transformation
 /// where the given place is the first argument of the "transformer" call.
 ///
-/// See [`safe_option_transform_destination`] and [`safe_result_transform_destination`] docs
+/// See [`safe_option_some_transform_destination`] and [`safe_result_transform_destination`] docs
 /// for details about the target "safe" transformations.
 pub fn safe_transform_destination<'tcx>(
     place: Place<'tcx>,
@@ -891,7 +891,7 @@ fn switch_target_for_discr_value<'tcx>(
     })
 }
 
-/// Returns place (if any) for the variant downcast to `usize` of given place.
+/// Returns place (if any) for the variant downcast to `ty` of given place.
 pub fn variant_downcast_to_ty_place<'tcx>(
     place: Place<'tcx>,
     variant_name: &str,

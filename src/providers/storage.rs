@@ -471,7 +471,7 @@ fn propagate_return_place_invariant<'tcx>(
         return;
     }
 
-    // Handles T and &T return places where T is the storage value type.
+    // Handles `T` and `&T` return places where `T` is the storage value type.
     // NOTE: We use the place type instead of the output type from the function signature because
     // the former is already normalized while the latter isn't.
     let return_ty = destination.ty(local_decls, tcx).ty;
@@ -519,7 +519,7 @@ fn propagate_return_place_invariant<'tcx>(
     };
 
     // Collects `Option::Some` or `Result::Ok` (or equivalent safe transformation) target blocks
-    // for switches based on the discriminant of destination of in successor blocks.
+    // for switches based on the discriminant of destination in successor blocks.
     let mut switch_target_place = *destination;
     let mut switch_target_block = block;
     analyze::track_safe_primary_opt_result_variant_transformations(
@@ -655,7 +655,7 @@ impl PropagatedVariant {
 pub enum InvariantSource {
     /// `[T]::binary_search*` methods.
     SliceBinarySearch,
-    /// `Iterator::position` and `Iterator::position` methods.
+    /// `Iterator::position` and `Iterator::rposition` methods.
     IteratorPosition,
 }
 
@@ -759,7 +759,7 @@ fn is_idempotent_call<'tcx>(
     //
     // NOTE: We don't include FRAME storage iterators (e.g. `PrefixIterator`, `KeyPrefixIterator`)
     // because:
-    // - They can be converted to mutating/draining iterators with using a `drain` method.
+    // - They can be converted to mutating/draining iterators with the `drain` method.
     // - The underlying storage values can be altered during iteration (even if this is discouraged
     //   and considered undefined behaviour).
     // Ref: <https://docs.rs/frame-support/latest/frame_support/storage/struct.PrefixIterator.html#method.drain>
@@ -776,8 +776,8 @@ fn is_idempotent_call<'tcx>(
     // is typically an existence check (e.g. `exists`, `contains` e.t.c).
     // However, we also look for "existential check" related words
     // (e.g. `exists`, `contains`, `find` e.t.c) for robustness in case of a non-empty param set.
-    // NOTE: `is_storage_type_in_params` is eagerly evaluated as it likely to be reused by
-    // subsequent branch conditions (i.e. is a hot path).
+    // NOTE: `is_storage_type_in_params` is eagerly evaluated as it is likely to be reused by
+    // subsequent branch conditions (i.e. it's a hot path).
     let is_storage_type_in_params = param_tys
         .iter()
         .any(|ty| is_ty_or_ty_arg(*ty, storage_item.value_ty));
@@ -789,7 +789,7 @@ fn is_idempotent_call<'tcx>(
         return true;
     }
 
-    // A `usize`, `Option<usize>` or `Result<usize>` return type for a function whose name includes
+    // A `usize`, `Option<usize>` or `Result<usize>` return type for a function whose name which includes
     // a "length/size related" word stem (e.g. `len`, `size` e.t.c) is typically
     // a length/size read-only operation.
     // However, we also check that if any params are passed, then no storage value type
@@ -854,22 +854,22 @@ fn is_idempotent_call<'tcx>(
     false
 }
 
-/// Returns true if `ty` is `inner_ty` or `inner_ty` as some kind of argument `ty`.
+/// Returns true if `ty` is `inner_ty` or `inner_ty` is some kind of argument `ty`.
 ///
 /// **NOTE:** This function simply "walks" `ty` and compares all the inner types to `inner_ty`,
-/// so it also handles cases where `ty` is a closure or fn def type and `inner_ty` is an args.
+/// so it also handles cases where `ty` is a closure or fn def type and `inner_ty` is an arg.
 fn is_ty_or_ty_arg<'tcx>(ty: Ty<'tcx>, inner_ty: Ty<'tcx>) -> bool {
     ty.walk()
         .any(|ty| ty.as_type().is_some_and(|ty| ty == inner_ty))
 }
 
 /// Returns true if the given `ty` is either `Option<T>` or `Result<T>`
-/// where T is the given `inner_ty`.
+/// where `T` is the given `inner_ty`.
 fn is_option_or_result_ty<'tcx>(ty: Ty<'tcx>, inner_ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
     is_option_ty(ty, inner_ty, tcx) || is_result_ty(ty, inner_ty, tcx)
 }
 
-/// Returns true if the given `ty` is `Option<T>` where T is the given `inner_ty`.
+/// Returns true if the given `ty` is `Option<T>` where `T` is the given `inner_ty`.
 fn is_option_ty<'tcx>(ty: Ty<'tcx>, inner_ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
     let def_id = tcx
         .lang_items()
@@ -878,7 +878,7 @@ fn is_option_ty<'tcx>(ty: Ty<'tcx>, inner_ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> bo
     is_adt_with_generic_type_param(ty, def_id, inner_ty)
 }
 
-/// Returns true if the given `ty` is `Result<T>` where T is the given `inner_ty`.
+/// Returns true if the given `ty` is `Result<T>` where `T` is the given `inner_ty`.
 fn is_result_ty<'tcx>(ty: Ty<'tcx>, inner_ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
     let def_id = tcx
         .lang_items()

@@ -287,40 +287,6 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                 unwrap_or_else_target_info.map(|(place, _)| place),
                 self.tcx,
             );
-            let is_return_place =
-                |place: Place| place.as_local().is_some_and(|local| local == RETURN_PLACE);
-            let is_primary_variant_return_place = is_return_place(switch_target_place);
-            let is_alt_variant_alt_return_place = is_return_place(switch_target_place_alt);
-            let is_unified_variant_return_place =
-                unwrap_or_else_target_info.is_some_and(|(place, _)| is_return_place(place));
-            if is_primary_variant_return_place
-                || is_alt_variant_alt_return_place
-                || is_unified_variant_return_place
-            {
-                // Composes propagated return place storage invariant environment.
-                let propagated_variant = if is_unified_variant_return_place {
-                    PropagatedVariant::Union
-                } else {
-                    match (
-                        is_primary_variant_return_place,
-                        is_alt_variant_alt_return_place,
-                    ) {
-                        (true, false) => PropagatedVariant::Primary(switch_variant),
-                        (false, true) => PropagatedVariant::Alt(switch_variant_alt),
-                        _ => PropagatedVariant::Unknown(switch_variant, switch_variant_alt),
-                    }
-                };
-                let storage_invariant_env = StorageInvariantEnv::new_with_id(
-                    self.def_id,
-                    StorageId::DefId(storage_item.prefix),
-                    InvariantSource::SliceBinarySearch,
-                    propagated_variant,
-                    self.tcx,
-                );
-
-                // Sets propagated return place storage invariant environment.
-                storage::set_invariant_env(&storage_invariant_env);
-            }
         }
     }
 
@@ -863,9 +829,9 @@ fn propagate_storage_invariant<'tcx>(
         unified_target_info,
     ) {
         // Returns `Result::unwrap_or_else` with a identity closure or fn as input
-        // (possibly after with "safe" transformations).
+        // (possibly after "safe" transformations).
         (_, _, Some(unwrap_place)) if is_return_place(unwrap_place) => PropagatedVariant::Union,
-        // Returns `Result` (possibly after with "safe" transformations).
+        // Returns `Result` (possibly after "safe" transformations).
         (
             Some((switch_target_place, switch_variant)),
             Some((switch_target_place_alt, switch_variant_alt)),
@@ -873,13 +839,13 @@ fn propagate_storage_invariant<'tcx>(
         ) if is_return_place(switch_target_place) && is_return_place(switch_target_place_alt) => {
             PropagatedVariant::Unknown(switch_variant, switch_variant_alt)
         }
-        // Returns safe `Result::Ok` (possibly after with "safe" transformations but only for the `Ok` variant).
+        // Returns safe `Result::Ok` (possibly after "safe" transformations but only for the `Ok` variant).
         (Some((switch_target_place, switch_variant)), _, _)
             if is_return_place(switch_target_place) =>
         {
             PropagatedVariant::Primary(switch_variant)
         }
-        // Returns safe `Result::Err` (possibly after with "safe" transformations but only for the `Err` variant).
+        // Returns safe `Result::Err` (possibly after "safe" transformations but only for the `Err` variant).
         (_, Some((switch_target_place_alt, switch_variant_alt)), _)
             if is_return_place(switch_target_place_alt) =>
         {
