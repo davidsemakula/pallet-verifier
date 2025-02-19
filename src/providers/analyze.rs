@@ -475,6 +475,7 @@ pub fn track_safe_primary_opt_result_variant_transformations<'tcx>(
     target_block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
     tcx: TyCtxt,
+    strict: bool,
 ) {
     let mut next_target_block = Some(target_block);
     while let Some(current_target_block) = next_target_block {
@@ -487,7 +488,7 @@ pub fn track_safe_primary_opt_result_variant_transformations<'tcx>(
             *switch_target_variant = SwitchVariant::ControlFlowContinue;
             next_target_block = try_branch_target_bb;
         } else if let Some((transformer_destination, transformer_target_block)) =
-            safe_option_some_transform_destination(*switch_target_place, block_data, tcx)
+            safe_option_some_transform_destination(*switch_target_place, block_data, tcx, strict)
         {
             *switch_target_place = transformer_destination;
             *switch_target_block = current_target_block;
@@ -519,6 +520,7 @@ pub fn track_safe_result_err_transformations<'tcx>(
     target_block: BasicBlock,
     basic_blocks: &BasicBlocks<'tcx>,
     tcx: TyCtxt,
+    strict: bool,
 ) {
     let mut next_target_block = Some(target_block);
     let mut opt_some_target_block = None;
@@ -564,6 +566,7 @@ pub fn track_safe_result_err_transformations<'tcx>(
             opt_some_target_block,
             basic_blocks,
             tcx,
+            strict,
         );
     }
 }
@@ -619,16 +622,17 @@ fn safe_option_some_transform_destination<'tcx>(
     place: Place<'tcx>,
     block_data: &BasicBlockData<'tcx>,
     tcx: TyCtxt,
+    strict: bool,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
+    let crate_adt_and_fn_name_check = |crate_name: &str, adt_name: &str, fn_name: &str| -> bool {
         matches!(crate_name, "std" | "core")
             && ((adt_name == "Option"
-                && matches!(
+                && (matches!(
                     fn_name,
                     "copied" | "cloned" | "inspect" | "as_ref" | "as_deref"
-                ))
+                ) || (!strict && fn_name == "filter")))
                 || (adt_name == "Result" && fn_name == "ok"))
-    }
+    };
     safe_transform_destination(place, block_data, crate_adt_and_fn_name_check, tcx)
 }
 
@@ -708,7 +712,7 @@ fn safe_result_err_transform_destination<'tcx>(
 pub fn safe_transform_destination<'tcx>(
     place: Place<'tcx>,
     block_data: &BasicBlockData<'tcx>,
-    crate_adt_and_fn_name_check: fn(&str, &str, &str) -> bool,
+    transform_check: impl Fn(&str, &str, &str) -> bool,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
     let terminator = block_data.terminator.as_ref()?;
@@ -742,7 +746,7 @@ pub fn safe_transform_destination<'tcx>(
     let adt_name = tcx.item_name(adt_def.did());
 
     let is_safe_transform =
-        crate_adt_and_fn_name_check(crate_name.as_str(), adt_name.as_str(), fn_name.as_str());
+        transform_check(crate_name.as_str(), adt_name.as_str(), fn_name.as_str());
     is_safe_transform.then_some((*destination, *target))
 }
 

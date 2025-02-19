@@ -638,6 +638,7 @@ fn binary_search_result_ok_analysis<'tcx>(
             *target,
             basic_blocks,
             tcx,
+            false,
         );
     }
 
@@ -685,6 +686,7 @@ fn binary_search_result_err_analysis<'tcx>(
             *target,
             basic_blocks,
             tcx,
+            false,
         );
     }
 

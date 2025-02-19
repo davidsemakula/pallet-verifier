@@ -387,6 +387,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 *target,
                 self.basic_blocks,
                 self.tcx,
+                false,
             );
         }
 
@@ -683,6 +684,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 *target,
                 self.basic_blocks,
                 self.tcx,
+                false,
             );
         }
 

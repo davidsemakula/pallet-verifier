@@ -529,6 +529,7 @@ fn propagate_return_place_invariant<'tcx>(
         target,
         basic_blocks,
         tcx,
+        true,
     );
     let switch_targets = analyze::collect_switch_targets_for_discr_value(
         switch_target_place,
