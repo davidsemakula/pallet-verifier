@@ -4,15 +4,15 @@
 
 use rustc_abi::{Align, Size};
 use rustc_const_eval::interpret::{Allocation, Scalar};
-use rustc_hir::{def::DefKind, LangItem};
+use rustc_hir::def::DefKind;
 use rustc_middle::{
     middle::exported_symbols::ExportedSymbol,
     mir::{
         BasicBlockData, BinOp, Body, BorrowKind, CallSource, Const, ConstOperand, ConstValue,
-        HasLocalDecls, LocalDecl, LocalDecls, Location, Operand, Place, Rvalue, Statement,
-        StatementKind, Terminator, TerminatorKind, UnwindAction,
+        HasLocalDecls, LocalDecl, Location, Operand, Place, Rvalue, Statement, StatementKind,
+        Terminator, TerminatorKind, UnwindAction,
     },
-    ty::{GenericArg, List, Region, ScalarInt, Ty, TyCtxt, TyKind},
+    ty::{GenericArg, List, Region, ScalarInt, Ty, TyCtxt},
 };
 use rustc_span::{def_id::DefId, source_map::dummy_spanned, Span};
 
@@ -293,40 +293,6 @@ pub fn add_annotations<'tcx>(
     for annotation in annotations {
         annotation.insert(body, tcx);
     }
-}
-
-/// Composes a slice length/size bound annotation.
-pub fn compose_slice_len_annotation<'tcx>(
-    annotation_location: Location,
-    cond_op: CondOp,
-    invariant_place: Place<'tcx>,
-    slice_place: Place<'tcx>,
-    local_decls: &LocalDecls<'tcx>,
-    tcx: TyCtxt<'tcx>,
-) -> Option<Annotation<'tcx>> {
-    let TyKind::Ref(region, slice_ty, _) = slice_place.ty(local_decls, tcx).ty.kind() else {
-        return None;
-    };
-    if !slice_ty.is_slice() {
-        return None;
-    }
-    let slice_len_def_id = tcx
-        .lang_items()
-        .get(LangItem::SliceLen)
-        .expect("Expected `[T]::len` lang item");
-    let gen_ty = slice_ty
-        .walk()
-        .nth(1)
-        .expect("Expected a generic arg for `[T]`");
-    let gen_args = tcx.mk_args(&[gen_ty]);
-    Some(Annotation::Len(
-        annotation_location,
-        cond_op,
-        invariant_place,
-        slice_place,
-        *region,
-        vec![(slice_len_def_id, gen_args, tcx.types.usize)],
-    ))
 }
 
 /// An annotation function (equivalent to a MIRAI annotation macro).

@@ -265,6 +265,7 @@ pub type LenCallBuilderInfo<'tcx> = Vec<(DefId, &'tcx List<GenericArg<'tcx>>, Ty
 
 /// Returns info necessary for constructing a length/size call for the given collection type
 /// (if possible).
+///
 /// See [`LenCallBuilderInfo`] for additional details.
 pub fn collection_len_call<'tcx>(
     ty: Ty<'tcx>,
@@ -368,6 +369,32 @@ pub fn borrowed_collection_len_call_info<'tcx>(
         })?;
     collection_len_call(place_ty, tcx)
         .map(|len_call_info| (collection_place, region, len_call_info))
+}
+
+/// Returns info necessary for constructing a length/size call for the given slice place (if possible).
+///
+/// See [`LenCallBuilderInfo`] for additional details.
+pub fn slice_len_call_info<'tcx>(
+    place: Place<'tcx>,
+    local_decls: &LocalDecls<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<(Region<'tcx>, LenCallBuilderInfo<'tcx>)> {
+    let TyKind::Ref(region, slice_ty, _) = place.ty(local_decls, tcx).ty.kind() else {
+        return None;
+    };
+    if !slice_ty.is_slice() {
+        return None;
+    }
+    let slice_len_def_id = tcx
+        .lang_items()
+        .get(LangItem::SliceLen)
+        .expect("Expected `[T]::len` lang item");
+    let gen_ty = slice_ty
+        .walk()
+        .nth(1)
+        .expect("Expected a generic arg for `[T]`");
+    let gen_args = tcx.mk_args(&[gen_ty]);
+    Some((*region, vec![(slice_len_def_id, gen_args, tcx.types.usize)]))
 }
 
 /// An `Option`, `Result` or `ControlFlow` variant.

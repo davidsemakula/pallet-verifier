@@ -139,7 +139,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 .is_some_and(|name| name.as_str() == "len")
                 && args.len() == 1
             {
-                self.process_len(args, destination, target.as_ref(), location);
+                self.process_len(args, destination, target.as_ref());
             }
 
             // Handles propagated return place iterator (r)position invariants.
@@ -543,15 +543,17 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Finds place and basic block for a slice `Iterator` operand/arg (if any).
         if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
             // Declares a slice length/size bound annotation.
-            if let Some(annotation) = annotate::compose_slice_len_annotation(
-                annotation_location,
-                cond_op,
-                *destination,
-                iterator_subject_place,
-                self.local_decls,
-                self.tcx,
-            ) {
-                self.annotations.push(annotation);
+            if let Some((region, call_info)) =
+                analyze::slice_len_call_info(iterator_subject_place, self.local_decls, self.tcx)
+            {
+                self.annotations.push(Annotation::Len(
+                    annotation_location,
+                    cond_op,
+                    *destination,
+                    iterator_subject_place,
+                    region,
+                    call_info,
+                ));
             }
 
             // Finds place and basic block for slice `Deref` operand/arg (if any).
@@ -632,7 +634,6 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         args: &[Spanned<Operand<'tcx>>],
         destination: &Place<'tcx>,
         target: Option<&BasicBlock>,
-        _: Location,
     ) {
         // Only continues if `len` method operand/arg has a length/size with `isize::MAX` maxima
         let Some(len_arg) = args.first() else {

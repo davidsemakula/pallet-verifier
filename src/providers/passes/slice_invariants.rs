@@ -1,5 +1,6 @@
 //! `rustc` [`MirPass`] for adding annotations for slice (i.e. `[T]`) invariants.
 
+use rustc_data_structures::graph::iterate::post_order_from;
 use rustc_hash::FxHashSet;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
@@ -189,40 +190,75 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         // Composes collection length/size bound annotations for extracted invariants.
         let mut storage_invariants = FxHashSet::default();
         for (annotation_location, cond_op, invariant_place) in invariants {
+            // Adds locations of uses of invariant place as terminator operands in subsequent blocks.
+            // NOTE: This makes analysis more tractable in cases where the invariant place uses are
+            // guarded by complex branching conditions.
+            let locations = std::iter::once(annotation_location).chain(
+                post_order_from(self.basic_blocks, annotation_location.block)
+                    .into_iter()
+                    .filter_map(|successor| {
+                        if successor == annotation_location.block {
+                            return None;
+                        }
+                        let Some(terminator) = &self.basic_blocks[successor].terminator else {
+                            return None;
+                        };
+                        let TerminatorKind::Call { args, .. } = &terminator.kind else {
+                            return None;
+                        };
+
+                        let is_invariant_arg = args.iter().any(|arg| {
+                            arg.node
+                                .place()
+                                .is_some_and(|place| place == invariant_place)
+                        });
+                        is_invariant_arg.then_some(Location {
+                            block: successor,
+                            statement_index: 0,
+                        })
+                    }),
+            );
+
             // Declares a collection length/size bound annotation.
             if let Some((collection_place, region, len_call_info)) = &len_bound_info {
-                self.annotations.push(Annotation::Len(
-                    annotation_location,
-                    cond_op,
-                    invariant_place,
-                    *collection_place,
-                    *region,
-                    len_call_info.clone(),
-                ));
+                self.annotations.extend(locations.clone().map(|location| {
+                    Annotation::Len(
+                        location,
+                        cond_op,
+                        invariant_place,
+                        *collection_place,
+                        *region,
+                        len_call_info.clone(),
+                    )
+                }));
             }
 
-            // Declares a slice length/size bound annotation.
-            if let Some(annotation) = annotate::compose_slice_len_annotation(
-                annotation_location,
-                cond_op,
-                invariant_place,
-                binary_search_arg_place,
-                self.local_decls,
-                self.tcx,
-            ) {
-                self.annotations.push(annotation);
+            // Declares slice length/size bound annotations.
+            if let Some((region, call_info)) =
+                analyze::slice_len_call_info(binary_search_arg_place, self.local_decls, self.tcx)
+            {
+                self.annotations.extend(locations.clone().map(|location| {
+                    Annotation::Len(
+                        location,
+                        cond_op,
+                        invariant_place,
+                        binary_search_arg_place,
+                        region,
+                        call_info.clone(),
+                    )
+                }));
             }
 
-            // Declares an `isize::MAX` bound annotation (if appropriate).
+            // Declares `isize::MAX` bound annotations (if appropriate).
             if analyze::is_isize_bound_collection(
                 slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
                 self.tcx,
             ) {
-                self.annotations.push(Annotation::Isize(
-                    annotation_location,
-                    cond_op,
-                    invariant_place,
-                ));
+                self.annotations.extend(
+                    locations
+                        .clone()
+                        .map(|location| Annotation::Isize(location, cond_op, invariant_place)),
+                );
             }
 
             // Tracks invariants that need to propagated to other storage uses.
@@ -319,15 +355,17 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         let cond_op = CondOp::Le;
 
         // Declares a slice length/size bound annotation.
-        if let Some(annotation) = annotate::compose_slice_len_annotation(
-            annotation_location,
-            cond_op,
-            *destination,
-            partition_point_arg_place,
-            self.local_decls,
-            self.tcx,
-        ) {
-            self.annotations.push(annotation);
+        if let Some((region, call_info)) =
+            analyze::slice_len_call_info(partition_point_arg_place, self.local_decls, self.tcx)
+        {
+            self.annotations.push(Annotation::Len(
+                annotation_location,
+                cond_op,
+                *destination,
+                partition_point_arg_place,
+                region,
+                call_info,
+            ));
         }
 
         // Finds place for operand/arg and basic block for a slice `Deref` call (if any).
