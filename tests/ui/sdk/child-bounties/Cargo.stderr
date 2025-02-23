@@ -1,0 +1,36 @@
+warning: possible attempt to add with overflow
+  --> src/lib.rs:587:4
+   |
+LL | /             ChildBounties::<T>::try_mutate_exists(
+LL | |                 parent_bounty_id,
+LL | |                 child_bounty_id,
+LL | |                 |maybe_child_bounty| -> DispatchResult {
+...  |
+LL | |                 },
+LL | |             )?;
+   | |_____________^
+   |
+note: related location
+  --> /Users/david/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/frame-support-38.2.0/src/storage/types/double_map.rs:415:3
+   |
+LL |         <Self as crate::storage::StorageDoubleMap<Key1, Key2, Value>>::try_mutate_exists(k1, k2, f)
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: related location
+  --> /Users/david/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/frame-support-38.2.0/src/storage/generator/double_map.rs:302:13
+   |
+LL |         let ret = f(&mut val);
+   |                   ^^^^^^^^^^^
+note: related location
+  --> src/lib.rs:604:19
+   |
+LL |   ...                   unlock_at: frame_system::Pallet::<T>::block_number() +
+   |  __________________________________^
+LL | | ...                       T::BountyDepositPayoutDelay::get(),
+   | |____________________________________________________________^
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2025-01-10-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:111:1
+   |
+LL | add_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128 }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this warning originates in the macro `add_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+
