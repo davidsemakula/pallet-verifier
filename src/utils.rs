@@ -21,6 +21,28 @@ pub fn target_pointer_width() -> usize {
     }
 }
 
+// Returns `isize::MAX` value for target platform.
+pub fn target_isize_max() -> u128 {
+    let pointer_width = target_pointer_width();
+    match pointer_width {
+        16 => i16::MAX as u128,
+        32 => i32::MAX as u128,
+        64 => i64::MAX as u128,
+        _ => unreachable!("Unsupported pointer width"),
+    }
+}
+
+// Returns `usize::MAX` value for target platform.
+pub fn target_usize_max() -> u128 {
+    let pointer_width = target_pointer_width();
+    match pointer_width {
+        16 => u16::MAX as u128,
+        32 => u32::MAX as u128,
+        64 => u64::MAX as u128,
+        _ => unreachable!("Unsupported pointer width"),
+    }
+}
+
 /// Returns `CrateNum` given a crate name.
 pub fn find_crate(name: &str, tcx: TyCtxt) -> Option<CrateNum> {
     tcx.crates(())

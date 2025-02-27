@@ -21,11 +21,12 @@ use serde::{Deserialize, Serialize};
 use crate::utils;
 
 /// An annotation to add to MIR.
+#[derive(Debug, Clone)]
 pub enum Annotation<'tcx> {
     /// An integer cast overflow check.
     CastOverflow(Location, CondOp, Operand<'tcx>, Operand<'tcx>),
-    /// An `isize::MAX` bound annotation.
-    Isize(Location, CondOp, Place<'tcx>),
+    /// An constant maximum bound annotation (e.g. an `isize::MAX` upper bound).
+    ConstMax(Location, CondOp, Place<'tcx>, u128),
     /// A collection length/size bound annotation.
     Len(
         Location,
@@ -45,6 +46,21 @@ pub enum Annotation<'tcx> {
 }
 
 impl<'tcx> Annotation<'tcx> {
+    /// Creates an `isize::MAX` bound annotation.
+    pub fn new_const_max(
+        location: Location,
+        cond_op: CondOp,
+        place: Place<'tcx>,
+        bound: u128,
+    ) -> Self {
+        Self::ConstMax(location, cond_op, place, bound)
+    }
+
+    /// Creates an `isize::MAX` bound annotation.
+    pub fn new_isize_max(location: Location, cond_op: CondOp, place: Place<'tcx>) -> Self {
+        Self::new_const_max(location, cond_op, place, utils::target_isize_max())
+    }
+
     /// Adds instructions for the annotation to the given MIR body.
     pub fn insert(self, body: &mut Body<'tcx>, tcx: TyCtxt<'tcx>) {
         let location = *self.location();
@@ -104,11 +120,11 @@ impl<'tcx> Annotation<'tcx> {
                     predecessors,
                 )
             }
-            Annotation::Isize(_, cond_op, op_place) => {
+            Annotation::ConstMax(_, cond_op, op_place, bound) => {
                 // Creates `isize::MAX` bound statement.
                 let arg_rvalue = Rvalue::BinaryOp(
                     cond_op.into(),
-                    Box::new((Operand::Copy(op_place), isize_max_operand(tcx))),
+                    Box::new((Operand::Copy(op_place), const_int_operand(bound, tcx))),
                 );
                 let arg_stmt = Statement {
                     source_info,
@@ -269,7 +285,7 @@ impl<'tcx> Annotation<'tcx> {
     pub fn location(&self) -> &Location {
         match &self {
             Annotation::CastOverflow(location, ..)
-            | Annotation::Isize(location, ..)
+            | Annotation::ConstMax(location, ..)
             | Annotation::Len(location, ..) => location,
         }
     }
@@ -396,19 +412,11 @@ fn cast_overflow_diag_message(tcx: TyCtxt) -> Operand {
     }))
 }
 
-// Creates `isize::MAX` operand.
-fn isize_max_operand(tcx: TyCtxt) -> Operand {
+// Creates integer operand.
+fn const_int_operand(val: u128, tcx: TyCtxt) -> Operand {
     let pointer_width = utils::target_pointer_width();
-    let isize_max_scalar = ScalarInt::try_from_uint(
-        match pointer_width {
-            16 => i16::MAX as u128,
-            32 => i32::MAX as u128,
-            64 => i64::MAX as u128,
-            _ => unreachable!("Unsupported pointer width"),
-        },
-        Size::from_bits(pointer_width),
-    )
-    .expect("Expected a valid scalar bound");
+    let isize_max_scalar = ScalarInt::try_from_uint(val, Size::from_bits(pointer_width))
+        .expect("Expected a valid scalar bound");
     Operand::const_from_scalar(
         tcx,
         tcx.types.usize,

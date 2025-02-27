@@ -15,16 +15,22 @@ use rustc_middle::{
 use rustc_span::{def_id::DefId, source_map::Spanned, Symbol};
 use rustc_type_ir::UintTy;
 
+use std::ops::Deref;
+
 use itertools::Itertools;
 
-use crate::providers::{
-    analyze::{self, SwitchVariant},
-    annotate::{self, Annotation, CondOp},
-    closure,
-    passes::MirPass,
-    storage::{
-        self, InvariantSource, PropagatedVariant, StorageId, StorageInvariant, StorageInvariantEnv,
+use crate::{
+    providers::{
+        analyze::{self, SwitchVariant},
+        annotate::{self, Annotation, CondOp},
+        closure,
+        passes::MirPass,
+        storage::{
+            self, InvariantSource, PropagatedVariant, StorageId, StorageInvariant,
+            StorageInvariantEnv,
+        },
     },
+    utils,
 };
 
 /// Adds `Iterator` invariant annotations.
@@ -250,7 +256,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 if let Some((_, op_place)) = inc_invariant_places {
                     // Declares an `isize::MAX` bound annotation.
                     if is_isize_bound {
-                        self.annotations.push(Annotation::Isize(
+                        self.annotations.push(Annotation::new_isize_max(
                             Location {
                                 block: *bb,
                                 statement_index: stmt_idx,
@@ -517,114 +523,161 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Finds place and basic block (if any) of innermost iterator subject to which
-        // no "growing" iterator adapters are applied.
+        // Finds places and basics block (if any) of innermost iterator subjects by chain (if any)
+        // to which no "growing" iterator adapters are applied.
         let dominators = self.basic_blocks.dominators();
-        let Some((mut iterator_subject_place, mut iterator_subject_bb)) =
-            size_invariant_iterator_subject(
-                iterator_count_arg_place,
-                location.block,
-                self.basic_blocks,
-                self.local_decls,
-                dominators,
-                self.tcx,
-            )
-        else {
+        let (iterator_subjects, n_empty_subjects) = size_invariant_iterator_subjects_by_chain(
+            iterator_count_arg_place,
+            location.block,
+            self.basic_blocks,
+            self.local_decls,
+            dominators,
+            self.tcx,
+        );
+        if iterator_subjects.is_empty() {
             return;
-        };
+        }
 
-        // Length invariant annotations are added at the beginning of the next block.
+        // Determines max bound annotations for count return place (i.e. the terminator destination).
         let annotation_location = Location {
             block: *target,
             statement_index: 0,
         };
         let cond_op = CondOp::Le;
-
-        // Finds place and basic block for a slice `Iterator` operand/arg (if any).
-        if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
-            // Declares a slice length/size bound annotation.
-            if let Some((region, call_info)) =
-                analyze::slice_len_call_info(iterator_subject_place, self.local_decls, self.tcx)
-            {
-                self.annotations.push(Annotation::Len(
-                    annotation_location,
-                    cond_op,
-                    *destination,
-                    iterator_subject_place,
-                    region,
-                    call_info,
-                ));
+        let mut upper_bound = None;
+        let n_non_empty_chains = iterator_subjects.len() - n_empty_subjects;
+        let usize_max = utils::target_usize_max();
+        let safe_increase_bound = |current: Option<u128>, val: u128| {
+            if val > usize_max {
+                return None;
             }
-
-            // Finds place and basic block for slice `Deref` operand/arg (if any).
-            let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
-                iterator_subject_place,
-                iterator_subject_bb,
-                location.block,
-                self.basic_blocks,
-                dominators,
-                self.tcx,
-            ) else {
-                return;
-            };
-            iterator_subject_place = slice_deref_arg_place;
-            iterator_subject_bb = slice_deref_bb;
-        }
-
-        // Declares an `isize::MAX` bound annotation (if appropriate).
-        let iterator_subject_ty = self.place_ty(iterator_subject_place);
-        if analyze::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx) {
-            self.annotations.push(Annotation::Isize(
-                annotation_location,
-                cond_op,
-                *destination,
-            ));
-        }
-
-        // Declares a collection length/size bound annotation (if appropriate).
-        let len_call_info = analyze::collection_len_call(iterator_subject_ty, self.tcx);
-        if let Some(len_call_info) = len_call_info {
-            let collection_place_info = analyze::deref_place_recursive(
-                iterator_subject_place,
-                iterator_subject_bb,
-                self.basic_blocks,
-            )
-            .or_else(|| {
-                if let TyKind::Ref(region, _, _) = iterator_subject_ty.kind() {
-                    Some((iterator_subject_place, *region))
-                } else {
-                    None
+            match current {
+                Some(current) if current <= usize_max && val <= (usize_max - current) => {
+                    Some(current + val)
                 }
-            });
-            if let Some((collection_place, region)) = collection_place_info {
-                self.annotations.push(Annotation::Len(
-                    annotation_location,
-                    cond_op,
-                    *destination,
-                    collection_place,
-                    region,
-                    len_call_info.clone(),
-                ));
+                None => Some(val),
+                _ => None,
+            }
+        };
 
-                // Finds FRAME storage subject (if any).
-                let storage_info = storage::storage_subject(
+        for (iterator_subject, mut iterator_subject_block) in iterator_subjects {
+            // Unwraps the subject place (if any),
+            // or sets the upper bound to zero if subject is `std::iter::Empty`.
+            let mut iterator_subject_place = match iterator_subject {
+                IterSubject::Place(place) => place,
+                IterSubject::Empty => {
+                    if upper_bound.is_none() {
+                        upper_bound = Some(0);
+                    }
+                    continue;
+                }
+            };
+
+            // Finds place and basic block for a slice `Iterator` operand/arg (if any).
+            if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
+                // Declares a slice length/size bound annotation.
+                if n_non_empty_chains == 1 {
+                    if let Some((region, call_info)) = analyze::slice_len_call_info(
+                        iterator_subject_place,
+                        self.local_decls,
+                        self.tcx,
+                    ) {
+                        self.annotations.push(Annotation::Len(
+                            annotation_location,
+                            cond_op,
+                            *destination,
+                            iterator_subject_place,
+                            region,
+                            call_info,
+                        ));
+                    }
+                }
+
+                // Finds place and basic block for slice `Deref` operand/arg (if any).
+                let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
                     iterator_subject_place,
-                    iterator_subject_bb,
+                    iterator_subject_block,
                     location.block,
                     self.basic_blocks,
                     dominators,
                     self.tcx,
-                );
+                ) else {
+                    return;
+                };
+                iterator_subject_place = slice_deref_arg_place;
+                iterator_subject_block = slice_deref_bb;
+            }
 
-                // Adds storage invariants.
-                if let Some((storage_item, use_location)) = storage_info {
-                    self.storage_invariants.push((
-                        StorageId::DefId(storage_item.prefix),
-                        use_location,
-                        FxHashSet::from_iter([(annotation_location, cond_op, *destination)]),
+            // Updates known count upper bound (if appropriate).
+            let iterator_subject_ty = self.place_ty(iterator_subject_place);
+            if analyze::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx) {
+                upper_bound = safe_increase_bound(upper_bound, utils::target_isize_max());
+            } else if is_iter_once_ty(iterator_subject_ty, self.tcx) {
+                upper_bound = safe_increase_bound(upper_bound, 1);
+            } else {
+                // Bails if any chain subject doesn't have a known constant upper bound.
+                upper_bound = None;
+                break;
+            }
+
+            // Declares a collection length/size bound annotation (if appropriate).
+            if n_non_empty_chains != 1 {
+                continue;
+            }
+            let len_call_info = analyze::collection_len_call(iterator_subject_ty, self.tcx);
+            if let Some(len_call_info) = len_call_info {
+                let collection_place_info = analyze::deref_place_recursive(
+                    iterator_subject_place,
+                    iterator_subject_block,
+                    self.basic_blocks,
+                )
+                .or_else(|| {
+                    if let TyKind::Ref(region, _, _) = iterator_subject_ty.kind() {
+                        Some((iterator_subject_place, *region))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((collection_place, region)) = collection_place_info {
+                    self.annotations.push(Annotation::Len(
+                        annotation_location,
+                        cond_op,
+                        *destination,
+                        collection_place,
+                        region,
+                        len_call_info.clone(),
                     ));
+
+                    // Finds FRAME storage subject (if any).
+                    let storage_info = storage::storage_subject(
+                        iterator_subject_place,
+                        iterator_subject_block,
+                        location.block,
+                        self.basic_blocks,
+                        dominators,
+                        self.tcx,
+                    );
+
+                    // Adds storage invariants.
+                    if let Some((storage_item, use_location)) = storage_info {
+                        self.storage_invariants.push((
+                            StorageId::DefId(storage_item.prefix),
+                            use_location,
+                            FxHashSet::from_iter([(annotation_location, cond_op, *destination)]),
+                        ));
+                    }
                 }
             }
+        }
+
+        // Declares an upper bound annotation, if one was determined.
+        if let Some(upper_bound) = upper_bound {
+            self.annotations.push(Annotation::new_const_max(
+                annotation_location,
+                cond_op,
+                *destination,
+                upper_bound,
+            ));
         }
     }
 
@@ -650,7 +703,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         };
 
         // Declares an `isize::MAX` bound annotation.
-        self.annotations.push(Annotation::Isize(
+        self.annotations.push(Annotation::new_isize_max(
             Location {
                 block: *target,
                 statement_index: 0,
@@ -773,8 +826,189 @@ impl<'tcx> Visitor<'tcx> for IteratorVisitor<'tcx, '_> {
     }
 }
 
+/// Returns places and basic blocks (if any) of innermost iterator subjects
+/// per iterator chain (if any) to which no "growing" iterator adapters are applied.
+///
+/// **NOTE:** This is similar to [`size_invariant_iterator_subject`] but applied to each chain.
+fn size_invariant_iterator_subjects_by_chain<'tcx>(
+    iterator_arg_place: Place<'tcx>,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    local_decls: &LocalDecls<'tcx>,
+    dominators: &Dominators<BasicBlock>,
+    tcx: TyCtxt<'tcx>,
+) -> (FxHashSet<(IterSubject<'tcx>, BasicBlock)>, usize) {
+    // Tracks final results.
+    let mut results = FxHashSet::default();
+    let mut n_empty_subjects = 0;
+
+    // Tracks intermediate results for which the innermost iterator subject still needs to be processed
+    // by unwrapping "non-growing" iterator adapters.
+    let mut intermediate_subject_places = FxHashSet::default();
+
+    // Handles chains (if any).
+    if is_iter_chain_ty(iterator_arg_place.ty(local_decls, tcx).ty, tcx) {
+        if let Some((first_arg_place, second_arg_place, chain_block)) = iter_chain_subjects(
+            iterator_arg_place,
+            anchor_block,
+            basic_blocks,
+            local_decls,
+            dominators,
+            tcx,
+        ) {
+            for iter_subject in [first_arg_place, second_arg_place] {
+                match iter_subject {
+                    IterSubject::Place(arg_place) => {
+                        if is_iter_chain_ty(arg_place.ty(local_decls, tcx).ty, tcx) {
+                            // Recurses to find more chain subjects.
+                            let res = size_invariant_iterator_subjects_by_chain(
+                                arg_place,
+                                chain_block,
+                                basic_blocks,
+                                local_decls,
+                                dominators,
+                                tcx,
+                            );
+                            results.extend(res.0);
+                            n_empty_subjects += res.1;
+                        } else {
+                            // May still be possible to unwrap "non-growing" adapters.
+                            intermediate_subject_places.insert((arg_place, chain_block));
+                        }
+                    }
+                    IterSubject::Empty => {
+                        results.insert((IterSubject::Empty, chain_block));
+                        n_empty_subjects += 1;
+                    }
+                }
+            }
+        }
+    } else {
+        // Handles simple unchained iterators.
+        intermediate_subject_places.insert((iterator_arg_place, anchor_block));
+    }
+
+    // Processes intermediate results.
+    for (intermediate_subject_place, intermediate_subject_block) in intermediate_subject_places {
+        let iter_subject_info = size_invariant_iterator_subject(
+            intermediate_subject_place,
+            intermediate_subject_block,
+            basic_blocks,
+            local_decls,
+            dominators,
+            tcx,
+        );
+        match iter_subject_info {
+            Some((iter_subject_place, iter_subject_block)) => {
+                if is_iter_chain_ty(iter_subject_place.ty(local_decls, tcx).ty, tcx) {
+                    // Recurses to find more chain subjects.
+                    let res = size_invariant_iterator_subjects_by_chain(
+                        iter_subject_place,
+                        iter_subject_block,
+                        basic_blocks,
+                        local_decls,
+                        dominators,
+                        tcx,
+                    );
+                    results.extend(res.0);
+                    n_empty_subjects += res.1;
+                } else {
+                    // We can't unwrap any further, so the current subject is final.
+                    results.insert((iter_subject_place.into(), iter_subject_block));
+                }
+            }
+            None => {
+                // Analysis results have to be "joined", so we can't lose any branches.
+                results.insert((
+                    intermediate_subject_place.into(),
+                    intermediate_subject_block,
+                ));
+            }
+        }
+    }
+
+    (results, n_empty_subjects)
+}
+
+/// Returns places and basic block for the args/operands of an `Iterator::chain` call (if any).
+fn iter_chain_subjects<'tcx>(
+    iterator_arg_place: Place<'tcx>,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    local_decls: &LocalDecls<'tcx>,
+    dominators: &Dominators<BasicBlock>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<(IterSubject<'tcx>, IterSubject<'tcx>, BasicBlock)> {
+    let (terminator, iterator_subject_block) = analyze::pre_anchor_assign_terminator(
+        iterator_arg_place,
+        anchor_block,
+        anchor_block,
+        basic_blocks,
+        dominators,
+    )?;
+
+    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
+        return None;
+    };
+    let (def_id, ..) = func.const_fn_def()?;
+    let iterator_next_def_id = iterator_assoc_item_def_id("chain", tcx)
+        .expect("Expected DefId for `std::iter::Iterator::chain`");
+    if def_id != iterator_next_def_id {
+        return None;
+    }
+
+    match args.deref() {
+        [first, second] => {
+            let into_iter_subject = |operand: &Operand<'tcx>| {
+                operand.place().map(IterSubject::from).or_else(|| {
+                    let op_ty = operand.ty(local_decls, tcx);
+                    is_iter_empty_ty(op_ty, tcx).then_some(IterSubject::Empty)
+                })
+            };
+            Some((
+                into_iter_subject(&first.node)?,
+                into_iter_subject(&second.node)?,
+                iterator_subject_block,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// An iterator subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum IterSubject<'tcx> {
+    /// Place of an iterator subject.
+    Place(Place<'tcx>),
+    /// An `std::iter::Empty` subject.
+    ///
+    /// **NOTE:** It's special cased because it's represented as a constant operand.
+    Empty,
+}
+
+impl<'tcx> From<Place<'tcx>> for IterSubject<'tcx> {
+    fn from(value: Place<'tcx>) -> Self {
+        Self::Place(value)
+    }
+}
+
+/// Returns the DefId of an `Iterator` assoc item, given it's name.
+fn iterator_assoc_item_def_id(name: &str, tcx: TyCtxt) -> Option<DefId> {
+    let iterator_trait_def_id = tcx
+        .lang_items()
+        .get(LangItem::Iterator)
+        .expect("Expected `std::iter::Iterator` lang item");
+    tcx.associated_items(iterator_trait_def_id)
+        .filter_by_name_unhygienic(Symbol::intern(name))
+        .next()
+        .map(|item| item.def_id)
+}
+
 /// Returns place and basic block (if any) of innermost iterator subject to which
 /// no "growing" iterator adapters are applied.
+///
+/// **NOTE:** See [`size_invariant_iterator_subject_by_chain`] for a similar function that
+/// operates on each chain.
 fn size_invariant_iterator_subject<'tcx>(
     iterator_arg_place: Place<'tcx>,
     anchor_block: BasicBlock,
@@ -784,7 +1018,7 @@ fn size_invariant_iterator_subject<'tcx>(
     tcx: TyCtxt<'tcx>,
 ) -> Option<(Place<'tcx>, BasicBlock)> {
     // Finds place and basic block for outermost `Iterator` transformation operand/arg (if any).
-    let (terminator, mut iterator_subject_bb) = analyze::pre_anchor_assign_terminator(
+    let (terminator, mut iterator_subject_block) = analyze::pre_anchor_assign_terminator(
         iterator_arg_place,
         anchor_block,
         anchor_block,
@@ -798,7 +1032,7 @@ fn size_invariant_iterator_subject<'tcx>(
     // Finds place and basic block for the innermost "non-growing" `Iterator` adapter operand/arg (if any).
     track_size_invariant_iterator_transformations(
         &mut iterator_subject_place,
-        &mut iterator_subject_bb,
+        &mut iterator_subject_block,
         anchor_block,
         basic_blocks,
         local_decls,
@@ -808,20 +1042,20 @@ fn size_invariant_iterator_subject<'tcx>(
 
     // Finds place and basic block for innermost `Iterator` transformation operand/arg (if any).
     if is_into_iter_ty(iterator_subject_place.ty(local_decls, tcx).ty, tcx) {
-        let (into_iter_def_terminator, into_iter_bb) = analyze::pre_anchor_assign_terminator(
+        let (into_iter_def_terminator, into_iter_block) = analyze::pre_anchor_assign_terminator(
             iterator_subject_place,
-            iterator_subject_bb,
+            iterator_subject_block,
             anchor_block,
             basic_blocks,
             dominators,
         )?;
         let collection_place = into_iter_operand(&into_iter_def_terminator, tcx)?;
         iterator_subject_place = collection_place;
-        iterator_subject_bb = into_iter_bb;
+        iterator_subject_block = into_iter_block;
     } else if is_iter_by_ref_ty(iterator_subject_place.ty(local_decls, tcx).ty, tcx) {
-        let (iter_by_ref_terminator, iter_by_ref_bb) = analyze::pre_anchor_assign_terminator(
+        let (iter_by_ref_terminator, iter_by_ref_block) = analyze::pre_anchor_assign_terminator(
             iterator_subject_place,
-            iterator_subject_bb,
+            iterator_subject_block,
             anchor_block,
             basic_blocks,
             dominators,
@@ -829,10 +1063,10 @@ fn size_invariant_iterator_subject<'tcx>(
         let iter_by_ref_ty_place = iter_by_ref_operand(&iter_by_ref_terminator, tcx)
             .or_else(|| into_iter_operand(&iter_by_ref_terminator, tcx))?;
         iterator_subject_place = iter_by_ref_ty_place;
-        iterator_subject_bb = iter_by_ref_bb;
+        iterator_subject_block = iter_by_ref_block;
     }
 
-    Some((iterator_subject_place, iterator_subject_bb))
+    Some((iterator_subject_place, iterator_subject_block))
 }
 
 // Tracks place and basic block for the innermost "non-growing" `Iterator` adapter operand/arg (if any).
@@ -853,15 +1087,15 @@ fn track_size_invariant_iterator_transformations<'tcx>(
             basic_blocks,
             dominators,
         );
-        let Some((adapter_arg_place, adapter_bb)) =
-            adapter_def_call.and_then(|(terminator, bb)| {
-                iterator_adapter_operand(&terminator, tcx).map(|place| (place, bb))
+        let Some((adapter_arg_place, adapter_block)) =
+            adapter_def_call.and_then(|(terminator, block)| {
+                iterator_adapter_operand(&terminator, tcx).map(|place| (place, block))
             })
         else {
             return;
         };
         *iterator_place = adapter_arg_place;
-        *parent_block = adapter_bb;
+        *parent_block = adapter_block;
     }
 }
 
@@ -907,6 +1141,33 @@ fn is_iter_by_ref_ty(ty: Ty, tcx: TyCtxt) -> bool {
     ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
         let adt_def_id = adt_def.did();
         matches!(tcx.item_name(adt_def_id).as_str(), "Iter" | "IterMut")
+            && matches!(tcx.crate_name(adt_def_id.krate).as_str(), "core" | "std")
+    })
+}
+
+/// Returns true if the type `Iterator` chain adapter (i.e. `std::iter::Chain`).
+fn is_iter_chain_ty(ty: Ty, tcx: TyCtxt) -> bool {
+    ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
+        let adt_def_id = adt_def.did();
+        tcx.item_name(adt_def_id).as_str() == "Chain"
+            && matches!(tcx.crate_name(adt_def_id.krate).as_str(), "core" | "std")
+    })
+}
+
+/// Returns true if the type is `std::iter::Once`.
+fn is_iter_once_ty(ty: Ty, tcx: TyCtxt) -> bool {
+    ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
+        let adt_def_id = adt_def.did();
+        tcx.item_name(adt_def_id).as_str() == "Once"
+            && matches!(tcx.crate_name(adt_def_id.krate).as_str(), "core" | "std")
+    })
+}
+
+/// Returns true if the type is `std::iter::Empty`.
+fn is_iter_empty_ty(ty: Ty, tcx: TyCtxt) -> bool {
+    ty.peel_refs().ty_adt_def().is_some_and(|adt_def| {
+        let adt_def_id = adt_def.did();
+        tcx.item_name(adt_def_id).as_str() == "Empty"
             && matches!(tcx.crate_name(adt_def_id.krate).as_str(), "core" | "std")
     })
 }

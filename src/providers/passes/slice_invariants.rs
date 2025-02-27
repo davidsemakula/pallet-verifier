@@ -255,9 +255,9 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                 self.tcx,
             ) {
                 self.annotations.extend(
-                    locations
-                        .clone()
-                        .map(|location| Annotation::Isize(location, cond_op, invariant_place)),
+                    locations.clone().map(|location| {
+                        Annotation::new_isize_max(location, cond_op, invariant_place)
+                    }),
                 );
             }
 
@@ -386,7 +386,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             slice_deref_arg_place.ty(self.local_decls, self.tcx).ty,
             self.tcx,
         ) {
-            self.annotations.push(Annotation::Isize(
+            self.annotations.push(Annotation::new_isize_max(
                 annotation_location,
                 cond_op,
                 *destination,
