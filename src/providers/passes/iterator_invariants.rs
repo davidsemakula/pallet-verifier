@@ -169,7 +169,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         destination: &Place<'tcx>,
         location: Location,
     ) {
-        // Finds place for `std::iter::Iterator::next` operand/arg.
+        // Finds place for `Iterator::next` operand/arg.
         let iterator_next_arg = args.first().expect("Expected an arg for `Iterator::next`");
         let Some(iterator_next_arg_place) = iterator_next_arg.node.place() else {
             return;
@@ -178,52 +178,81 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Finds place and basic block (if any) of innermost iterator subject to which
         // no "growing" iterator adapters are applied.
         let dominators = self.basic_blocks.dominators();
-        let Some((mut iterator_subject_place, mut iterator_subject_bb)) =
-            size_invariant_iterator_subject(
-                iterator_next_arg_place,
-                location.block,
-                self.basic_blocks,
-                self.local_decls,
-                dominators,
-                self.tcx,
-            )
-        else {
-            return;
-        };
-
-        // Finds place and basic block for slice `Deref` operand/arg (if any).
-        if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
-            let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
-                iterator_subject_place,
-                iterator_subject_bb,
-                location.block,
-                self.basic_blocks,
-                dominators,
-                self.tcx,
-            ) else {
-                return;
-            };
-            iterator_subject_place = slice_deref_arg_place;
-            iterator_subject_bb = slice_deref_bb;
-        }
-
-        // Only continues if `Iterator` target either has a length/size with `isize::MAX` maxima,
-        // or has a known length/size returning function and is passed by reference.
-        let is_isize_bound =
-            analyze::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx);
-        let len_bound_info = analyze::borrowed_collection_len_call_info(
-            iterator_subject_place,
-            iterator_subject_bb,
+        let (iterator_subjects, n_empty_subjects) = size_invariant_iterator_subjects_by_chain(
+            iterator_next_arg_place,
+            location.block,
             self.basic_blocks,
             self.local_decls,
+            dominators,
             self.tcx,
         );
-        if !is_isize_bound && len_bound_info.is_none() {
+        if iterator_subjects.is_empty() {
+            return;
+        }
+
+        // Determines annotations for `Iterator::next`/loop invariants based on bounds for
+        // collection length/size and index increment operations (if any).
+        let mut upper_bound = UpperBound::new_usize();
+        let mut len_bound_info = None;
+        let n_non_empty_chains = iterator_subjects.len() - n_empty_subjects;
+        for (iterator_subject, mut iterator_subject_block) in iterator_subjects {
+            // Unwraps the subject place (if any),
+            // or sets the upper bound to zero if subject is `std::iter::Empty`.
+            let mut iterator_subject_place = match iterator_subject {
+                IterSubject::Place(place) => place,
+                IterSubject::Empty => {
+                    upper_bound.zero();
+                    continue;
+                }
+            };
+
+            // Finds place and basic block for slice `Deref` operand/arg (if any).
+            if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
+                let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
+                    iterator_subject_place,
+                    iterator_subject_block,
+                    location.block,
+                    self.basic_blocks,
+                    dominators,
+                    self.tcx,
+                ) else {
+                    return;
+                };
+                iterator_subject_place = slice_deref_arg_place;
+                iterator_subject_block = slice_deref_bb;
+            }
+
+            // Updates upper bound (if appropriate).
+            let iterator_subject_ty = self.place_ty(iterator_subject_place);
+            if analyze::is_isize_bound_collection(iterator_subject_ty, self.tcx) {
+                upper_bound.increase(utils::target_isize_max());
+            } else if is_iter_once_ty(iterator_subject_ty, self.tcx) {
+                upper_bound.increase(1);
+            } else {
+                // NOTE: Any further upper bound updates will be ignored after this.
+                upper_bound.invalidate();
+            }
+
+            // Updates collection length/size method info (if appropriate).
+            if n_non_empty_chains == 1 {
+                len_bound_info = analyze::borrowed_collection_len_call_info(
+                    iterator_subject_place,
+                    iterator_subject_block,
+                    self.basic_blocks,
+                    self.local_decls,
+                    self.tcx,
+                );
+            }
+        }
+
+        // Only continues if iterator subject either has a length/size known upper bound (e.g. `isize::MAX`),
+        // or has a known length/size returning method, and is passed by reference.
+        if upper_bound.is_none() && len_bound_info.is_none() {
             return;
         }
 
         // Collects all recurring/loop blocks and reachable immediate loop successor blocks (if any),
-        // using the block containing the `std::iter::Iterator::next` call as the anchor block.
+        // using the block containing the `Iterator::next` call as the anchor block.
         let loop_blocks = collect_loop_blocks(location.block, self.basic_blocks, dominators);
         if loop_blocks.is_empty() {
             return;
@@ -232,11 +261,11 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             collect_reachable_loop_successors(location.block, &loop_blocks, self.basic_blocks);
 
         // Composes annotations for loop invariants based on collection length/size bounds,
-        // and indice increment operations.
+        // and index increment operations.
         let mut pre_loop_len_maxima_places = FxHashSet::default();
-        for bb in &loop_blocks {
-            let bb_data = &self.basic_blocks[*bb];
-            for (stmt_idx, stmt) in bb_data.statements.iter().enumerate() {
+        for block in &loop_blocks {
+            let block_data = &self.basic_blocks[*block];
+            for (stmt_idx, stmt) in block_data.statements.iter().enumerate() {
                 let inc_invariant_places = unit_incr_assign_places(stmt).filter(|(_, op_place)| {
                     is_zero_initialized_before_anchor(
                         *op_place,
@@ -254,15 +283,16 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     )
                 });
                 if let Some((_, op_place)) = inc_invariant_places {
-                    // Declares an `isize::MAX` bound annotation.
-                    if is_isize_bound {
-                        self.annotations.push(Annotation::new_isize_max(
+                    // Declares an upper bound annotation.
+                    if let Some(upper_bound) = upper_bound.value() {
+                        self.annotations.push(Annotation::new_const_max(
                             Location {
-                                block: *bb,
+                                block: *block,
                                 statement_index: stmt_idx,
                             },
                             CondOp::Lt,
                             op_place,
+                            upper_bound,
                         ));
                     }
 
@@ -277,12 +307,12 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Composes collection length/size bound annotations for reachable loop successors (if any).
         if !loop_successors.is_empty() && !pre_loop_len_maxima_places.is_empty() {
             if let Some((collection_place, region, len_call_info)) = len_bound_info {
-                for bb in loop_successors {
+                for block in &loop_successors {
                     for len_maxima_place in &pre_loop_len_maxima_places {
                         // Declares a collection length/size bound annotation.
                         self.annotations.push(Annotation::Len(
                             Location {
-                                block: bb,
+                                block: *block,
                                 statement_index: 0,
                             },
                             CondOp::Lt,
@@ -512,7 +542,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         target: Option<&BasicBlock>,
         location: Location,
     ) {
-        // Finds place for `std::iter::Iterator::count` operand/arg.
+        // Finds place for `Iterator::count` operand/arg.
         let iterator_count_arg = args.first().expect("Expected an arg for `Iterator::count`");
         let Some(iterator_count_arg_place) = iterator_count_arg.node.place() else {
             return;
@@ -538,37 +568,22 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         }
 
-        // Determines max bound annotations for count return place (i.e. the terminator destination).
+        // Determines max bound annotations for `Iterator::count` return place
+        // (i.e. the terminator destination).
         let annotation_location = Location {
             block: *target,
             statement_index: 0,
         };
         let cond_op = CondOp::Le;
-        let mut upper_bound = None;
+        let mut upper_bound = UpperBound::new_usize();
         let n_non_empty_chains = iterator_subjects.len() - n_empty_subjects;
-        let usize_max = utils::target_usize_max();
-        let safe_increase_bound = |current: Option<u128>, val: u128| {
-            if val > usize_max {
-                return None;
-            }
-            match current {
-                Some(current) if current <= usize_max && val <= (usize_max - current) => {
-                    Some(current + val)
-                }
-                None => Some(val),
-                _ => None,
-            }
-        };
-
         for (iterator_subject, mut iterator_subject_block) in iterator_subjects {
             // Unwraps the subject place (if any),
             // or sets the upper bound to zero if subject is `std::iter::Empty`.
             let mut iterator_subject_place = match iterator_subject {
                 IterSubject::Place(place) => place,
                 IterSubject::Empty => {
-                    if upper_bound.is_none() {
-                        upper_bound = Some(0);
-                    }
+                    upper_bound.zero();
                     continue;
                 }
             };
@@ -608,16 +623,15 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 iterator_subject_block = slice_deref_bb;
             }
 
-            // Updates known count upper bound (if appropriate).
+            // Updates upper bound (if appropriate).
             let iterator_subject_ty = self.place_ty(iterator_subject_place);
-            if analyze::is_isize_bound_collection(self.place_ty(iterator_subject_place), self.tcx) {
-                upper_bound = safe_increase_bound(upper_bound, utils::target_isize_max());
+            if analyze::is_isize_bound_collection(iterator_subject_ty, self.tcx) {
+                upper_bound.increase(utils::target_isize_max());
             } else if is_iter_once_ty(iterator_subject_ty, self.tcx) {
-                upper_bound = safe_increase_bound(upper_bound, 1);
+                upper_bound.increase(1);
             } else {
-                // Bails if any chain subject doesn't have a known constant upper bound.
-                upper_bound = None;
-                break;
+                // NOTE: Any further upper bound updates will be ignored after this.
+                upper_bound.invalidate();
             }
 
             // Declares a collection length/size bound annotation (if appropriate).
@@ -671,7 +685,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
 
         // Declares an upper bound annotation, if one was determined.
-        if let Some(upper_bound) = upper_bound {
+        if let Some(upper_bound) = upper_bound.value() {
             self.annotations.push(Annotation::new_const_max(
                 annotation_location,
                 cond_op,
@@ -829,6 +843,8 @@ impl<'tcx> Visitor<'tcx> for IteratorVisitor<'tcx, '_> {
 /// Returns places and basic blocks (if any) of innermost iterator subjects
 /// per iterator chain (if any) to which no "growing" iterator adapters are applied.
 ///
+/// **NOTE:** Also returns the number of empty subjects.
+///
 /// **NOTE:** This is similar to [`size_invariant_iterator_subject`] but applied to each chain.
 fn size_invariant_iterator_subjects_by_chain<'tcx>(
     iterator_arg_place: Place<'tcx>,
@@ -847,39 +863,37 @@ fn size_invariant_iterator_subjects_by_chain<'tcx>(
     let mut intermediate_subject_places = FxHashSet::default();
 
     // Handles chains (if any).
-    if is_iter_chain_ty(iterator_arg_place.ty(local_decls, tcx).ty, tcx) {
-        if let Some((first_arg_place, second_arg_place, chain_block)) = iter_chain_subjects(
-            iterator_arg_place,
-            anchor_block,
-            basic_blocks,
-            local_decls,
-            dominators,
-            tcx,
-        ) {
-            for iter_subject in [first_arg_place, second_arg_place] {
-                match iter_subject {
-                    IterSubject::Place(arg_place) => {
-                        if is_iter_chain_ty(arg_place.ty(local_decls, tcx).ty, tcx) {
-                            // Recurses to find more chain subjects.
-                            let res = size_invariant_iterator_subjects_by_chain(
-                                arg_place,
-                                chain_block,
-                                basic_blocks,
-                                local_decls,
-                                dominators,
-                                tcx,
-                            );
-                            results.extend(res.0);
-                            n_empty_subjects += res.1;
-                        } else {
-                            // May still be possible to unwrap "non-growing" adapters.
-                            intermediate_subject_places.insert((arg_place, chain_block));
-                        }
+    if let Some((first_arg_place, second_arg_place, chain_block)) = iter_chain_subjects(
+        iterator_arg_place,
+        anchor_block,
+        basic_blocks,
+        local_decls,
+        dominators,
+        tcx,
+    ) {
+        for iter_subject in [first_arg_place, second_arg_place] {
+            match iter_subject {
+                IterSubject::Place(arg_place) => {
+                    if is_iter_chain_ty(arg_place.ty(local_decls, tcx).ty, tcx) {
+                        // Recurses to find more chain subjects.
+                        let res = size_invariant_iterator_subjects_by_chain(
+                            arg_place,
+                            chain_block,
+                            basic_blocks,
+                            local_decls,
+                            dominators,
+                            tcx,
+                        );
+                        results.extend(res.0);
+                        n_empty_subjects += res.1;
+                    } else {
+                        // May still be possible to unwrap "non-growing" adapters.
+                        intermediate_subject_places.insert((arg_place, chain_block));
                     }
-                    IterSubject::Empty => {
-                        results.insert((IterSubject::Empty, chain_block));
-                        n_empty_subjects += 1;
-                    }
+                }
+                IterSubject::Empty => {
+                    results.insert((IterSubject::Empty, chain_block));
+                    n_empty_subjects += 1;
                 }
             }
         }
@@ -939,6 +953,9 @@ fn iter_chain_subjects<'tcx>(
     dominators: &Dominators<BasicBlock>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<(IterSubject<'tcx>, IterSubject<'tcx>, BasicBlock)> {
+    if !is_iter_chain_ty(iterator_arg_place.ty(local_decls, tcx).ty, tcx) {
+        return None;
+    }
     let (terminator, iterator_subject_block) = analyze::pre_anchor_assign_terminator(
         iterator_arg_place,
         anchor_block,
@@ -1494,4 +1511,82 @@ fn is_enumerate_index<'tcx>(
     }
 
     false
+}
+
+/// An upper bound.
+#[derive(Debug, Clone, Copy)]
+struct UpperBound {
+    /// Upper bound value.
+    value: Option<u128>,
+    /// Maximum possible value from the value domain (used for overflow protection).
+    max: u128,
+    /// When set to true, value is always return as None.
+    invalidated: bool,
+}
+
+impl UpperBound {
+    /// Creates new upper bound and sets a maxima that it shouldn't overflow.
+    pub fn new(value: Option<u128>, max: u128) -> Self {
+        Self {
+            value,
+            max,
+            invalidated: false,
+        }
+    }
+
+    /// Creates new unknown upper bound with a usize maxima.
+    pub fn new_usize() -> Self {
+        Self::new(None, utils::target_usize_max())
+    }
+
+    /// Increase the upper bound by value if it doesn't overflow the maximum value,
+    /// otherwise unsets it bound.
+    pub fn increase(&mut self, value: u128) {
+        if self.invalidated {
+            self.set(None);
+            return;
+        }
+        let new_bound = if value > self.max {
+            None
+        } else {
+            match self.value {
+                Some(current) if current <= self.max && value <= (self.max - current) => {
+                    Some(current + value)
+                }
+                None => Some(value),
+                _ => None,
+            }
+        };
+        self.set(new_bound);
+    }
+
+    /// Clears upper bound value and sets a flag for ignoring further updates.
+    pub fn invalidate(&mut self) {
+        self.value = None;
+        self.invalidated = true;
+    }
+
+    /// Returns upper bound value.
+    pub fn value(&self) -> Option<u128> {
+        if self.invalidated {
+            None
+        } else {
+            self.value
+        }
+    }
+
+    /// Returns `true` if upper bound value is a [`Option::None`].
+    pub fn is_none(&self) -> bool {
+        self.value.is_none()
+    }
+
+    /// Sets upper bound value to zero.
+    pub fn zero(&mut self) {
+        self.set(Some(0));
+    }
+
+    /// Sets upper bound value.
+    fn set(&mut self, value: Option<u128>) {
+        self.value = if self.invalidated { None } else { value }
+    }
 }
