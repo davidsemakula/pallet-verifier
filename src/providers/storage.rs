@@ -575,9 +575,6 @@ fn propagate_return_place_invariant<'tcx>(
     }
 }
 
-/// Env var for tracking propagated return place storage invariant.
-pub const ENV_STORAGE_INVARIANT_PREFIX: &str = "PALLET_VERIFIER_STORAGE_INVARIANT";
-
 /// Info needed to apply propagated return place storage invariants.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StorageInvariantEnv {
@@ -659,7 +656,10 @@ pub enum InvariantSource {
     IteratorPosition,
 }
 
-// Sets propagated storage invariant environment.
+/// Env var for tracking propagated return place storage invariant.
+const ENV_STORAGE_INVARIANT_PREFIX: &str = "PALLET_VERIFIER_STORAGE_INVARIANT";
+
+/// Sets propagated storage invariant environment.
 pub fn set_invariant_env(invariant_env: &StorageInvariantEnv) {
     let invariant_env_json =
         serde_json::to_string(invariant_env).expect("Expected serialized `StorageInvariantEnv`");

@@ -98,67 +98,69 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
     /// Analyzes and annotates `Iterator` terminators.
     fn process_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
-        if let TerminatorKind::Call {
+        let TerminatorKind::Call {
             func,
             args,
             destination,
             target,
             ..
         } = &terminator.kind
+        else {
+            return;
+        };
+
+        // Retrieves `fn` definition (if any).
+        let Some((def_id, ..)) = func.const_fn_def() else {
+            return;
+        };
+
+        // Handles calls to `std::iter::Iterator::next`.
+        let iterator_next_def_id = *self
+            .iterator_assoc_item_def_id("next")
+            .expect("Expected DefId for `std::iter::Iterator::next`");
+        if def_id == iterator_next_def_id {
+            self.process_iterator_next(args, destination, location);
+        }
+
+        // Handles calls to `std::iter::Iterator::position` and `std::iter::Iterator::rposition`.
+        let iterator_position_def_id = *self
+            .iterator_assoc_item_def_id("position")
+            .expect("Expected DefId for `std::iter::Iterator::position`");
+        let iterator_rposition_def_id = *self
+            .iterator_assoc_item_def_id("rposition")
+            .expect("Expected DefId for `std::iter::Iterator::rposition`");
+        if def_id == iterator_position_def_id || def_id == iterator_rposition_def_id {
+            self.process_iterator_position(args, destination, target.as_ref(), location);
+        }
+
+        // Handles calls to `std::iter::Iterator::count`.
+        let iterator_count_def_id = *self
+            .iterator_assoc_item_def_id("count")
+            .expect("Expected DefId for `std::iter::Iterator::count`");
+        if def_id == iterator_count_def_id {
+            self.process_iterator_count(args, destination, target.as_ref(), location);
+        }
+
+        // Handles calls to collection `len` methods.
+        if self
+            .tcx
+            .opt_item_name(def_id)
+            .is_some_and(|name| name.as_str() == "len")
+            && args.len() == 1
         {
-            // Retrieves `fn` definition (if any).
-            let Some((def_id, ..)) = func.const_fn_def() else {
-                return;
-            };
+            self.process_len(args, destination, target.as_ref());
+        }
 
-            // Handles calls to `std::iter::Iterator::next`.
-            let iterator_next_def_id = *self
-                .iterator_assoc_item_def_id("next")
-                .expect("Expected DefId for `std::iter::Iterator::next`");
-            if def_id == iterator_next_def_id {
-                self.process_iterator_next(args, destination, location);
-            }
-
-            // Handles calls to `std::iter::Iterator::position` and `std::iter::Iterator::rposition`.
-            let iterator_position_def_id = *self
-                .iterator_assoc_item_def_id("position")
-                .expect("Expected DefId for `std::iter::Iterator::position`");
-            let iterator_rposition_def_id = *self
-                .iterator_assoc_item_def_id("rposition")
-                .expect("Expected DefId for `std::iter::Iterator::rposition`");
-            if def_id == iterator_position_def_id || def_id == iterator_rposition_def_id {
-                self.process_iterator_position(args, destination, target.as_ref(), location);
-            }
-
-            // Handles calls to `std::iter::Iterator::count`.
-            let iterator_count_def_id = *self
-                .iterator_assoc_item_def_id("count")
-                .expect("Expected DefId for `std::iter::Iterator::count`");
-            if def_id == iterator_count_def_id {
-                self.process_iterator_count(args, destination, target.as_ref(), location);
-            }
-
-            // Handles calls to collection `len` methods.
-            if self
-                .tcx
-                .opt_item_name(def_id)
-                .is_some_and(|name| name.as_str() == "len")
-                && args.len() == 1
-            {
-                self.process_len(args, destination, target.as_ref());
-            }
-
-            // Handles propagated return place iterator (r)position invariants.
-            let storage_invariant_env = storage::find_invariant_env(def_id, self.tcx)
-                .filter(|invariant| invariant.source == InvariantSource::IteratorPosition);
-            if let Some(storage_invariant_env) = storage_invariant_env {
-                self.propagate_iterator_position_invariant_env(
-                    storage_invariant_env,
-                    destination,
-                    target.as_ref(),
-                    location,
-                );
-            }
+        // Handles propagated return place iterator (r)position invariants.
+        let storage_invariant_env = storage::find_invariant_env(def_id, self.tcx)
+            .filter(|invariant| invariant.source == InvariantSource::IteratorPosition);
+        if let Some(storage_invariant_env) = storage_invariant_env {
+            self.propagate_iterator_position_invariant_env(
+                storage_invariant_env,
+                destination,
+                target.as_ref(),
+                location,
+            );
         }
     }
 

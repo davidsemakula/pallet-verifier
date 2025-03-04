@@ -77,51 +77,53 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
 
     /// Analyzes and annotates slice terminators.
     fn process_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
-        if let TerminatorKind::Call {
+        let TerminatorKind::Call {
             func,
             args,
             destination,
             target,
             ..
         } = &terminator.kind
-        {
-            // Retrieves `fn` definition (if any).
-            let Some((def_id, ..)) = func.const_fn_def() else {
-                return;
-            };
+        else {
+            return;
+        };
 
-            // Handles slice associated fns.
-            if analyze::is_slice_assoc_item(def_id, self.tcx) {
-                // Handles calls to slice `binary_search` methods.
-                if self.tcx.opt_item_name(def_id).is_some_and(|name| {
-                    matches!(
-                        name.as_str(),
-                        "binary_search" | "binary_search_by" | "binary_search_by_key"
-                    )
-                }) {
-                    self.process_binary_search(args, destination, target.as_ref(), location);
-                }
+        // Retrieves `fn` definition (if any).
+        let Some((def_id, ..)) = func.const_fn_def() else {
+            return;
+        };
 
-                // Handles calls to `[T]::partition_point` methods.
-                if self
-                    .tcx
-                    .opt_item_name(def_id)
-                    .is_some_and(|name| name.as_str() == "partition_point")
-                {
-                    self.process_partition_point(args, destination, target.as_ref(), location);
-                }
-            } else {
-                // Handles propagated return place storage binary search invariants.
-                let storage_invariant_env = storage::find_invariant_env(def_id, self.tcx)
-                    .filter(|invariant| invariant.source == InvariantSource::SliceBinarySearch);
-                if let Some(storage_invariant_env) = storage_invariant_env {
-                    self.propagate_storage_binary_search_invariant_env(
-                        storage_invariant_env,
-                        destination,
-                        target.as_ref(),
-                        location,
-                    );
-                }
+        // Handles slice associated fns.
+        if analyze::is_slice_assoc_item(def_id, self.tcx) {
+            // Handles calls to slice `binary_search` methods.
+            if self.tcx.opt_item_name(def_id).is_some_and(|name| {
+                matches!(
+                    name.as_str(),
+                    "binary_search" | "binary_search_by" | "binary_search_by_key"
+                )
+            }) {
+                self.process_binary_search(args, destination, target.as_ref(), location);
+            }
+
+            // Handles calls to `[T]::partition_point` methods.
+            if self
+                .tcx
+                .opt_item_name(def_id)
+                .is_some_and(|name| name.as_str() == "partition_point")
+            {
+                self.process_partition_point(args, destination, target.as_ref(), location);
+            }
+        } else {
+            // Handles propagated return place storage binary search invariants.
+            let storage_invariant_env = storage::find_invariant_env(def_id, self.tcx)
+                .filter(|invariant| invariant.source == InvariantSource::SliceBinarySearch);
+            if let Some(storage_invariant_env) = storage_invariant_env {
+                self.propagate_storage_binary_search_invariant_env(
+                    storage_invariant_env,
+                    destination,
+                    target.as_ref(),
+                    location,
+                );
             }
         }
     }

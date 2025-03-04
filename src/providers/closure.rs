@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Env var for tracking propagated invariant environment for closure.
-pub const ENV_CLOSURE_INVARIANT_PREFIX: &str = "PALLET_VERIFIER_CLOSURE_INVARIANT";
+const ENV_CLOSURE_INVARIANT_PREFIX: &str = "PALLET_VERIFIER_CLOSURE_INVARIANT";
 
 /// Info needed to apply propagated invariants to a closure's MIR.
 #[derive(Debug, Serialize, Deserialize)]
@@ -251,7 +251,7 @@ fn closure_invariant_env_key(def_hash: &str) -> String {
     format!("{ENV_CLOSURE_INVARIANT_PREFIX}_{def_hash}")
 }
 
-// Sets propagated invariant environment for closure.
+/// Sets propagated invariant environment for closure.
 pub fn set_invariant_env(invariant_env: &ClosureInvariantEnv) {
     let invariant_env_json =
         serde_json::to_string(invariant_env).expect("Expected serialized `ClosureInvariantEnv`");

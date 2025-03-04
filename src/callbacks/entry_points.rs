@@ -1,6 +1,5 @@
 //! `rustc` callbacks and utilities for generating tractable "entry points"
-//! for dispatchable functions/extrinsics and public associated functions of inherent implementations
-//! of FRAME pallets.
+//! for dispatchable functions/extrinsics and public associated functions of FRAME pallets.
 //!
 //! See [`EntryPointsCallbacks`] doc.
 
@@ -37,8 +36,7 @@ use owo_colors::OwoColorize;
 use crate::{providers, utils, CallKind, EntrysPointInfo, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks and utilities for generating tractable "entry points"
-/// for dispatchable functions/extrinsics and public associated functions of inherent implementations
-/// of FRAME pallets.
+/// for dispatchable functions/extrinsics and public associated functions of FRAME pallets.
 ///
 /// Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#entry-points>
 ///
