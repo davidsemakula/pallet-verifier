@@ -77,6 +77,14 @@ pub mod core {
                 }
             }
         }
+
+        pub mod traits {
+            pub mod iterator {
+                pub mod Iterator {
+                    // DO NOT REMOVE: Specialized iterator summaries are inserted here.
+                }
+            }
+        }
     }
 
     pub mod ops {

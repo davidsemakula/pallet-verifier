@@ -1,15 +1,84 @@
 //! Common analysis utilities.
 
 use rustc_ast::MetaItemInner;
+use rustc_errors::DiagCtxtHandle;
 use rustc_hir::{def_id::CrateNum, HirId};
 use rustc_middle::ty::{GenericArg, List, TyCtxt};
 use rustc_span::{def_id::DefId, Symbol};
 
-use std::env;
+use std::{env, process};
 
-use crate::ENV_TARGET_POINTER_WIDTH;
+use itertools::Itertools;
+
+use crate::{
+    EntryPointInfo, EntryPointsInfo, ResolvedEntryPoint, ENTRY_POINT_FN_PREFIX,
+    ENV_TARGET_POINTER_WIDTH,
+};
 
 pub const HOST_POINTER_WIDTH: usize = std::mem::size_of::<usize>() * 8;
+
+/// Resolves generated entry points.
+///
+/// # Panics
+///
+/// Panics with a compiler diagostic message when failing to resolve an entry point.
+pub fn resolve_entry_points(
+    entry_points: &EntryPointsInfo,
+    tcx: TyCtxt,
+    dcx: DiagCtxtHandle,
+) -> Vec<ResolvedEntryPoint> {
+    try_resolve_entry_points(entry_points, tcx)
+        .process_results(|processor| processor.collect())
+        .unwrap_or_else(|entry_point_info| {
+            let mut error = dcx.struct_err(format!(
+                "Couldn't find definition for {}: `{}`",
+                entry_point_info.call_kind,
+                entry_point_info.name.replace(ENTRY_POINT_FN_PREFIX, "")
+            ));
+            error.note("This is most likely a bug in pallet-verifier.");
+            error.help(
+                "Please consider filling a bug report at \
+            https://github.com/davidsemakula/pallet-verifier/issues",
+            );
+            error.emit();
+            process::exit(rustc_driver::EXIT_FAILURE)
+        })
+}
+
+/// Resolves generated entry points.
+pub fn try_resolve_entry_points<'compilation, 'tcx>(
+    entry_points: &'compilation EntryPointsInfo,
+    tcx: TyCtxt<'tcx>,
+) -> impl Iterator<Item = Result<ResolvedEntryPoint, EntryPointInfo<'compilation>>>
+       + use<'tcx, 'compilation> {
+    tcx.hir().body_owners().filter_map(move |local_def_id| {
+        tcx.opt_item_name(local_def_id.to_def_id())
+            .and_then(|def_name| {
+                entry_points
+                    .iter()
+                    .find_map(|(name, (target_hash, call_kind))| {
+                        if name != def_name.as_str() {
+                            return None;
+                        }
+                        let callee_def_id = tcx.def_path_hash_to_def_id(*target_hash);
+                        match callee_def_id {
+                            Some(callee_def_id) => callee_def_id.as_local().map(|callee_def_id| {
+                                Ok(ResolvedEntryPoint {
+                                    def_id: local_def_id,
+                                    callee_def_id,
+                                    call_kind: *call_kind,
+                                })
+                            }),
+                            None => Some(Err(EntryPointInfo {
+                                name: name.as_str(),
+                                callee_def_hash: target_hash,
+                                call_kind: *call_kind,
+                            })),
+                        }
+                    })
+            })
+    })
+}
 
 /// Returns the target pointer size in bits.
 pub fn target_pointer_width() -> usize {

@@ -27,9 +27,9 @@ use cli_utils::{
     ARG_DEP_FEATURES, ARG_POINTER_WIDTH, ENV_DEP_RENAMES, ENV_OPTIONAL_DEPS, HOOKS,
 };
 use pallet_verifier::{
-    DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntrysPointInfo,
-    VerifierCallbacks, VirtualFileLoader, VirtualFileLoaderBuilder, CONTRACTS_MOD_NAME,
-    ENTRY_POINTS_MOD_NAME,
+    DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntryPointsInfo,
+    SummariesCallbacks, VerifierCallbacks, VirtualFileLoader, VirtualFileLoaderBuilder,
+    CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
 };
 
 const COMMAND: &str = "pallet-verifier";
@@ -159,6 +159,20 @@ fn main() {
         }
     };
 
+    // Generates specialized "summaries" for FRAME pallet (if necessary).
+    let summaries = match generate_specialized_summaries(
+        &args,
+        entry_points_content.clone(),
+        &entry_points_info,
+    ) {
+        Ok(res) => res,
+        Err(exit_code) => {
+            // Exit if specialized "summaries" generation failed,
+            // presumably, the compiler already emitted an error in this case.
+            exit(exit_code)
+        }
+    };
+
     // Analyzes FRAME pallet with MIRAI.
     // Enables compilation of MIRAI only code.
     args.extend([
@@ -169,6 +183,7 @@ fn main() {
         &args,
         entry_points_content,
         &entry_points_info,
+        &summaries,
         allow_hook_panics,
     ));
 }
@@ -177,7 +192,7 @@ fn main() {
 ///
 /// Returns a tuple of the raw entry point content (as a `String`),
 /// as well some entry points metadata (as [`EntryPointsInfo`]) if successful.
-fn generate_entry_points(args: &[String]) -> Result<(String, EntrysPointInfo), i32> {
+fn generate_entry_points(args: &[String]) -> Result<(String, EntryPointsInfo), i32> {
     let dep_renames = env::var(ENV_DEP_RENAMES).ok().and_then(|dep_renames_json| {
         serde_json::from_str::<rustc_hash::FxHashMap<String, String>>(&dep_renames_json).ok()
     });
@@ -202,14 +217,14 @@ fn generate_entry_points(args: &[String]) -> Result<(String, EntrysPointInfo), i
     }
 }
 
-/// Analyzes FRAME pallet with MIRAI.
-fn analyze_with_mirai(
+/// Analyzes FRAME pallet to generate specialized "contracts" used to "summarize" calls
+/// that require knowledge of the calling context.
+fn generate_specialized_summaries(
     args: &[String],
     entry_points_content: String,
-    entry_points_info: &EntrysPointInfo,
-    allow_hook_panics: Option<FxHashSet<String>>,
-) -> i32 {
-    let mut callbacks = VerifierCallbacks::new(entry_points_info, allow_hook_panics);
+    entry_points_info: &EntryPointsInfo,
+) -> Result<FxHashSet<String>, i32> {
+    let mut callbacks = SummariesCallbacks::new(entry_points_info);
     let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(
@@ -217,11 +232,43 @@ fn analyze_with_mirai(
         &[
             // Adds generated entry points.
             (ENTRY_POINTS_MOD_NAME, entry_points_content),
+        ],
+        true,
+    );
+    compiler.set_file_loader(Some(Box::new(file_loader)));
+    match run_compiler(compiler) {
+        // Returns entry point content if compilation was successful (and entry points were generated).
+        EXIT_SUCCESS => Ok(callbacks.summaries),
+        exit_code => Err(exit_code),
+    }
+}
+
+/// Analyzes FRAME pallet with MIRAI.
+fn analyze_with_mirai(
+    args: &[String],
+    entry_points_content: String,
+    entry_points_info: &EntryPointsInfo,
+    summaries: &FxHashSet<String>,
+    allow_hook_panics: Option<FxHashSet<String>>,
+) -> i32 {
+    let mut callbacks = VerifierCallbacks::new(entry_points_info, allow_hook_panics);
+    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
+    let target_path = analysis_target_path(args);
+    let mut contracts = include_str!("../artifacts/contracts.rs").to_owned();
+    if !summaries.is_empty() {
+        let summaries_str = summaries.iter().join("\n");
+        contracts = contracts.replace(
+            "// DO NOT REMOVE: Specialized iterator summaries are inserted here.",
+            &summaries_str,
+        );
+    }
+    let file_loader = analysis_file_loader(
+        target_path,
+        &[
+            // Adds generated entry points.
+            (ENTRY_POINTS_MOD_NAME, entry_points_content),
             // Adds MIRAI contracts for FRAME/Substrate functions.
-            (
-                CONTRACTS_MOD_NAME,
-                include_str!("../artifacts/contracts.rs").to_owned(),
-            ),
+            (CONTRACTS_MOD_NAME, contracts),
         ],
         true,
     );

@@ -1,9 +1,12 @@
 //! `rustc` callbacks for analyzing FRAME pallets.
 
 mod entry_points;
+mod summaries;
 mod verifier;
 
-pub use {entry_points::EntryPointsCallbacks, verifier::VerifierCallbacks};
+pub use {
+    entry_points::EntryPointsCallbacks, summaries::SummariesCallbacks, verifier::VerifierCallbacks,
+};
 
 use rustc_middle::query;
 

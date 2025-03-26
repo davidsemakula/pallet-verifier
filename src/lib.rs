@@ -39,8 +39,12 @@ mod file_loader;
 mod providers;
 mod utils;
 
+use rustc_hash::FxHashMap;
+use rustc_span::def_id::{DefPathHash, LocalDefId};
+
 pub use callbacks::{
-    DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, VerifierCallbacks,
+    DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, SummariesCallbacks,
+    VerifierCallbacks,
 };
 pub use file_loader::{VirtualFileLoader, VirtualFileLoaderBuilder};
 
@@ -55,14 +59,33 @@ pub const CONTRACTS_MOD_NAME: &str = "foreign_contracts";
 /// Tracks pointer width for target execution environment.
 pub const ENV_TARGET_POINTER_WIDTH: &str = "PALLET_VERIFIER_TARGET_POINTER_WIDTH";
 
-use rustc_hash::FxHashMap;
-use rustc_span::def_id::DefPathHash;
+/// Map from generated entry point function names to a stable `DefPathHash` of
+/// target pallet function (i.e. the "callee") and it's [`CallKind`].
+pub type EntryPointsInfo = FxHashMap<String, (DefPathHash, CallKind)>;
 
-/// Map from generated entry point `fn` names to a stable `DefPathHash` of the target pallet `fn`
-/// and it's [`CallKind`].
-pub type EntrysPointInfo = FxHashMap<String, (DefPathHash, CallKind)>;
+/// Convenience type for info needed to resolve a generated entry point.
+#[derive(Debug, Clone, Copy)]
+pub struct EntryPointInfo<'compilation> {
+    /// Name of entry point.
+    pub name: &'compilation str,
+    /// Stable `DefPathHash` of target pallet function (i.e. the "callee").
+    pub callee_def_hash: &'compilation DefPathHash,
+    /// Kind of pallet function (see [`CallKind`]).
+    pub call_kind: CallKind,
+}
 
-/// Kind of pallet `fn`.
+/// Convenience type for info returned when a generated entry point is resolved.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedEntryPoint {
+    /// `LocalDefId` of entry point.
+    pub def_id: LocalDefId,
+    /// `LocalDefId` of target pallet function (i.e. the "callee").
+    pub callee_def_id: LocalDefId,
+    /// Kind of pallet function (see [`CallKind`]).
+    pub call_kind: CallKind,
+}
+
+/// Kind of pallet function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallKind {
     /// Associated functions of a `#[pallet::call]` annotated `impl` block.

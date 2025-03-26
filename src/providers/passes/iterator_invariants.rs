@@ -10,7 +10,7 @@ use rustc_middle::{
         LocalDecls, Location, Operand, Place, PlaceElem, Rvalue, Statement, StatementKind,
         Terminator, TerminatorKind, RETURN_PLACE,
     },
-    ty::{Ty, TyCtxt, TyKind},
+    ty::{GenericArgsRef, Ty, TyCtxt, TyKind},
 };
 use rustc_span::{def_id::DefId, source_map::Spanned, Symbol};
 use rustc_type_ir::UintTy;
@@ -29,6 +29,7 @@ use crate::{
             self, InvariantSource, PropagatedVariant, StorageId, StorageInvariant,
             StorageInvariantEnv,
         },
+        summaries,
     },
     utils,
 };
@@ -110,7 +111,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         };
 
         // Retrieves `fn` definition (if any).
-        let Some((def_id, ..)) = func.const_fn_def() else {
+        let Some((def_id, gen_args)) = func.const_fn_def() else {
             return;
         };
 
@@ -138,7 +139,14 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             .iterator_assoc_item_def_id("count")
             .expect("Expected DefId for `std::iter::Iterator::count`");
         if def_id == iterator_count_def_id {
-            self.process_iterator_count(args, destination, target.as_ref(), location);
+            self.process_iterator_count(
+                def_id,
+                args,
+                destination,
+                target.as_ref(),
+                location,
+                gen_args,
+            );
         }
 
         // Handles calls to collection `len` methods.
@@ -539,10 +547,12 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
     /// Analyzes and annotates calls to `std::iter::Iterator::count`.
     fn process_iterator_count(
         &mut self,
+        def_id: DefId,
         args: &[Spanned<Operand<'tcx>>],
         destination: &Place<'tcx>,
         target: Option<&BasicBlock>,
         location: Location,
+        gen_args: GenericArgsRef<'tcx>,
     ) {
         // Finds place for `Iterator::count` operand/arg.
         let iterator_count_arg = args.first().expect("Expected an arg for `Iterator::count`");
@@ -694,6 +704,9 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 *destination,
                 upper_bound,
             ));
+
+            // Adds specialized summary for `Iterator::count` subject.
+            summaries::add_summary_target(self.def_id, def_id, gen_args, self.tcx);
         }
     }
 

@@ -33,7 +33,7 @@ use rustc_span::{
 use itertools::Itertools;
 use owo_colors::OwoColorize;
 
-use crate::{providers, utils, CallKind, EntrysPointInfo, ENTRY_POINT_FN_PREFIX};
+use crate::{providers, utils, CallKind, EntryPointsInfo, ENTRY_POINT_FN_PREFIX};
 
 /// `rustc` callbacks and utilities for generating tractable "entry points"
 /// for dispatchable functions/extrinsics and public associated functions of FRAME pallets.
@@ -408,7 +408,7 @@ use crate::*;
 
     /// Returns a map from generated entry point `fn` names to a stable `DefPathHash` of the
     /// target pallet `fn` and it's [`CallKind`].
-    pub fn entry_points_info(&self) -> EntrysPointInfo {
+    pub fn entry_points_info(&self) -> EntryPointsInfo {
         self.entry_points
             .iter()
             .map(|(name, (_, hash, call_kind))| (name.to_owned(), (*hash, *call_kind)))

@@ -5,6 +5,7 @@ mod annotate;
 mod closure;
 mod passes;
 mod storage;
+pub mod summaries;
 
 use rustc_hir::def::DefKind;
 use rustc_middle::{mir::Body, ty::TyCtxt, util::Providers};

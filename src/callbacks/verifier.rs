@@ -14,7 +14,7 @@ use rustc_span::{
     ExpnData, ExpnKind, MacroKind, Span, Symbol,
 };
 
-use std::{cell::RefCell, collections::HashMap, process, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use itertools::Itertools;
 use mirai::{
@@ -25,20 +25,18 @@ use mirai::{
 use owo_colors::OwoColorize;
 use tempfile::TempDir;
 
-use crate::{
-    providers, utils, CallKind, EntrysPointInfo, CONTRACTS_MOD_NAME, ENTRY_POINT_FN_PREFIX,
-};
+use crate::{providers, utils, CallKind, EntryPointsInfo, CONTRACTS_MOD_NAME};
 
 /// `rustc` callbacks for analyzing FRAME pallet with MIRAI.
 pub struct VerifierCallbacks<'compilation> {
-    entry_points: &'compilation EntrysPointInfo,
+    entry_points: &'compilation EntryPointsInfo,
     mirai_config: Option<MiraiConfig>,
     allow_hook_panics: Option<FxHashSet<String>>,
 }
 
 impl<'compilation> VerifierCallbacks<'compilation> {
     pub fn new(
-        entry_points: &'compilation EntrysPointInfo,
+        entry_points: &'compilation EntryPointsInfo,
         allow_hook_panics: Option<FxHashSet<String>>,
     ) -> Self {
         Self {
@@ -179,7 +177,7 @@ impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
             }
         }
 
-        // Finds and analyzes the generated entry points.
+        // Resolves and analyzes the generated entry points.
         let mut dispatchable_entry_points = Vec::new();
         let mut hook_entry_points = Vec::new();
         let mut pub_assoc_fn_entry_points = Vec::new();
@@ -224,47 +222,22 @@ impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
                     );
                 }
             };
-        for local_def_id in hir.body_owners() {
-            let entry_point_info =
-                tcx.opt_item_name(local_def_id.to_def_id())
-                    .and_then(|def_name| {
-                        self.entry_points
-                            .iter()
-                            .find_map(|(name, (target_hash, call_kind))| {
-                                if name == def_name.as_str() {
-                                    let Some(callee_def_id) =
-                                        tcx.def_path_hash_to_def_id(*target_hash)
-                                    else {
-                                        let mut error = compiler.sess.dcx().struct_err(format!(
-                                            "Couldn't find definition for {call_kind}: `{}`",
-                                            def_name.as_str().replace(ENTRY_POINT_FN_PREFIX, "")
-                                        ));
-                                        error.note("This is most likely a bug in pallet-verifier.");
-                                        error.help(
-                                            "Please consider filling a bug report at \
-                                        https://github.com/davidsemakula/pallet-verifier/issues",
-                                        );
-                                        error.emit();
-                                        process::exit(rustc_driver::EXIT_FAILURE)
-                                    };
-                                    callee_def_id
-                                        .as_local()
-                                        .map(|callee_def_id| (callee_def_id, call_kind))
-                                } else {
-                                    None
-                                }
-                            })
-                    });
-            if let Some((callee_def_id, call_kind)) = entry_point_info {
-                let fn_name = tcx.item_name(callee_def_id.to_def_id());
-                let trait_name = utils::assoc_item_parent_trait(callee_def_id.to_def_id(), tcx)
+        let entry_points = utils::resolve_entry_points(self.entry_points, tcx, compiler.sess.dcx());
+        for entry_point in entry_points {
+            let fn_name = tcx.item_name(entry_point.callee_def_id.to_def_id());
+            let trait_name =
+                utils::assoc_item_parent_trait(entry_point.callee_def_id.to_def_id(), tcx)
                     .map(|trait_def_id| tcx.def_path_str(trait_def_id));
-                let info = (local_def_id, callee_def_id, fn_name, trait_name);
-                match call_kind {
-                    CallKind::Dispatchable => dispatchable_entry_points.push(info),
-                    CallKind::Hook => hook_entry_points.push(info),
-                    CallKind::PubAssocFn => pub_assoc_fn_entry_points.push(info),
-                }
+            let info = (
+                entry_point.def_id,
+                entry_point.callee_def_id,
+                fn_name,
+                trait_name,
+            );
+            match entry_point.call_kind {
+                CallKind::Dispatchable => dispatchable_entry_points.push(info),
+                CallKind::Hook => hook_entry_points.push(info),
+                CallKind::PubAssocFn => pub_assoc_fn_entry_points.push(info),
             }
         }
 
