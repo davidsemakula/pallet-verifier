@@ -245,14 +245,14 @@ fn fixtures() -> Vec<FixtureGroup> {
                 expected_results: HashMap::from([
                     (
                         Call::new_dispatchable("approve_as_multi".to_owned()),
-                        vec![ExpectedDiagostic {
+                        vec![ExpectedDiagnostic {
                             message: "possible attempt to cast with overflow",
                             location: "src/lib.rs:545",
                         }],
                     ),
                     (
                         Call::new_dispatchable("as_multi".to_owned()),
-                        vec![ExpectedDiagostic {
+                        vec![ExpectedDiagnostic {
                             message: "possible attempt to cast with overflow",
                             location: "src/lib.rs:545",
                         }],
@@ -283,14 +283,14 @@ fn fixtures() -> Vec<FixtureGroup> {
                 expected_results: HashMap::from([
                     (
                         Call::new_dispatchable("unnote_preimage".to_owned()),
-                        vec![ExpectedDiagostic {
+                        vec![ExpectedDiagnostic {
                             message: "possible preimage request counter at zero?",
                             location: "src/lib.rs:439",
                         }],
                     ),
                     (
                         Call::new_dispatchable("unrequest_preimage".to_owned()),
-                        vec![ExpectedDiagostic {
+                        vec![ExpectedDiagnostic {
                             message: "possible preimage request counter at zero?",
                             location: "src/lib.rs:439",
                         }],
@@ -308,14 +308,14 @@ fn fixtures() -> Vec<FixtureGroup> {
                 expected_results: HashMap::from([
                     (
                         Call::new_dispatchable("spend".to_owned()),
-                        vec![ExpectedDiagostic {
+                        vec![ExpectedDiagnostic {
                             message: "possible attempt to add with overflow",
                             location: "src/lib.rs:637",
                         }],
                     ),
                     (
                         Call::new_dispatchable("spend_local".to_owned()),
-                        vec![ExpectedDiagostic {
+                        vec![ExpectedDiagnostic {
                             message: "possible attempt to add with overflow",
                             location: "src/lib.rs:511",
                         }],
@@ -340,7 +340,7 @@ fn fixtures() -> Vec<FixtureGroup> {
 // and returns counts for "true positives" and "false positives", and "false negatives" as a tuple.
 fn compare_results(
     diagnostics: &[DiagnosticJSON],
-    expected_results: &[ExpectedDiagostic],
+    expected_results: &[ExpectedDiagnostic],
 ) -> (usize, usize, usize) {
     // Simplifies the diagnostic JSON structure.
     let simple_diagnostics: Vec<_> = diagnostics
@@ -409,11 +409,11 @@ struct Fixture {
     /// Describes the expected results of the analysis for a pallet `fn`.
     /// Any `fn` ommitted in this map are treated as if they're expected to have no diagnostics.
     /// See [Call].
-    expected_results: HashMap<Call, Vec<ExpectedDiagostic>>,
+    expected_results: HashMap<Call, Vec<ExpectedDiagnostic>>,
 }
 
 #[derive(Debug)]
-struct ExpectedDiagostic {
+struct ExpectedDiagnostic {
     message: &'static str,
     location: &'static str,
 }
