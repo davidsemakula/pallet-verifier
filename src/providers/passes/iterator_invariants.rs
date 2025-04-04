@@ -185,7 +185,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Finds places and basics block (if any) of innermost iterator subjects by chain (if any)
+        // Finds places and basic blocks (if any) of innermost iterator subjects by chain (if any)
         // to which no "growing" iterator adapters are applied.
         let dominators = self.basic_blocks.dominators();
         let (iterator_subjects, n_empty_subjects) = size_invariant_iterator_subjects_by_chain(
@@ -352,7 +352,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Finds places and basics block (if any) of innermost iterator subjects by chain (if any)
+        // Finds places and basic blocks (if any) of innermost iterator subjects by chain (if any)
         // to which no "growing" iterator adapters are applied.
         let dominators = self.basic_blocks.dominators();
         let (iterator_subjects, n_empty_subjects) = size_invariant_iterator_subjects_by_chain(
@@ -626,7 +626,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
 
-        // Finds places and basics block (if any) of innermost iterator subjects by chain (if any)
+        // Finds places and basic blocks (if any) of innermost iterator subjects by chain (if any)
         // to which no "growing" iterator adapters are applied.
         let dominators = self.basic_blocks.dominators();
         let (iterator_subjects, n_empty_subjects) = size_invariant_iterator_subjects_by_chain(
