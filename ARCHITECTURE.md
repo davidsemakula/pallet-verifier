@@ -55,7 +55,7 @@ will also be targeted in the future.
 [panics]: https://secure-contracts.com/not-so-smart-contracts/substrate/dont_panic/
 [arithmetic overflow/underflow]: https://secure-contracts.com/not-so-smart-contracts/substrate/arithmetic_overflow/
 [overflow-rfc-updates]: https://rust-lang.github.io/rfcs/0560-integer-overflow.html#updates-since-being-accepted
-[overflow-rfc-remove-as]: https://github.com/rust-lang/rfcs/pull/1019
+[overflow-rfc-remove-as]: https://rust-lang.github.io/rfcs/0560-integer-overflow.html#making-as-be-checked
 [as-conversions-lossy]: https://doc.rust-lang.org/reference/expressions/operator-expr.html#semantics
 [call]: https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.call.html
 [inherent-impls]: https://doc.rust-lang.org/reference/items/implementations.html#inherent-implementations
