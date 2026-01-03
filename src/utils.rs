@@ -51,7 +51,7 @@ pub fn try_resolve_entry_points<'compilation, 'tcx>(
     tcx: TyCtxt<'tcx>,
 ) -> impl Iterator<Item = Result<ResolvedEntryPoint, EntryPointInfo<'compilation>>>
        + use<'tcx, 'compilation> {
-    tcx.hir().body_owners().filter_map(move |local_def_id| {
+    tcx.hir_body_owners().filter_map(move |local_def_id| {
         tcx.opt_item_name(local_def_id.to_def_id())
             .and_then(|def_name| {
                 entry_points
@@ -135,9 +135,9 @@ pub fn assoc_item_parent_trait(def_id: DefId, tcx: TyCtxt) -> Option<DefId> {
 
 /// Checks if an item (given it's `HirId`) "effectively" has a `#[cfg(test)]` attribute.
 pub fn has_cfg_test_attr(hir_id: HirId, tcx: TyCtxt) -> bool {
-    let attrs = tcx.hir().attrs(hir_id);
+    let attrs = tcx.hir_attrs(hir_id);
     attrs.iter().any(|attr| {
-        let is_cfg_path = attr.has_name(Symbol::intern("cfg"));
+        let is_cfg_path = attr.has_any_name(&[Symbol::intern("cfg"), Symbol::intern("<cfg>")]);
         is_cfg_path
             && attr.meta_item_list().is_some_and(|meta_items| {
                 let test_symbol = Symbol::intern("test");

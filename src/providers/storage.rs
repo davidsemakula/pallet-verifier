@@ -18,7 +18,7 @@ use rustc_mir_dataflow::{
     Analysis,
 };
 use rustc_span::def_id::DefId;
-use rustc_target::abi::FieldIdx;
+use rustc_abi::FieldIdx;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};

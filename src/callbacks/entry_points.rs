@@ -204,12 +204,11 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks<'_> {
         );
         let mut concrete_calls = FxHashMap::default();
         let mut intra_calls: FxHashMap<LocalDefId, FxHashSet<LocalDefId>> = FxHashMap::default();
-        let hir = tcx.hir();
-        for local_def_id in hir.body_owners().sorted_by_key(|local_def_id| {
+        for local_def_id in tcx.hir_body_owners().sorted_by_key(|local_def_id| {
             // Process closure last, and dispatchables and hooks second last
             // because they likely need MIR optimizations propagated from other functions.
             if matches!(
-                hir.body_owner_kind(*local_def_id),
+                tcx.hir_body_owner_kind(*local_def_id),
                 rustc_hir::BodyOwnerKind::Closure
             ) {
                 3
@@ -223,7 +222,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks<'_> {
                 0
             }
         }) {
-            let body_owner_kind = hir.body_owner_kind(local_def_id);
+            let body_owner_kind = tcx.hir_body_owner_kind(local_def_id);
             if matches!(
                 body_owner_kind,
                 rustc_hir::BodyOwnerKind::Fn | rustc_hir::BodyOwnerKind::Closure
@@ -308,7 +307,7 @@ impl rustc_driver::Callbacks for EntryPointsCallbacks<'_> {
                 CallKind::PubAssocFn
             };
             if let Some((name, content, local_used_items)) = entry_point_result {
-                let def_path_hash = hir.def_path_hash(*fn_def_id);
+                let def_path_hash = tcx.hir_def_path_hash(*fn_def_id);
                 entry_points.insert(name, (content, def_path_hash, call_kind));
                 used_items.extend(local_used_items);
                 if let Some(trait_def_id) = trait_def_id {
@@ -433,26 +432,25 @@ enum Phase {
 ///
 /// Ref: <https://docs.rs/frame-support/latest/frame_support/attr.pallet.html#2---pallet-struct-placeholder-declaration>
 fn pallet_struct(tcx: TyCtxt) -> Option<LocalDefId> {
-    let hir = tcx.hir();
-    hir.items()
+    tcx.hir_free_items()
         .filter_map(|item_id| {
-            let item = hir.item(item_id);
-            if item.ident.as_str() == "Pallet"
+            let item = tcx.hir_item(item_id);
+            let rustc_hir::ItemKind::Struct(ident, _, struct_generics) = item.kind else {
+                return None;
+            };
+            if ident.as_str() == "Pallet"
                 && tcx
                     .item_name(tcx.parent_module(item_id.hir_id()).to_def_id())
                     .as_str()
                     == "pallet"
             {
-                if let rustc_hir::ItemKind::Struct(_, struct_generics) = item.kind {
-                    let struct_def_id = item_id.owner_id.def_id;
-                    let has_t_generic_param =
-                        struct_generics.get_named(Symbol::intern("T")).is_some();
-                    if has_t_generic_param
-                        && !is_test_only_item(item.hir_id(), tcx)
-                        && is_visible_from_crate_root(struct_def_id.to_def_id(), tcx)
-                    {
-                        return Some(struct_def_id);
-                    }
+                let struct_def_id = item_id.owner_id.def_id;
+                let has_t_generic_param = struct_generics.get_named(Symbol::intern("T")).is_some();
+                if has_t_generic_param
+                    && !is_test_only_item(item.hir_id(), tcx)
+                    && is_visible_from_crate_root(struct_def_id.to_def_id(), tcx)
+                {
+                    return Some(struct_def_id);
                 }
             }
             None
@@ -465,13 +463,15 @@ fn pallet_struct(tcx: TyCtxt) -> Option<LocalDefId> {
 ///
 /// Ref: <https://docs.rs/frame-support/latest/frame_support/pallet_macros/attr.call.html>
 fn call_enum(pallet_mod_def_id: LocalModDefId, tcx: TyCtxt) -> Option<LocalDefId> {
-    let hir = tcx.hir();
-    hir.module_items(pallet_mod_def_id)
+    tcx.hir_module_items(pallet_mod_def_id)
+        .free_items()
         .filter_map(|item_id| {
-            let item = hir.item(item_id);
+            let item = tcx.hir_item(item_id);
             let item_def_id = item_id.owner_id.def_id;
-            let is_call_enum = item.ident.as_str() == "Call"
-                && matches!(item.kind, rustc_hir::ItemKind::Enum(_, _))
+            let rustc_hir::ItemKind::Enum(ident, _, _) = item.kind else {
+                return None;
+            };
+            let is_call_enum = ident.as_str() == "Call"
                 && config_trait(item_def_id, tcx).is_some()
                 && !is_test_only_item(item.hir_id(), tcx)
                 && is_visible_from_crate_root(item_def_id.to_def_id(), tcx);
@@ -485,7 +485,7 @@ fn call_enum(pallet_mod_def_id: LocalModDefId, tcx: TyCtxt) -> Option<LocalDefId
 /// Returns `LocalDefId` of `Config` trait given a `Call<T: Config>` enum `LocalDefId`.
 fn config_trait(call_enum_def_id: LocalDefId, tcx: TyCtxt) -> Option<LocalDefId> {
     let param_name = Symbol::intern("T");
-    let generics = tcx.hir().get_generics(call_enum_def_id)?;
+    let generics = tcx.hir_get_generics(call_enum_def_id)?;
     generics.get_named(param_name).and_then(|param| {
         generics
             .bounds_for_param(param.def_id)
@@ -540,8 +540,10 @@ fn dispatchable_ids(
             tcx.associated_items(impl_def_id)
                 .in_definition_order()
                 .filter_map(|assoc_item| {
-                    if assoc_item.kind == AssocKind::Fn && names.contains(assoc_item.name.as_str())
-                    {
+                    let AssocKind::Fn { name, .. } = assoc_item.kind else {
+                        return None;
+                    };
+                    if names.contains(name.as_str()) {
                         assoc_item.def_id.as_local()
                     } else {
                         None
@@ -589,7 +591,7 @@ fn pallet_pub_assoc_fn_ids(pallet_struct_def_id: LocalDefId, tcx: TyCtxt) -> FxH
                 .filter_map(|assoc_item| {
                     let assoc_fn_def_id = assoc_item.def_id.as_local()?;
                     let span = tcx.source_span(assoc_fn_def_id);
-                    let is_pub_assoc_fn = assoc_item.kind == AssocKind::Fn
+                    let is_pub_assoc_fn = assoc_item.is_fn()
                         && tcx.visibility(assoc_item.def_id).is_public()
                         && is_visible_from_crate_root(assoc_item.def_id, tcx)
                         && !span.from_expansion()
@@ -648,8 +650,7 @@ fn pallet_pub_assoc_fn_ids(pallet_struct_def_id: LocalDefId, tcx: TyCtxt) -> FxH
             .in_definition_order()
             .filter_map(|assoc_item| {
                 let assoc_fn_def_id = assoc_item.def_id.as_local()?;
-                let is_pub_assoc_fn =
-                    assoc_item.kind == AssocKind::Fn && !is_test_only(assoc_fn_def_id);
+                let is_pub_assoc_fn = assoc_item.is_fn() && !is_test_only(assoc_fn_def_id);
                 is_pub_assoc_fn.then_some(assoc_fn_def_id)
             })
     });
@@ -747,7 +748,6 @@ fn pallet_generics<'tcx>(
     let mut inherent_generics = None;
     let mut trait_generics = FxHashMap::default();
 
-    let hir = tcx.hir();
     for (fn_def_id, (terminator, _)) in concrete_calls.iter().sorted_by_key(|(fn_def_id, _)| {
         // Prefer generics from dispatchable function calls.
         if dispatchable_def_ids.contains(fn_def_id) {
@@ -783,7 +783,7 @@ fn pallet_generics<'tcx>(
             .filter_map(GenericArg::as_type)
             .collect();
 
-        let Some(impl_generics) = hir.get_generics(impl_def_id) else {
+        let Some(impl_generics) = tcx.hir_get_generics(impl_def_id) else {
             continue;
         };
 
@@ -967,8 +967,13 @@ fn compose_entry_point<'tcx>(
                 .iter()
                 .filter_map(|arg| match arg {
                     rustc_hir::GenericArg::Type(ty) => Some(
-                        tractable_param_hir_type(ty, generics, &mut used_items, tcx)
-                            .unwrap_or_else(|| "_".to_owned()),
+                        tractable_param_hir_type(
+                            ty.as_unambig_ty(),
+                            generics,
+                            &mut used_items,
+                            tcx,
+                        )
+                        .unwrap_or_else(|| "_".to_owned()),
                     ),
                     _ => None,
                 })
@@ -978,14 +983,13 @@ fn compose_entry_point<'tcx>(
     }
 
     // Composes entry point params, and corresponding `fn` call args.
-    let hir = tcx.hir();
     let mut params = Vec::new();
     let mut args = Vec::new();
     let mut locals = FxHashSet::default();
     let hir_id = tcx.local_def_id_to_hir_id(fn_def_id);
-    let hir_body = hir.body_owned_by(fn_def_id);
+    let hir_body = tcx.hir_body_owned_by(fn_def_id);
     let fn_params = hir_body.params;
-    let fn_decl = hir.fn_decl_by_hir_id(hir_id)?;
+    let fn_decl = tcx.hir_fn_decl_by_hir_id(hir_id)?;
     let fn_params_ty = fn_decl.inputs;
     let source_map = tcx.sess.source_map();
     let local_decls_opt = owner_body_opt.map(|owner_body| owner_body.local_decls());
@@ -1329,10 +1333,14 @@ fn tractable_param_hir_type<'tcx>(
         return None;
     }
 
+    let Some(ty) = ty.try_as_ambig_ty() else {
+        // Bails if the HIR type can't be converted into an ambigious type (e.g. an infer type).
+        return None;
+    };
+
     let mut visitor = TyVisitor::new(tcx);
     visitor.visit_ty(ty);
 
-    let hir = tcx.hir();
     let config_param_name = Symbol::intern("T");
     let mut ty_generic_params = Vec::new();
     let mut int_const_generic_params = Vec::new();
@@ -1434,7 +1442,7 @@ fn tractable_param_hir_type<'tcx>(
                                     || generic_param_name
                                         .name
                                         .as_str()
-                                        .starts_with(&format!("{}#", config_param_name))
+                                        .starts_with(&format!("{config_param_name}#"))
                             });
                     if is_config_param {
                         config_related_types.insert(rel_ty.span, segment);
@@ -1470,7 +1478,7 @@ fn tractable_param_hir_type<'tcx>(
         }
     }
     for anon_const in visitor.anon_consts {
-        let const_expr = hir.body(anon_const.body).value;
+        let const_expr = tcx.hir_body(anon_const.body).value;
         if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = const_expr.kind {
             match path.res {
                 Res::Def(DefKind::ConstParam, const_param_def_id) => {
@@ -1573,7 +1581,7 @@ fn find_assoc_item_by_name_and_kind(
     tcx: TyCtxt,
 ) -> Option<&AssocItem> {
     tcx.associated_items(impl_def_id)
-        .find_by_name_and_kind(tcx, name, rustc_middle::ty::AssocKind::Type, impl_def_id)
+        .find_by_ident_and_kind(tcx, name, rustc_middle::ty::AssocTag::Type, impl_def_id)
         .or_else(|| {
             // Finds trait and Self ty of impl.
             let trait_ref = tcx.impl_trait_ref(impl_def_id)?.skip_binder();
@@ -1614,7 +1622,6 @@ fn process_used_items(
     dep_renames: Option<&FxHashMap<String, String>>,
     tcx: TyCtxt,
 ) {
-    let hir = tcx.hir();
     let source_map = tcx.sess.source_map();
     let mut processed_items = FxHashSet::default();
     let mut aliased_used_items: FxHashSet<(DefId, Option<Symbol>)> = used_items
@@ -1692,8 +1699,8 @@ fn process_used_items(
                     let node = tcx.hir_node_by_def_id(item_local_def_id);
                     if let rustc_hir::Node::Item(item) = node {
                         match &item.kind {
-                            rustc_hir::ItemKind::Const(ty, generics, _)
-                            | rustc_hir::ItemKind::TyAlias(ty, generics) => {
+                            rustc_hir::ItemKind::Const(_, ty, generics, _)
+                            | rustc_hir::ItemKind::TyAlias(_, ty, generics) => {
                                 process_hir_ty(ty, &mut next_used_items, tcx);
                                 process_generics(generics, &mut next_used_items, tcx);
                             }
@@ -1701,20 +1708,20 @@ fn process_used_items(
                                 process_fn_sig(sig, &mut next_used_items, tcx);
                                 process_generics(generics, &mut next_used_items, tcx);
                             }
-                            rustc_hir::ItemKind::Enum(enum_def, generics) => {
+                            rustc_hir::ItemKind::Enum(_, enum_def, generics) => {
                                 for variant in enum_def.variants {
                                     process_variants(&variant.data, &mut next_used_items, tcx);
                                 }
                                 process_generics(generics, &mut next_used_items, tcx);
                             }
-                            rustc_hir::ItemKind::Struct(variants, generics)
-                            | rustc_hir::ItemKind::Union(variants, generics) => {
+                            rustc_hir::ItemKind::Struct(_, variants, generics)
+                            | rustc_hir::ItemKind::Union(_, variants, generics) => {
                                 process_variants(variants, &mut next_used_items, tcx);
                                 process_generics(generics, &mut next_used_items, tcx);
                             }
-                            rustc_hir::ItemKind::Trait(_, _, generics, bounds, assoc_items) => {
+                            rustc_hir::ItemKind::Trait(_, _, _, generics, bounds, assoc_items) => {
                                 for assoc_item_ref in *assoc_items {
-                                    let assoc_item = hir.trait_item(assoc_item_ref.id);
+                                    let assoc_item = tcx.hir_trait_item(assoc_item_ref.id);
                                     match &assoc_item.kind {
                                         rustc_hir::TraitItemKind::Const(ty, _) => {
                                             process_hir_ty(ty, &mut next_used_items, tcx);
@@ -1737,7 +1744,7 @@ fn process_used_items(
                                     process_generic_bound(bound, &mut next_used_items);
                                 }
                             }
-                            rustc_hir::ItemKind::TraitAlias(generics, bounds) => {
+                            rustc_hir::ItemKind::TraitAlias(_, generics, bounds) => {
                                 process_generics(generics, &mut next_used_items, tcx);
                                 for bound in *bounds {
                                     process_generic_bound(bound, &mut next_used_items);
@@ -1750,7 +1757,7 @@ fn process_used_items(
                         if matches!(item_kind, DefKind::Struct | DefKind::Enum | DefKind::Union) {
                             let mut impls = FxHashSet::default();
                             let adt_impl = |item_id: rustc_hir::ItemId| {
-                                let item = hir.item(item_id);
+                                let item = tcx.hir_item(item_id);
                                 let rustc_hir::ItemKind::Impl(impl_item) = item.kind else {
                                     return None;
                                 };
@@ -1768,7 +1775,7 @@ fn process_used_items(
                                 };
                                 (adt_def_id == item_def_id).then_some((impl_item, item.span))
                             };
-                            for (impl_item, span) in hir.items().filter_map(adt_impl) {
+                            for (impl_item, span) in tcx.hir_free_items().filter_map(adt_impl) {
                                 // Collects child used items for `impl`.
                                 process_impl(impl_item, &mut next_used_items, tcx);
 
@@ -1815,7 +1822,11 @@ fn process_used_items(
         tcx: TyCtxt<'tcx>,
     ) {
         let mut visitor = TyVisitor::new(tcx);
-        visitor.visit_ty(ty);
+        if let Some(ty) = ty.try_as_ambig_ty() {
+            visitor.visit_ty(ty);
+        } else if matches!(ty.kind, rustc_hir::TyKind::Infer(_)) {
+            visitor.visit_id(ty.hir_id);
+        }
 
         for gen_ty in visitor.types {
             if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = gen_ty.kind {
@@ -1896,7 +1907,7 @@ fn process_used_items(
             }
         }
         for anon_const in visitor.anon_consts {
-            let const_expr = tcx.hir().body(anon_const.body).value;
+            let const_expr = tcx.hir_body(anon_const.body).value;
             if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = const_expr.kind
             {
                 if let Res::Def(DefKind::Const, const_def_id) = path.res {
@@ -1962,7 +1973,7 @@ fn process_used_items(
             let generic_args = path.segments.iter().flat_map(|segment| segment.args().args);
             for arg in generic_args {
                 if let rustc_hir::GenericArg::Type(arg_ty) = arg {
-                    process_hir_ty(arg_ty, used_items, tcx);
+                    process_hir_ty(arg_ty.as_unambig_ty(), used_items, tcx);
                 }
             }
         }
@@ -1972,7 +1983,7 @@ fn process_used_items(
 
         // Collects used items for assoc items.
         for assoc_item_ref in impl_item.items {
-            let assoc_item = tcx.hir().impl_item(assoc_item_ref.id);
+            let assoc_item = tcx.hir_impl_item(assoc_item_ref.id);
             match &assoc_item.kind {
                 rustc_hir::ImplItemKind::Const(ty, _) => {
                     process_hir_ty(ty, used_items, tcx);
@@ -2091,13 +2102,16 @@ fn process_rvalue(
         Rvalue::Ref(_, _, place)
         | Rvalue::CopyForDeref(place)
         | Rvalue::Discriminant(place)
-        | Rvalue::RawPtr(_, place) => {
+        | Rvalue::RawPtr(_, place)
+        | Rvalue::Len(place) => {
             locals.insert(place.local);
         }
         Rvalue::ThreadLocalRef(def_id) => {
             used_items.insert(*def_id);
         }
-        Rvalue::Cast(_, operand, ty) | Rvalue::ShallowInitBox(operand, ty) => {
+        Rvalue::Cast(_, operand, ty)
+        | Rvalue::ShallowInitBox(operand, ty)
+        | Rvalue::WrapUnsafeBinder(operand, ty) => {
             process_operand(operand, locals, used_items, item_defs);
             process_type(ty, used_items);
         }
@@ -2402,7 +2416,7 @@ impl<'tcx> Visitor<'tcx> for CallVisitor<'tcx> {
 /// Collects all HIR types and anonymous constants.
 struct TyVisitor<'tcx> {
     tcx: TyCtxt<'tcx>,
-    types: Vec<&'tcx rustc_hir::Ty<'tcx>>,
+    types: Vec<rustc_hir::Ty<'tcx>>,
     anon_consts: Vec<&'tcx rustc_hir::AnonConst>,
 }
 
@@ -2419,13 +2433,27 @@ impl<'tcx> TyVisitor<'tcx> {
 impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for TyVisitor<'tcx> {
     type NestedFilter = rustc_middle::hir::nested_filter::All;
 
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.tcx
     }
 
-    fn visit_ty(&mut self, t: &'tcx rustc_hir::Ty<'tcx>) {
-        self.types.push(t);
+    fn visit_ty(&mut self, t: &'tcx rustc_hir::Ty<'tcx, rustc_hir::AmbigArg>) {
+        self.types.push(*t.as_unambig_ty());
         rustc_hir::intravisit::walk_ty(self, t);
+    }
+
+    fn visit_infer(
+        &mut self,
+        inf_id: HirId,
+        inf_span: Span,
+        _kind: rustc_hir::intravisit::InferKind<'tcx>,
+    ) -> Self::Result {
+        self.types.push(rustc_hir::Ty {
+            kind: rustc_hir::TyKind::Infer(()),
+            hir_id: inf_id,
+            span: inf_span,
+        });
+        self.visit_id(inf_id)
     }
 
     fn visit_anon_const(&mut self, c: &'tcx rustc_hir::AnonConst) {

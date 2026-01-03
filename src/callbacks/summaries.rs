@@ -156,7 +156,7 @@ impl<'tcx> SummariesVisitor<'tcx> {
         if is_summary_target {
             let specialized_gen_args_key =
                 mirai::utils::argument_types_key_str(self.tcx, Some(specialized_gen_args));
-            let summary = format!("noop_result!(count{}, usize);", specialized_gen_args_key);
+            let summary = format!("noop_result!(count{specialized_gen_args_key}, usize);");
             self.summaries.insert(summary);
         }
 
@@ -285,38 +285,38 @@ fn specialize_ty<'tcx>(
         }
         TyKind::Adt(adt_def, adt_args) if requires_args_specialization(adt_args) => {
             let new_args = specialize_args(adt_def.did(), root_def_id, adt_args, root_args, tcx);
-            return Ty::new(tcx, TyKind::Adt(*adt_def, new_args));
+            return Ty::new_adt(tcx, *adt_def, new_args);
         }
         TyKind::Array(elem_ty, size) if requires_specialization(elem_ty) => {
             let new_elem_ty = specialize_ty(*elem_ty, root_def_id, root_args, tcx);
-            return Ty::new(tcx, TyKind::Array(new_elem_ty, *size));
+            return Ty::new_array_with_const_len(tcx, new_elem_ty, *size);
         }
         TyKind::Slice(elem_ty) if requires_specialization(elem_ty) => {
             let new_elem_ty = specialize_ty(*elem_ty, root_def_id, root_args, tcx);
-            return Ty::new(tcx, TyKind::Slice(new_elem_ty));
+            return Ty::new_slice(tcx, new_elem_ty);
         }
         TyKind::Tuple(tys) if requires_specialization(&ty) => {
             let new_tys = tcx.mk_type_list_from_iter(
                 tys.iter()
                     .map(|elem_ty| specialize_ty(elem_ty, root_def_id, root_args, tcx)),
             );
-            return Ty::new(tcx, TyKind::Tuple(new_tys));
+            return Ty::new_tup(tcx, new_tys);
         }
         TyKind::Pat(pat_ty, pat) if requires_specialization(pat_ty) => {
             let new_pat_ty = specialize_ty(*pat_ty, root_def_id, root_args, tcx);
-            return Ty::new(tcx, TyKind::Pat(new_pat_ty, *pat));
+            return Ty::new_pat(tcx, new_pat_ty, *pat);
         }
         TyKind::Ref(region, ref_ty, mutability) if requires_specialization(ref_ty) => {
             let new_ref_ty = specialize_ty(*ref_ty, root_def_id, root_args, tcx);
-            return Ty::new(tcx, TyKind::Ref(*region, new_ref_ty, *mutability));
+            return Ty::new_ref(tcx, *region, new_ref_ty, *mutability);
         }
         TyKind::RawPtr(ptr_ty, mutability) if requires_specialization(ptr_ty) => {
             let new_ptr_ty = specialize_ty(*ptr_ty, root_def_id, root_args, tcx);
-            return Ty::new(tcx, TyKind::RawPtr(new_ptr_ty, *mutability));
+            return Ty::new_ptr(tcx, new_ptr_ty, *mutability);
         }
         TyKind::FnDef(def_id, args) if requires_args_specialization(args) => {
             let new_args = specialize_args(*def_id, root_def_id, args, root_args, tcx);
-            return Ty::new(tcx, TyKind::FnDef(*def_id, new_args));
+            return Ty::new_fn_def(tcx, *def_id, new_args);
         }
         TyKind::Closure(def_id, args) if requires_args_specialization(args) => {
             let closure_args = ClosureArgs::<TyCtxt> { args };
@@ -337,13 +337,13 @@ fn specialize_ty<'tcx>(
                 ),
             };
             let new_closure_args = ClosureArgs::new(tcx, closure_args_parts);
-            return Ty::new(tcx, TyKind::Closure(*def_id, new_closure_args.args));
+            return Ty::new_closure(tcx, *def_id, new_closure_args.args);
         }
         TyKind::Alias(alias_kind, alias_ty) if requires_args_specialization(alias_ty.args) => {
             let new_args =
                 specialize_args(alias_ty.def_id, root_def_id, alias_ty.args, root_args, tcx);
             let new_alias_ty = AliasTy::new(tcx, alias_ty.def_id, new_args);
-            return Ty::new(tcx, TyKind::Alias(*alias_kind, new_alias_ty));
+            return Ty::new_alias(tcx, *alias_kind, new_alias_ty);
         }
         TyKind::Coroutine(def_id, gen_args) => {
             let coroutine_args = CoroutineArgs::<TyCtxt> { args: gen_args };
@@ -362,7 +362,7 @@ fn specialize_ty<'tcx>(
                 ),
             };
             let new_coroutine_args = CoroutineArgs::new(tcx, coroutine_args_parts);
-            return Ty::new(tcx, TyKind::Coroutine(*def_id, new_coroutine_args.args));
+            return Ty::new_coroutine(tcx, *def_id, new_coroutine_args.args);
         }
         TyKind::CoroutineClosure(def_id, gen_args) => {
             let coroutine_args = CoroutineClosureArgs::<TyCtxt> { args: gen_args };
@@ -400,14 +400,11 @@ fn specialize_ty<'tcx>(
                 ),
             };
             let new_coroutine_args = CoroutineClosureArgs::new(tcx, coroutine_args_parts);
-            return Ty::new(
-                tcx,
-                TyKind::CoroutineClosure(*def_id, new_coroutine_args.args),
-            );
+            return Ty::new_coroutine_closure(tcx, *def_id, new_coroutine_args.args);
         }
         TyKind::CoroutineWitness(def_id, args) if requires_args_specialization(args) => {
             let new_args = specialize_args(*def_id, root_def_id, args, root_args, tcx);
-            return Ty::new(tcx, TyKind::CoroutineWitness(*def_id, new_args));
+            return Ty::new_coroutine_witness(tcx, *def_id, new_args);
         }
         _ => (),
     }

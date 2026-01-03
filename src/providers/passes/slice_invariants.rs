@@ -11,7 +11,7 @@ use rustc_middle::{
     ty::TyCtxt,
 };
 use rustc_span::source_map::Spanned;
-use rustc_target::abi::VariantIdx;
+use rustc_abi::VariantIdx;
 
 use crate::providers::{
     analyze::{self, SwitchVariant},

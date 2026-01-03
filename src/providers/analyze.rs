@@ -1,5 +1,6 @@
 //! Common utilities and helpers for traversing and analyzing MIR.
 
+use rustc_abi::VariantIdx;
 use rustc_data_structures::graph::{dominators::Dominators, StartNode, Successors};
 use rustc_hash::FxHashSet;
 use rustc_hir::LangItem;
@@ -8,10 +9,9 @@ use rustc_middle::{
         BasicBlock, BasicBlockData, BasicBlocks, LocalDecls, Operand, Place, PlaceElem, Rvalue,
         Statement, StatementKind, Terminator, TerminatorKind, RETURN_PLACE,
     },
-    ty::{AssocKind, GenericArg, ImplSubject, List, Region, Ty, TyCtxt, TyKind},
+    ty::{AssocTag, GenericArg, ImplSubject, List, Region, Ty, TyCtxt, TyKind},
 };
 use rustc_span::{def_id::DefId, symbol::Ident};
-use rustc_target::abi::VariantIdx;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -283,7 +283,7 @@ pub fn collection_len_call<'tcx>(
             .iter()
             .find_map(|impl_def_id| {
                 tcx.associated_items(impl_def_id)
-                    .find_by_name_and_kind(tcx, Ident::from_str(name), AssocKind::Fn, *impl_def_id)
+                    .find_by_ident_and_kind(tcx, Ident::from_str(name), AssocTag::Fn, *impl_def_id)
                     .map(|assoc_item| assoc_item.def_id)
             })
     };
@@ -298,16 +298,16 @@ pub fn collection_len_call<'tcx>(
             .non_blanket_impls_for_ty(deref_trait_def_id, base_ty)
             .next()?;
         let deref_assoc_items = tcx.associated_items(deref_impl);
-        let deref_fn_assoc_item = deref_assoc_items.find_by_name_and_kind(
+        let deref_fn_assoc_item = deref_assoc_items.find_by_ident_and_kind(
             tcx,
             Ident::from_str("deref"),
-            AssocKind::Fn,
+            AssocTag::Fn,
             deref_impl,
         )?;
-        let deref_target_assoc_item = deref_assoc_items.find_by_name_and_kind(
+        let deref_target_assoc_item = deref_assoc_items.find_by_ident_and_kind(
             tcx,
             Ident::from_str("Target"),
-            AssocKind::Type,
+            AssocTag::Type,
             deref_impl,
         )?;
         let deref_target_ty = tcx
@@ -427,7 +427,7 @@ impl SwitchVariant {
         let variant_def_id = tcx
             .lang_items()
             .get(lang_item)
-            .unwrap_or_else(|| panic!("Expected `DefId` for lang item for {:?}", lang_item));
+            .unwrap_or_else(|| panic!("Expected `DefId` for lang item for {lang_item:?}"));
         let adt_def_id = tcx.parent(variant_def_id);
         let adt_def = tcx.adt_def(adt_def_id);
         adt_def.variant_index_with_id(variant_def_id)

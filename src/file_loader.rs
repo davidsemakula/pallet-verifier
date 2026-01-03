@@ -3,11 +3,13 @@
 
 #![allow(clippy::type_complexity)]
 
-use rustc_data_structures::sync::Lrc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_span::source_map::RealFileLoader;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use itertools::Itertools;
 
@@ -89,12 +91,12 @@ impl rustc_span::source_map::FileLoader for VirtualFileLoader {
         std::io::Result::Ok(content)
     }
 
-    fn read_binary_file(&self, path: &Path) -> std::io::Result<Lrc<[u8]>> {
+    fn read_binary_file(&self, path: &Path) -> std::io::Result<Arc<[u8]>> {
         if let Some(mut content) = self.base_virtual_content(path).cloned() {
             self.append_extra_virtual_content(path, &mut content);
 
-            let mut bytes = Lrc::new_uninit_slice(content.len());
-            let data: &mut [std::mem::MaybeUninit<u8>] = Lrc::get_mut(&mut bytes).unwrap();
+            let mut bytes = Arc::new_uninit_slice(content.len());
+            let data: &mut [std::mem::MaybeUninit<u8>] = Arc::get_mut(&mut bytes).unwrap();
             for (idx, byte) in content.as_bytes().iter().enumerate() {
                 data[idx].write(*byte);
             }

@@ -4,11 +4,15 @@
 
 extern crate rustc_driver;
 extern crate rustc_hash;
+extern crate rustc_interface;
+extern crate rustc_mir_transform;
 extern crate rustc_session;
+extern crate rustc_span;
 
 mod cli_utils;
+mod compiler;
 
-use rustc_driver::{RunCompiler, EXIT_FAILURE, EXIT_SUCCESS};
+use rustc_driver::{EXIT_FAILURE, EXIT_SUCCESS};
 use rustc_hash::FxHashSet;
 
 use std::{
@@ -26,6 +30,7 @@ use cli_utils::{
     ARG_ALLOW_HOOK_PANICS, ARG_AUTO_ANNOTATIONS_DEP, ARG_COMPILE_ANNOTATIONS, ARG_DEP_ANNOTATE,
     ARG_DEP_FEATURES, ARG_POINTER_WIDTH, ENV_DEP_RENAMES, ENV_OPTIONAL_DEPS, HOOKS,
 };
+use compiler::run_compiler;
 use pallet_verifier::{
     DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntryPointsInfo,
     SummariesCallbacks, VerifierCallbacks, VirtualFileLoader, VirtualFileLoaderBuilder,
@@ -202,12 +207,9 @@ fn generate_entry_points(args: &[String]) -> Result<(String, EntryPointsInfo), i
             serde_json::from_str::<rustc_hash::FxHashSet<String>>(&optional_deps_json).ok()
         });
     let mut callbacks = EntryPointsCallbacks::new(&dep_renames, &optional_deps);
-    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(target_path, &[], true);
-    compiler.set_file_loader(Some(Box::new(file_loader)));
-
-    match run_compiler(compiler) {
+    match run_compiler(args, &mut callbacks, Some(Box::new(file_loader))) {
         // Returns entry point content if compilation was successful (and entry points were generated).
         EXIT_SUCCESS => callbacks
             .entry_points_content()
@@ -225,7 +227,6 @@ fn generate_specialized_summaries(
     entry_points_info: &EntryPointsInfo,
 ) -> Result<FxHashSet<String>, i32> {
     let mut callbacks = SummariesCallbacks::new(entry_points_info);
-    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(
         target_path,
@@ -235,8 +236,7 @@ fn generate_specialized_summaries(
         ],
         true,
     );
-    compiler.set_file_loader(Some(Box::new(file_loader)));
-    match run_compiler(compiler) {
+    match run_compiler(args, &mut callbacks, Some(Box::new(file_loader))) {
         // Returns entry point content if compilation was successful (and entry points were generated).
         EXIT_SUCCESS => Ok(callbacks.summaries),
         exit_code => Err(exit_code),
@@ -252,7 +252,6 @@ fn analyze_with_mirai(
     allow_hook_panics: Option<FxHashSet<String>>,
 ) -> i32 {
     let mut callbacks = VerifierCallbacks::new(entry_points_info, allow_hook_panics);
-    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
     let mut contracts = include_str!("../artifacts/contracts.rs").to_owned();
     if !summaries.is_empty() {
@@ -272,25 +271,21 @@ fn analyze_with_mirai(
         ],
         true,
     );
-    compiler.set_file_loader(Some(Box::new(file_loader)));
-    run_compiler(compiler)
+    run_compiler(args, &mut callbacks, Some(Box::new(file_loader)))
 }
 
 /// Compiles annotated dependencies.
 fn compile_annotated_dependency(args: &[String]) -> i32 {
     let mut callbacks = DependencyCallbacks;
-    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
     let file_loader = analysis_file_loader(target_path, &[], false);
-    compiler.set_file_loader(Some(Box::new(file_loader)));
-    run_compiler(compiler)
+    run_compiler(args, &mut callbacks, Some(Box::new(file_loader)))
 }
 
 /// Compiles dependencies.
 /// Enables unstable features if necessary, see [`lang_features`].
 fn compile_dependency(args: &[String]) -> i32 {
     let mut callbacks = DefaultCallbacks;
-    let mut compiler = rustc_driver::RunCompiler::new(args, &mut callbacks);
     let target_path = analysis_target_path(args);
     let crate_name = cli_utils::arg_value("--crate-name").expect("Expected a target crate");
     let features = lang_features(&crate_name);
@@ -298,9 +293,10 @@ fn compile_dependency(args: &[String]) -> i32 {
         let mut file_loader_builder = VirtualFileLoaderBuilder::default();
         file_loader_builder.enable_unstable_features(target_path, features);
         let file_loader = file_loader_builder.build();
-        compiler.set_file_loader(Some(Box::new(file_loader)));
+        run_compiler(args, &mut callbacks, Some(Box::new(file_loader)))
+    } else {
+        run_compiler(args, &mut callbacks, None)
     }
-    run_compiler(compiler)
 }
 
 /// [VirtualFileLoader] input path for `mirai-annotations` crate source.
@@ -355,17 +351,7 @@ fn compile_annotations_crate() -> i32 {
     let mut file_loader_builder = VirtualFileLoaderBuilder::default();
     file_loader_builder.add_root_content(input_path.to_path_buf(), input_content.to_owned());
     let file_loader = file_loader_builder.build();
-    let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
-    compiler.set_file_loader(Some(Box::new(file_loader)));
-    run_compiler(compiler)
-}
-
-/// Runs compiler and returns the exit code.
-fn run_compiler(compiler: RunCompiler) -> i32 {
-    rustc_driver::catch_with_exit_code(|| {
-        compiler.run();
-        Ok(())
-    })
+    run_compiler(&args, &mut callbacks, Some(Box::new(file_loader)))
 }
 
 /// Creates "virtual" `FileLoader` for "analysis-only" external crates and "virtual" modules

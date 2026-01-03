@@ -1,5 +1,6 @@
 //! Common utilities and helpers for analyzing and annotating closures.
 
+use rustc_abi::FieldIdx;
 use rustc_hash::FxHashSet;
 use rustc_hir::def_id::DefId;
 use rustc_index::IndexVec;
@@ -11,7 +12,6 @@ use rustc_middle::{
     },
     ty::{ClosureArgs, ImplSubject, Region, RegionKind, TyCtxt, TyKind},
 };
-use rustc_target::abi::FieldIdx;
 
 use serde::{Deserialize, Serialize};
 
@@ -79,7 +79,7 @@ impl ClosurePlaceIdx {
                 // Finds the type of the captured place.
                 let closure_ty = tcx.type_of(def_id).skip_binder();
                 let TyKind::Closure(_, closure_args) = closure_ty.kind() else {
-                    panic!("Expected a closure, found {:?}", def_id);
+                    panic!("Expected a closure, found {def_id:?}");
                 };
                 let closure_args = ClosureArgs::<TyCtxt> { args: closure_args };
                 let captured_locals_ty = closure_args.upvar_tys()[idx as usize];

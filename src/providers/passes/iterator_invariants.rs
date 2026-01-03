@@ -84,7 +84,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let iterator_assoc_items = tcx
             .associated_items(iterator_trait_def_id)
             .in_definition_order()
-            .map(|assoc_item| (assoc_item.name, assoc_item.def_id))
+            .filter_map(|assoc_item| assoc_item.opt_name().map(|name| (name, assoc_item.def_id)))
             .collect();
         Self {
             def_id,

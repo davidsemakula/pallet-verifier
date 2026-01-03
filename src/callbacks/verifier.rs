@@ -68,7 +68,7 @@ impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
         let temp_dir = TempDir::new().expect("Failed to create a temp directory.");
         let summary_store_path = String::from(
             temp_dir
-                .into_path()
+                .keep()
                 .to_str()
                 .expect("Expected a valid temp directory."),
         );
@@ -131,14 +131,13 @@ impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
         };
 
         // Finds "contracts" module and collects test module spans.
-        let hir = tcx.hir();
         let mut contracts_mod_def_id = None;
         let mut test_mod_spans = FxHashSet::default();
-        hir.for_each_module(|mod_def_id| {
+        tcx.hir_for_each_module(|mod_def_id| {
             if tcx.item_name(mod_def_id.to_def_id()).as_str() == CONTRACTS_MOD_NAME {
                 contracts_mod_def_id = Some(mod_def_id);
             } else {
-                let (mod_data, mod_decl_span, mod_hir_id) = hir.get_module(mod_def_id);
+                let (mod_data, mod_decl_span, mod_hir_id) = tcx.hir_get_module(mod_def_id);
                 let mod_body_span = mod_data.spans.inner_span;
                 if utils::has_cfg_test_attr(mod_hir_id, tcx)
                     && !test_mod_spans.iter().any(|span: &Span| {
@@ -159,7 +158,7 @@ impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
             );
             // Collect "contract" `fn` ids.
             let mut visitor = ContractsVisitor::new(tcx);
-            hir.visit_item_likes_in_module(contracts_mod_def_id, &mut visitor);
+            tcx.hir_visit_item_likes_in_module(contracts_mod_def_id, &mut visitor);
 
             for contract_def_id in visitor.fns {
                 // Analyzes "contract" with MIRAI and produces "summaries".
@@ -402,8 +401,10 @@ fn emit_diagnostics(
                     tcx.opt_associated_item(parent_local_def_id.to_def_id())
                 })
                 .is_some_and(|assoc_item| {
-                    let is_core_convert_from_impl = assoc_item.name.as_str() == "from"
-                        && assoc_item.kind == AssocKind::Fn
+                    let AssocKind::Fn { name, .. } = assoc_item.kind else {
+                        return false;
+                    };
+                    let is_core_convert_from_impl = name.as_str() == "from"
                         && assoc_item
                             .trait_item_def_id
                             .is_some_and(|trait_item_def_id| {
@@ -860,8 +861,8 @@ impl<'tcx> ContractsVisitor<'tcx> {
 impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for ContractsVisitor<'tcx> {
     type NestedFilter = rustc_middle::hir::nested_filter::All;
 
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.tcx
     }
 
     fn visit_fn(
