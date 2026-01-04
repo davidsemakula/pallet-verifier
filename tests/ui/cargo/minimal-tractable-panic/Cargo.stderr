@@ -3,6 +3,4 @@ warning: possible no zeros!
    |
 LL |                 panic!("no zeros!"); //~ WARN: no zeros!
    |                 ^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this warning originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `panic` (in Nightly builds, run with -Z macro-backtrace for more info)
 

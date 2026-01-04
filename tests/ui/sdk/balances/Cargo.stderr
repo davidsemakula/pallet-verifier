@@ -8,17 +8,17 @@ LL | |             .fold(Zero::zero(), |acc, l| acc + l.amount)
    | |________________________________________________________^
    |
 note: related location
-  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/filter.rs:157:9
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/filter.rs:159:9
    |
 LL |         self.iter.fold(init, filter_fold(self.predicate, fold))
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: related location
-  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2640:21
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/into_iter.rs:323:25
    |
-LL |             accum = f(accum, x);
-   |                     ^^^^^^^^^^^
+LL |                 accum = f(accum, tmp);
+   |                         ^^^^^^^^^^^^^
 note: related location
-  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/filter.rs:41:44
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/iter/adapters/filter.rs:79:44
    |
 LL |     move |acc, item| if predicate(&item) { fold(acc, item) } else { acc }
    |                                            ^^^^^^^^^^^^^^^
@@ -28,10 +28,10 @@ note: related location
 LL |             .fold(Zero::zero(), |acc, l| acc + l.amount)
    |                                          ^^^^^^^^^^^^^^
 note: related location
-  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:110:1
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:113:1
    |
-LL | add_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL | add_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128 }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: this warning originates in the macro `add_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 warning: possible attempt to subtract with overflow
@@ -41,10 +41,10 @@ LL |                     reserves[index].amount -= actual;
    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
 note: related location
-  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:833:1
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:836:1
    |
-LL | sub_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL | sub_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128 }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: this warning originates in the macro `sub_assign_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 warning: possible attempt to subtract with overflow
@@ -54,9 +54,9 @@ LL |                     Ok(value - actual)
    |                        ^^^^^^^^^^^^^^
    |
 note: related location
-  --> /Users/david/.rustup/toolchains/nightly-2024-02-08-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:219:1
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/arith.rs:222:1
    |
-LL | sub_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL | sub_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128 }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: this warning originates in the macro `sub_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
 
