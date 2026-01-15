@@ -10,8 +10,8 @@ use rustc_middle::{
     ty::{AssocKind, GenericArg, ImplSubject, TyCtxt, TyKind},
 };
 use rustc_span::{
-    def_id::{CrateNum, DefId, LocalDefId},
     ExpnData, ExpnKind, MacroKind, Span, Symbol,
+    def_id::{CrateNum, DefId, LocalDefId},
 };
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
@@ -25,7 +25,7 @@ use mirai::{
 use owo_colors::OwoColorize;
 use tempfile::TempDir;
 
-use crate::{providers, utils, CallKind, EntryPointsInfo, CONTRACTS_MOD_NAME};
+use crate::{CONTRACTS_MOD_NAME, CallKind, EntryPointsInfo, providers, utils};
 
 /// `rustc` callbacks for analyzing FRAME pallet with MIRAI.
 pub struct VerifierCallbacks<'compilation> {

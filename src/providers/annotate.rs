@@ -14,7 +14,7 @@ use rustc_middle::{
     },
     ty::{GenericArg, List, Region, ScalarInt, Ty, TyCtxt},
 };
-use rustc_span::{def_id::DefId, source_map::dummy_spanned, Span};
+use rustc_span::{Span, def_id::DefId, source_map::dummy_spanned};
 
 use serde::{Deserialize, Serialize};
 

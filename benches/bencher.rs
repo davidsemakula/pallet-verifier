@@ -264,8 +264,7 @@ fn fixtures() -> Vec<FixtureGroup> {
                 // at `multisig/edit/src/lib.rs:545`.
                 // Then uses `u16 to usize` integer cast instead for related comparisons to `threshold: u16` at
                 // `multisig/edit/src/lib.rs:547` and `multisig/edit/src/lib.rs:554`.
-                comment:
-                    "fixes \"possible integer cast overflow\" at `multisig/edit/src/lib.rs:545`",
+                comment: "fixes \"possible integer cast overflow\" at `multisig/edit/src/lib.rs:545`",
                 expected_results: HashMap::new(),
             },
         },

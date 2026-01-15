@@ -4,7 +4,7 @@ use std::{
     env,
     ffi::OsStr,
     path::Path,
-    process::{exit, Command},
+    process::{Command, exit},
 };
 
 use itertools::Itertools;

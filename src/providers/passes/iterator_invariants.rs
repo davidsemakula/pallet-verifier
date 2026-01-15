@@ -1,18 +1,18 @@
 //! `rustc` [`MirPass`] for adding annotations for `Iterator` invariants.
 
 use rustc_const_eval::interpret::Scalar;
-use rustc_data_structures::graph::{dominators::Dominators, Successors};
+use rustc_data_structures::graph::{Successors, dominators::Dominators};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
-        visit::Visitor, BasicBlock, BasicBlocks, BinOp, Body, Const, ConstValue, HasLocalDecls,
-        LocalDecls, Location, Operand, Place, PlaceElem, Rvalue, Statement, StatementKind,
-        Terminator, TerminatorKind, RETURN_PLACE,
+        BasicBlock, BasicBlocks, BinOp, Body, Const, ConstValue, HasLocalDecls, LocalDecls,
+        Location, Operand, Place, PlaceElem, RETURN_PLACE, Rvalue, Statement, StatementKind,
+        Terminator, TerminatorKind, visit::Visitor,
     },
     ty::{GenericArgsRef, Ty, TyCtxt, TyKind},
 };
-use rustc_span::{def_id::DefId, source_map::Spanned, Symbol};
+use rustc_span::{Symbol, def_id::DefId, source_map::Spanned};
 use rustc_type_ir::UintTy;
 
 use std::ops::Deref;
@@ -1644,11 +1644,7 @@ impl UpperBound {
 
     /// Returns upper bound value.
     pub fn value(&self) -> Option<u128> {
-        if self.invalidated {
-            None
-        } else {
-            self.value
-        }
+        if self.invalidated { None } else { self.value }
     }
 
     /// Returns `true` if upper bound value is a [`Option::None`].

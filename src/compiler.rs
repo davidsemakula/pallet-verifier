@@ -1,15 +1,16 @@
 //! Compiler runner implementation.
 
 use rustc_driver::{
-    args, diagnostics_registry, handle_options, Callbacks, Compilation, DEFAULT_LOCALE_RESOURCES,
-    USING_INTERNAL_FEATURES,
+    Callbacks, Compilation, DEFAULT_LOCALE_RESOURCES, USING_INTERNAL_FEATURES, args,
+    diagnostics_registry, handle_options,
 };
-use rustc_interface::{create_and_enter_global_ctxt, interface, passes, Linker};
+use rustc_interface::{Linker, create_and_enter_global_ctxt, interface, passes};
 use rustc_session::{
+    EarlyDiagCtxt,
     config::{self, ErrorOutputType, Input, OutFileName, OutputType},
-    getopts, EarlyDiagCtxt,
+    getopts,
 };
-use rustc_span::{source_map::FileLoader, FileName};
+use rustc_span::{FileName, source_map::FileLoader};
 
 use std::{
     env,

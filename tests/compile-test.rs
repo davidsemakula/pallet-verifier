@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ui_test::{status_emitter::Text, Args, Config, Format, OutputConflictHandling};
+use ui_test::{Args, Config, Format, OutputConflictHandling, status_emitter::Text};
 
 /// Runs all ui tests.
 fn main() -> ui_test::color_eyre::Result<()> {

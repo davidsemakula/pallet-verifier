@@ -7,15 +7,15 @@ use rustc_ast::BindingMode;
 use rustc_driver::Compilation;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::{
+    HirId, PatKind,
     def::{DefKind, Res},
     definitions::{DefPathData, DisambiguatedDefPathData},
     intravisit::Visitor as _,
-    HirId, PatKind,
 };
 use rustc_middle::{
     mir::{
-        visit::Visitor, AggregateKind, Body, Const, HasLocalDecls, Local, Location, Operand,
-        Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+        AggregateKind, Body, Const, HasLocalDecls, Local, Location, Operand, Rvalue, Statement,
+        StatementKind, Terminator, TerminatorKind, visit::Visitor,
     },
     query,
     ty::{
@@ -24,16 +24,16 @@ use rustc_middle::{
     },
 };
 use rustc_span::{
-    def_id::{DefId, DefPathHash, LocalDefId, LocalModDefId, CRATE_DEF_ID},
+    BytePos, Pos, Span, Symbol,
+    def_id::{CRATE_DEF_ID, DefId, DefPathHash, LocalDefId, LocalModDefId},
     source_map::SourceMap,
     symbol::Ident,
-    BytePos, Pos, Span, Symbol,
 };
 
 use itertools::Itertools;
 use owo_colors::OwoColorize;
 
-use crate::{providers, utils, CallKind, EntryPointsInfo, ENTRY_POINT_FN_PREFIX};
+use crate::{CallKind, ENTRY_POINT_FN_PREFIX, EntryPointsInfo, providers, utils};
 
 /// `rustc` callbacks and utilities for generating tractable "entry points"
 /// for dispatchable functions/extrinsics and public associated functions of FRAME pallets.

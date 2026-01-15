@@ -7,16 +7,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
-        visit::Visitor, BasicBlock, BasicBlockData, BasicBlocks, Body, HasLocalDecls, LocalDecls,
-        Location, Operand, Place, Rvalue, StatementKind, Terminator, TerminatorKind,
+        BasicBlock, BasicBlockData, BasicBlocks, Body, HasLocalDecls, LocalDecls, Location,
+        Operand, Place, Rvalue, StatementKind, Terminator, TerminatorKind, visit::Visitor,
     },
     ty::{
         AssocItemContainer, GenericArg, ImplSubject, List, Region, RegionKind, Ty, TyCtxt, TyKind,
     },
 };
 use rustc_mir_dataflow::{
-    impls::{MaybeBorrowedLocals, MaybeLiveLocals},
     Analysis,
+    impls::{MaybeBorrowedLocals, MaybeLiveLocals},
 };
 use rustc_span::def_id::DefId;
 

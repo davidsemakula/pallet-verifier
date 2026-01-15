@@ -4,8 +4,8 @@ use rustc_abi::Size;
 use rustc_const_eval::interpret::Scalar;
 use rustc_middle::{
     mir::{
-        visit::Visitor, BasicBlocks, Body, CastKind, Const, ConstValue, HasLocalDecls, LocalDecls,
-        Location, Operand, Rvalue, StatementKind,
+        BasicBlocks, Body, CastKind, Const, ConstValue, HasLocalDecls, LocalDecls, Location,
+        Operand, Rvalue, StatementKind, visit::Visitor,
     },
     ty::{AdtKind, ScalarInt, TyCtxt, TyKind, VariantDiscr},
 };

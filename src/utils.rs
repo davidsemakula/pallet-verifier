@@ -2,17 +2,17 @@
 
 use rustc_ast::MetaItemInner;
 use rustc_errors::DiagCtxtHandle;
-use rustc_hir::{def_id::CrateNum, HirId};
+use rustc_hir::{HirId, def_id::CrateNum};
 use rustc_middle::ty::{GenericArg, List, TyCtxt};
-use rustc_span::{def_id::DefId, Symbol};
+use rustc_span::{Symbol, def_id::DefId};
 
 use std::{env, process};
 
 use itertools::Itertools;
 
 use crate::{
-    EntryPointInfo, EntryPointsInfo, ResolvedEntryPoint, ENTRY_POINT_FN_PREFIX,
-    ENV_TARGET_POINTER_WIDTH,
+    ENTRY_POINT_FN_PREFIX, ENV_TARGET_POINTER_WIDTH, EntryPointInfo, EntryPointsInfo,
+    ResolvedEntryPoint,
 };
 
 pub const HOST_POINTER_WIDTH: usize = std::mem::size_of::<usize>() * 8;
@@ -50,7 +50,7 @@ pub fn try_resolve_entry_points<'compilation, 'tcx>(
     entry_points: &'compilation EntryPointsInfo,
     tcx: TyCtxt<'tcx>,
 ) -> impl Iterator<Item = Result<ResolvedEntryPoint, EntryPointInfo<'compilation>>>
-       + use<'tcx, 'compilation> {
++ use<'tcx, 'compilation> {
     tcx.hir_body_owners().filter_map(move |local_def_id| {
         tcx.opt_item_name(local_def_id.to_def_id())
             .and_then(|def_name| {

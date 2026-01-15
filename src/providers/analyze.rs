@@ -1,13 +1,13 @@
 //! Common utilities and helpers for traversing and analyzing MIR.
 
 use rustc_abi::VariantIdx;
-use rustc_data_structures::graph::{dominators::Dominators, StartNode, Successors};
+use rustc_data_structures::graph::{StartNode, Successors, dominators::Dominators};
 use rustc_hash::FxHashSet;
 use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
-        BasicBlock, BasicBlockData, BasicBlocks, LocalDecls, Operand, Place, PlaceElem, Rvalue,
-        Statement, StatementKind, Terminator, TerminatorKind, RETURN_PLACE,
+        BasicBlock, BasicBlockData, BasicBlocks, LocalDecls, Operand, Place, PlaceElem,
+        RETURN_PLACE, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
     },
     ty::{AssocTag, GenericArg, ImplSubject, List, Region, Ty, TyCtxt, TyKind},
 };

@@ -7,7 +7,7 @@ use rustc_driver::Compilation;
 use rustc_hash::FxHashSet;
 use rustc_interface::interface::Compiler;
 use rustc_middle::{
-    mir::{visit::Visitor, LocalDecls, Location, Terminator, TerminatorKind},
+    mir::{LocalDecls, Location, Terminator, TerminatorKind, visit::Visitor},
     query,
     ty::{
         AliasTy, AssocItemContainer, GenericArgs, GenericArgsRef, Instance, Ty, TyCtxt, TyKind,
@@ -23,11 +23,12 @@ use rustc_type_ir::{
 use owo_colors::OwoColorize;
 
 use crate::{
+    EntryPointsInfo,
     providers::{
         self,
         summaries::{self, SummaryTargetInfo},
     },
-    utils, EntryPointsInfo,
+    utils,
 };
 
 /// `rustc` callbacks and utilities for dynamically generating specialized "summaries"

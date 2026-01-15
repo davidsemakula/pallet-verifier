@@ -1,17 +1,17 @@
 //! `rustc` [`MirPass`] for adding annotations for slice (i.e. `[T]`) invariants.
 
+use rustc_abi::VariantIdx;
 use rustc_data_structures::graph::iterate::post_order_from;
 use rustc_hash::FxHashSet;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{
-        visit::Visitor, BasicBlock, BasicBlocks, Body, HasLocalDecls, LocalDecls, Location,
-        Operand, Place, Terminator, TerminatorKind, RETURN_PLACE,
+        BasicBlock, BasicBlocks, Body, HasLocalDecls, LocalDecls, Location, Operand, Place,
+        RETURN_PLACE, Terminator, TerminatorKind, visit::Visitor,
     },
     ty::TyCtxt,
 };
 use rustc_span::source_map::Spanned;
-use rustc_abi::VariantIdx;
 
 use crate::providers::{
     analyze::{self, SwitchVariant},
