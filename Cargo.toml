@@ -1,7 +1,7 @@
 [package]
 name = "pallet-verifier"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "A tool for detecting common security vulnerabilities and insecure patterns in FRAME pallets using static program analysis techniques."
 license = "MIT OR Apache-2.0"
 authors = ["David Semakula <hello@davidsemakula.com>"]

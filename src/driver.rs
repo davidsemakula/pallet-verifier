@@ -32,9 +32,9 @@ use cli_utils::{
 };
 use compiler::run_compiler;
 use pallet_verifier::{
-    DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, EntryPointsInfo,
-    SummariesCallbacks, VerifierCallbacks, VirtualFileLoader, VirtualFileLoaderBuilder,
-    CONTRACTS_MOD_NAME, ENTRY_POINTS_MOD_NAME,
+    CONTRACTS_MOD_NAME, DefaultCallbacks, DependencyCallbacks, ENTRY_POINTS_MOD_NAME,
+    EntryPointsCallbacks, EntryPointsInfo, SummariesCallbacks, VerifierCallbacks,
+    VirtualFileLoader, VirtualFileLoaderBuilder,
 };
 
 const COMMAND: &str = "pallet-verifier";
@@ -492,15 +492,21 @@ fn init_loggers() {
     };
 
     // Initialize `rustc` logger.
-    env::set_var("RUSTC_LOG", &log);
-    env::set_var("RUSTC_LOG_COLOR", "always");
+    // SAFETY: `pallet-verifier` is single-threaded.
+    unsafe {
+        env::set_var("RUSTC_LOG", &log);
+        env::set_var("RUSTC_LOG_COLOR", "always");
+    }
     let early_error_handler =
         rustc_session::EarlyDiagCtxt::new(rustc_session::config::ErrorOutputType::default());
     rustc_driver::init_rustc_env_logger(&early_error_handler);
 
     // Initialize `MIRAI` logger.
-    env::set_var("MIRAI_LOG", &log);
-    env::set_var("MIRAI_LOG_STYLE", "always");
+    // SAFETY: `pallet-verifier` is single-threaded.
+    unsafe {
+        env::set_var("MIRAI_LOG", &log);
+        env::set_var("MIRAI_LOG_STYLE", "always");
+    }
     let e = env_logger::Env::new()
         .filter("MIRAI_LOG")
         .write_style("MIRAI_LOG_STYLE");

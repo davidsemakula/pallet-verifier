@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
-    process::{exit, Command},
+    process::{Command, exit},
 };
 
 use owo_colors::OwoColorize;
@@ -279,7 +279,10 @@ fn call_cargo() {
     ];
     call_pallet_verifier(annotation_args.into_iter(), std::iter::empty(), false);
     let annotations_rlib_path = annotations_out_dir.join(ANNOTATIONS_RLIB_FILENAME);
-    env::set_var(ENV_ANNOTATIONS_RLIB_PATH_HOST, &annotations_rlib_path);
+    // SAFETY: `pallet-verifier` is single-threaded.
+    unsafe {
+        env::set_var(ENV_ANNOTATIONS_RLIB_PATH_HOST, &annotations_rlib_path);
+    }
     let annotations_rlib_path_target = match target_platform {
         Some(target_platform) => {
             // Compiles and persists artifact for "target" platform.
@@ -298,10 +301,13 @@ fn call_cargo() {
         }
         None => annotations_rlib_path,
     };
-    env::set_var(
-        ENV_ANNOTATIONS_RLIB_PATH_TARGET,
-        annotations_rlib_path_target,
-    );
+    // SAFETY: `pallet-verifier` is single-threaded.
+    unsafe {
+        env::set_var(
+            ENV_ANNOTATIONS_RLIB_PATH_TARGET,
+            annotations_rlib_path_target,
+        );
+    }
 
     // Allows compilation of `parity-scale-codec >= 3.7.0` which requires `rustc >= 1.79`
     // Ref: <https://github.com/paritytech/parity-scale-codec/blob/master/Cargo.toml#L73C1-L73C13>
@@ -323,7 +329,10 @@ fn call_cargo() {
     // Track `--allow-hook-panics` arg.
     if cli_utils::has_arg(ARG_ALLOW_HOOK_PANICS) {
         if let Some(arg_value) = cli_utils::arg_value(ARG_ALLOW_HOOK_PANICS) {
-            env::set_var(ENV_ALLOW_HOOK_PANICS, arg_value);
+            // SAFETY: `pallet-verifier` is single-threaded.
+            unsafe {
+                env::set_var(ENV_ALLOW_HOOK_PANICS, arg_value);
+            }
         } else {
             eprintln!(
                 "{}: Missing value(s) for `{ARG_ALLOW_HOOK_PANICS}` arg.\

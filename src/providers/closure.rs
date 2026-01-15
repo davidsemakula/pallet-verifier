@@ -255,9 +255,11 @@ fn closure_invariant_env_key(def_hash: &str) -> String {
 pub fn set_invariant_env(invariant_env: &ClosureInvariantEnv) {
     let invariant_env_json =
         serde_json::to_string(invariant_env).expect("Expected serialized `ClosureInvariantEnv`");
-    // SAFETY: `pallet-verifier` is single-threaded.
     let env_key = closure_invariant_env_key(&invariant_env.def_hash);
-    std::env::set_var(env_key, invariant_env_json);
+    // SAFETY: `pallet-verifier` is single-threaded.
+    unsafe {
+        std::env::set_var(env_key, invariant_env_json);
+    }
 }
 
 /// Retrieves the propagated invariant environment for closure (if any).

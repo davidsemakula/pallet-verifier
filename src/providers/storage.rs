@@ -1,5 +1,6 @@
 //! Common utilities and helpers for analyses related to FRAME storage items.
 
+use rustc_abi::FieldIdx;
 use rustc_ast::Mutability;
 use rustc_data_structures::graph::{dominators::Dominators, iterate::post_order_from};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -18,7 +19,6 @@ use rustc_mir_dataflow::{
     Analysis,
 };
 use rustc_span::def_id::DefId;
-use rustc_abi::FieldIdx;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -663,9 +663,11 @@ const ENV_STORAGE_INVARIANT_PREFIX: &str = "PALLET_VERIFIER_STORAGE_INVARIANT";
 pub fn set_invariant_env(invariant_env: &StorageInvariantEnv) {
     let invariant_env_json =
         serde_json::to_string(invariant_env).expect("Expected serialized `StorageInvariantEnv`");
-    // SAFETY: `pallet-verifier` is single-threaded.
     let env_key = call_propagation_env_key(&invariant_env.call_def_hash);
-    std::env::set_var(env_key, invariant_env_json);
+    // SAFETY: `pallet-verifier` is single-threaded.
+    unsafe {
+        std::env::set_var(env_key, invariant_env_json);
+    }
 }
 
 /// Retrieves the propagated storage invariant environment (if any).

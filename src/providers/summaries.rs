@@ -35,9 +35,11 @@ pub fn add_summary_target<'tcx>(
     summary_target_info.insert((callee_def_hash, callee_gen_args_key));
     let summary_target_info_json = serde_json::to_string(&summary_target_info)
         .expect("Expected serialized `SummaryTargetInfo`");
-    // SAFETY: `pallet-verifier` is single-threaded.
     let env_key = summary_targets_env_key(&caller_def_hash);
-    std::env::set_var(env_key, summary_target_info_json);
+    // SAFETY: `pallet-verifier` is single-threaded.
+    unsafe {
+        std::env::set_var(env_key, summary_target_info_json);
+    }
 }
 
 /// Retrieves specialized summary target calls (if any).
