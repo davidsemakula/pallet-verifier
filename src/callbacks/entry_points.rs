@@ -2389,11 +2389,10 @@ impl<'tcx> CallVisitor<'tcx> {
                     .iter()
                     .filter_map(GenericArg::as_type)
                     .any(|gen_ty| {
-                        let is_param_ty = gen_ty
+                        gen_ty
                             .walk()
                             .filter_map(GenericArg::as_type)
-                            .any(|ty| matches!(ty.kind(), TyKind::Param(_)));
-                        is_param_ty
+                            .any(|ty| matches!(ty.kind(), TyKind::Param(_)))
                     });
             if contains_type_params {
                 self.generic_calls.insert(fn_local_def_id);
