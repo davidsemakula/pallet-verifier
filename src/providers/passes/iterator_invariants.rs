@@ -13,7 +13,6 @@ use rustc_middle::{
     ty::{GenericArgsRef, Ty, TyCtxt, TyKind},
 };
 use rustc_span::{Symbol, def_id::DefId, source_map::Spanned};
-use rustc_type_ir::UintTy;
 
 use std::ops::Deref;
 
@@ -201,7 +200,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
 
         // Determines bounds for collection length/size and index increment operations (if possible).
-        let mut upper_bound = UpperBound::new_usize();
+        let mut upper_bound = UpperBound::new();
         let mut len_bound_info = None;
         let n_non_empty_chains = iterator_subjects.len() - n_empty_subjects;
         for (iterator_subject, mut iterator_subject_block) in iterator_subjects {
@@ -210,7 +209,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             let mut iterator_subject_place = match iterator_subject {
                 IterSubject::Place(place) => place,
                 IterSubject::Empty => {
-                    upper_bound.zero();
+                    upper_bound.zero_if_empty();
                     continue;
                 }
             };
@@ -293,7 +292,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 });
                 if let Some((_, op_place)) = inc_invariant_places {
                     // Declares an upper bound annotation.
-                    if let Some(upper_bound) = upper_bound.value() {
+                    if let Some(upper_bound) = upper_bound.ty_bound(&self.place_ty(op_place)) {
                         self.annotations.push(Annotation::new_const_max(
                             Location {
                                 block: *block,
@@ -368,7 +367,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
 
         // Determines bounds for collection length/size and index increment operations (if possible).
-        let mut upper_bound = UpperBound::new_usize();
+        let mut upper_bound = UpperBound::new();
         let mut len_bound_info = None;
         let mut solo_iterator_subject_info = None;
         let n_non_empty_chains = iterator_subjects.len() - n_empty_subjects;
@@ -378,7 +377,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             let mut iterator_subject_place = match iterator_subject {
                 IterSubject::Place(place) => place,
                 IterSubject::Empty => {
-                    upper_bound.zero();
+                    upper_bound.zero_if_empty();
                     continue;
                 }
             };
@@ -507,7 +506,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     statement_index: stmt_idx + 1,
                 };
                 let cond_op = CondOp::Lt;
-                if let Some(upper_bound) = upper_bound.value() {
+                if let Some(upper_bound) = upper_bound.ty_bound(&self.place_ty(downcast_place)) {
                     self.annotations.push(Annotation::new_const_max(
                         annotation_location,
                         cond_op,
@@ -648,7 +647,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             statement_index: 0,
         };
         let cond_op = CondOp::Le;
-        let mut upper_bound = UpperBound::new_usize();
+        let mut upper_bound = UpperBound::new();
         let n_non_empty_chains = iterator_subjects.len() - n_empty_subjects;
         for (iterator_subject, mut iterator_subject_block) in iterator_subjects {
             // Unwraps the subject place (if any),
@@ -656,7 +655,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             let mut iterator_subject_place = match iterator_subject {
                 IterSubject::Place(place) => place,
                 IterSubject::Empty => {
-                    upper_bound.zero();
+                    upper_bound.zero_if_empty();
                     continue;
                 }
             };
@@ -758,7 +757,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
 
         // Declares an upper bound annotation, if one was determined.
-        if let Some(upper_bound) = upper_bound.value() {
+        if let Some(upper_bound) = upper_bound.ty_bound(&self.place_ty(*destination)) {
             self.annotations.push(Annotation::new_const_max(
                 annotation_location,
                 cond_op,
@@ -1433,7 +1432,7 @@ fn unit_incr_assign_places<'tcx>(stmt: &Statement<'tcx>) -> Option<(Place<'tcx>,
     let (const_operand, op_place) = match (&operands.0, &operands.1) {
         (Operand::Constant(const_operand), Operand::Copy(place) | Operand::Move(place))
         | (Operand::Copy(place) | Operand::Move(place), Operand::Constant(const_operand))
-            if *const_operand.ty().kind() == TyKind::Uint(UintTy::Usize) =>
+            if const_operand.ty().is_integral() =>
         {
             Some((const_operand, place))
         }
@@ -1590,48 +1589,30 @@ fn is_enumerate_index<'tcx>(
 }
 
 /// An upper bound.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct UpperBound {
     /// Upper bound value.
     value: Option<u128>,
-    /// Maximum possible value from the value domain (used for overflow protection).
-    max: u128,
-    /// When set to true, value is always return as None.
+    /// When set to true, value is always returned as None.
     invalidated: bool,
 }
 
 impl UpperBound {
-    /// Creates new upper bound and sets a maxima that it shouldn't overflow.
-    pub fn new(value: Option<u128>, max: u128) -> Self {
-        Self {
-            value,
-            max,
-            invalidated: false,
-        }
+    /// Creates new upper bound.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Creates new unknown upper bound with a usize maxima.
-    pub fn new_usize() -> Self {
-        Self::new(None, utils::target_usize_max())
-    }
-
-    /// Increase the upper bound by value if it doesn't overflow the maximum value,
+    /// Increase the upper bound by value if it doesn't overflow,
     /// otherwise unsets it bound.
     pub fn increase(&mut self, value: u128) {
         if self.invalidated {
             self.set(None);
             return;
         }
-        let new_bound = if value > self.max {
-            None
-        } else {
-            match self.value {
-                Some(current) if current <= self.max && value <= (self.max - current) => {
-                    Some(current + value)
-                }
-                None => Some(value),
-                _ => None,
-            }
+        let new_bound = match self.value {
+            Some(current) => current.checked_add(value),
+            None => Some(value),
         };
         self.set(new_bound);
     }
@@ -1647,14 +1628,23 @@ impl UpperBound {
         if self.invalidated { None } else { self.value }
     }
 
+    /// Returns upper bound value, if it's valid for the given type.
+    pub fn ty_bound(&self, ty: &Ty) -> Option<u128> {
+        let value = self.value()?;
+        let max = utils::int_max(ty.kind())?;
+        (value <= max).then_some(value)
+    }
+
     /// Returns `true` if upper bound value is a [`Option::None`].
     pub fn is_none(&self) -> bool {
         self.value.is_none()
     }
 
-    /// Sets upper bound value to zero.
-    pub fn zero(&mut self) {
-        self.set(Some(0));
+    /// Sets upper bound value to zero (if it isn't already set).
+    pub fn zero_if_empty(&mut self) {
+        if self.is_none() {
+            self.set(Some(0));
+        }
     }
 
     /// Sets upper bound value.

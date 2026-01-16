@@ -25,7 +25,7 @@ use crate::utils;
 pub enum Annotation<'tcx> {
     /// An integer cast overflow check.
     CastOverflow(Location, CondOp, Operand<'tcx>, Operand<'tcx>),
-    /// An constant maximum bound annotation (e.g. an `isize::MAX` upper bound).
+    /// A constant maximum bound annotation (e.g. an `isize::MAX` upper bound).
     ConstMax(Location, CondOp, Place<'tcx>, u128),
     /// A collection length/size bound annotation.
     Len(
@@ -46,7 +46,7 @@ pub enum Annotation<'tcx> {
 }
 
 impl<'tcx> Annotation<'tcx> {
-    /// Creates an `isize::MAX` bound annotation.
+    /// Creates a constant maximum bound annotation.
     pub fn new_const_max(
         location: Location,
         cond_op: CondOp,
@@ -121,10 +121,15 @@ impl<'tcx> Annotation<'tcx> {
                 )
             }
             Annotation::ConstMax(_, cond_op, op_place, bound) => {
-                // Creates `isize::MAX` bound statement.
+                // Creates a constant maximum bound statement (if possible).
+                let op_ty = op_place.ty(body.local_decls(), tcx).ty;
+                let Some(bound_op) = const_int_operand(bound, op_ty, tcx) else {
+                    // Either the bound was too large, or operand is not an integer.
+                    return;
+                };
                 let arg_rvalue = Rvalue::BinaryOp(
                     cond_op.into(),
-                    Box::new((Operand::Copy(op_place), const_int_operand(bound, tcx))),
+                    Box::new((Operand::Copy(op_place), bound_op)),
                 );
                 let arg_stmt = Statement {
                     source_info,
@@ -412,15 +417,22 @@ fn cast_overflow_diag_message(tcx: TyCtxt) -> Operand {
     }))
 }
 
-// Creates integer operand.
-fn const_int_operand(val: u128, tcx: TyCtxt) -> Operand {
-    let pointer_width = utils::target_pointer_width();
-    let isize_max_scalar = ScalarInt::try_from_uint(val, Size::from_bits(pointer_width))
-        .expect("Expected a valid scalar bound");
-    Operand::const_from_scalar(
+// Creates integer operand of given type (if possible).
+//
+// # Note
+//
+// The value must be in bounds for the given integer type.
+fn const_int_operand<'tcx>(val: u128, ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> Option<Operand<'tcx>> {
+    let ty_max = utils::int_max(ty.kind())?;
+    if val > ty_max {
+        return None;
+    }
+    let bit_width = utils::int_bit_width(ty.kind())?;
+    let int_scalar = ScalarInt::try_from_uint(val, Size::from_bits(bit_width))?;
+    Some(Operand::const_from_scalar(
         tcx,
-        tcx.types.usize,
-        Scalar::Int(isize_max_scalar),
+        ty,
+        Scalar::Int(int_scalar),
         Span::default(),
-    )
+    ))
 }

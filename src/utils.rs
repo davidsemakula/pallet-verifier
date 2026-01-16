@@ -3,8 +3,9 @@
 use rustc_ast::MetaItemInner;
 use rustc_errors::DiagCtxtHandle;
 use rustc_hir::{HirId, def_id::CrateNum};
-use rustc_middle::ty::{GenericArg, List, TyCtxt};
+use rustc_middle::ty::{GenericArg, List, TyCtxt, TyKind};
 use rustc_span::{Symbol, def_id::DefId};
+use rustc_type_ir::{IntTy, UintTy};
 
 use std::{env, process};
 
@@ -198,4 +199,38 @@ pub fn includes_query_type(gen_args: &List<GenericArg>, tcx: TyCtxt) -> bool {
 /// Returns a string representation of the `DefPathHash` of the given `DefId`.
 pub fn def_hash_str(def_id: DefId, tcx: TyCtxt) -> String {
     format!("{:?}", tcx.def_path_hash(def_id))
+}
+
+/// Returns the maximum value for the given integer type kind.
+pub fn int_max(kind: &TyKind) -> Option<u128> {
+    let val = match kind {
+        TyKind::Int(IntTy::I8) => i8::MAX as u128,
+        TyKind::Int(IntTy::I16) => i16::MAX as u128,
+        TyKind::Int(IntTy::I32) => i32::MAX as u128,
+        TyKind::Int(IntTy::I64) => i64::MAX as u128,
+        TyKind::Int(IntTy::I128) => i128::MAX as u128,
+        TyKind::Int(IntTy::Isize) => target_isize_max(),
+        TyKind::Uint(UintTy::U8) => u8::MAX as u128,
+        TyKind::Uint(UintTy::U16) => u16::MAX as u128,
+        TyKind::Uint(UintTy::U32) => u32::MAX as u128,
+        TyKind::Uint(UintTy::U64) => u64::MAX as u128,
+        TyKind::Uint(UintTy::U128) => u128::MAX,
+        TyKind::Uint(UintTy::Usize) => target_usize_max(),
+        _ => return None,
+    };
+    Some(val)
+}
+
+/// Returns the bit width for the given integer type kind.
+pub fn int_bit_width(kind: &TyKind) -> Option<usize> {
+    let val = match kind {
+        TyKind::Int(IntTy::I8) | TyKind::Uint(UintTy::U8) => 8,
+        TyKind::Int(IntTy::I16) | TyKind::Uint(UintTy::U16) => 16,
+        TyKind::Int(IntTy::I32) | TyKind::Uint(UintTy::U32) => 32,
+        TyKind::Int(IntTy::I64) | TyKind::Uint(UintTy::U64) => 64,
+        TyKind::Int(IntTy::I128) | TyKind::Uint(UintTy::U128) => 128,
+        TyKind::Int(IntTy::Isize) | TyKind::Uint(UintTy::Usize) => target_pointer_width(),
+        _ => return None,
+    };
+    Some(val)
 }
