@@ -1,8 +1,0 @@
-warning: possible no zeros!
-  --> tests/ui/driver/tractable-skeleton-panic.rs:26:17
-   |
-LL |                 panic!("no zeros!");
-   |                 ^^^^^^^^^^^^^^^^^^^
-
-warning: 1 warning emitted
-

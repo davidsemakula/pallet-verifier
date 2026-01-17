@@ -13,8 +13,24 @@ mod pallet {
     impl<T: Config> Pallet<T> {
         #[pallet::call_index(0)]
         #[pallet::weight(0)]
-        pub fn do_something(origin: OriginFor<T>, val: u8) -> DispatchResult {
-            // do something
+        pub fn add(origin: OriginFor<T>, val: u8) -> DispatchResult {
+            val + 1; //~ WARN: add with overflow
+
+            Ok(())
+        }
+
+        #[pallet::call_index(1)]
+        #[pallet::weight(0)]
+        pub fn subtract(origin: OriginFor<T>, val: u8) -> DispatchResult {
+            val - 1; //~ WARN: subtract with overflow
+
+            Ok(())
+        }
+
+        #[pallet::call_index(2)]
+        #[pallet::weight(0)]
+        pub fn multiply(origin: OriginFor<T>, val: u8) -> DispatchResult {
+            val * 2; //~ WARN: multiply with overflow
 
             Ok(())
         }
@@ -52,7 +68,7 @@ mod tests {
         let mut ext = sp_io::TestExternalities::new(t);
         ext.execute_with(|| {
             System::set_block_number(1);
-            Minimal::do_something(RuntimeOrigin::signed(0), 0);
+            Minimal::add(RuntimeOrigin::signed(0), 0);
         });
     }
 }

@@ -13,8 +13,18 @@ mod pallet {
     impl<T: Config> Pallet<T> {
         #[pallet::call_index(0)]
         #[pallet::weight(0)]
-        pub fn do_something(origin: OriginFor<T>, val: u8) -> DispatchResult {
-            // do something
+        pub fn int_cast(origin: OriginFor<T>, val: u8) -> DispatchResult {
+            let _ = val as u16;
+
+            Ok(())
+        }
+
+        #[pallet::call_index(1)]
+        #[pallet::weight(0)]
+        pub fn int_cast_conditional(origin: OriginFor<T>, val: u16) -> DispatchResult {
+            if val <= u8::MAX as u16 {
+                let _ = val as u8;
+            }
 
             Ok(())
         }
@@ -52,7 +62,7 @@ mod tests {
         let mut ext = sp_io::TestExternalities::new(t);
         ext.execute_with(|| {
             System::set_block_number(1);
-            Minimal::do_something(RuntimeOrigin::signed(0), 0);
+            Minimal::int_cast(RuntimeOrigin::signed(0), 0);
         });
     }
 }

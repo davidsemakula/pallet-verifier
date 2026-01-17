@@ -1,6 +1,0 @@
-warning: possible attempt to divide by zero
-  --> src/lib.rs:20:13
-   |
-LL |             1 / val; //~ WARN: divide by zero
-   |             ^^^^^^^
-

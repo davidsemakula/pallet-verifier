@@ -1,0 +1,18 @@
+warning: possible attempt to add with overflow
+  --> src/lib.rs:17:13
+   |
+LL |             val + 1; //~ WARN: add with overflow
+   |             ^^^^^^^
+
+warning: possible attempt to multiply with overflow
+  --> src/lib.rs:33:13
+   |
+LL |             val * 2; //~ WARN: multiply with overflow
+   |             ^^^^^^^
+
+warning: possible attempt to subtract with overflow
+  --> src/lib.rs:25:13
+   |
+LL |             val - 1; //~ WARN: subtract with overflow
+   |             ^^^^^^^
+

@@ -14,7 +14,9 @@ mod pallet {
         #[pallet::call_index(0)]
         #[pallet::weight(0)]
         pub fn do_something(origin: OriginFor<T>, val: u8) -> DispatchResult {
-            // do something
+            if val == 0 {
+                panic!("no zeros!"); //~ WARN: no zeros!
+            }
 
             Ok(())
         }

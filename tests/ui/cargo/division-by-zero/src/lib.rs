@@ -13,8 +13,8 @@ mod pallet {
     impl<T: Config> Pallet<T> {
         #[pallet::call_index(0)]
         #[pallet::weight(0)]
-        pub fn do_something(origin: OriginFor<T>, val: u8) -> DispatchResult {
-            // do something
+        pub fn divide(origin: OriginFor<T>, val: u8) -> DispatchResult {
+            1 / val; //~ WARN: divide by zero
 
             Ok(())
         }
@@ -52,7 +52,7 @@ mod tests {
         let mut ext = sp_io::TestExternalities::new(t);
         ext.execute_with(|| {
             System::set_block_number(1);
-            Minimal::do_something(RuntimeOrigin::signed(0), 0);
+            Minimal::divide(RuntimeOrigin::signed(0), 1);
         });
     }
 }

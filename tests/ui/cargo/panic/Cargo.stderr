@@ -1,0 +1,6 @@
+warning: possible no zeros!
+  --> src/lib.rs:18:17
+   |
+LL |                 panic!("no zeros!"); //~ WARN: no zeros!
+   |                 ^^^^^^^^^^^^^^^^^^^
+

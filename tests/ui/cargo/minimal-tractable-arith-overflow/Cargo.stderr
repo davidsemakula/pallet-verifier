@@ -1,6 +1,0 @@
-warning: possible attempt to add with overflow
-  --> src/lib.rs:20:13
-   |
-LL |             val + 1; //~ WARN: add with overflow
-   |             ^^^^^^^
-

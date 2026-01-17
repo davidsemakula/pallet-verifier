@@ -1,8 +1,0 @@
-warning: possible attempt to add with overflow
-  --> tests/ui/driver/tractable-skeleton-arith-overflow.rs:25:13
-   |
-LL |             val + 1;
-   |             ^^^^^^^
-
-warning: 1 warning emitted
-
