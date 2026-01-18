@@ -1,0 +1,18 @@
+warning: possible attempt to add with overflow
+  --> src/lib.rs:41:21
+   |
+LL |             let _ = count + 1; //~ WARN: add with overflow
+   |                     ^^^^^^^^^
+
+warning: possible attempt to add with overflow
+  --> src/lib.rs:21:17
+   |
+LL |                 count += 1; //~ WARN: add with overflow
+   |                 ^^^^^^^^^^
+
+warning: possible attempt to add with overflow
+  --> src/lib.rs:31:25
+   |
+LL |                 let _ = idx + 1; //~ WARN: add with overflow
+   |                         ^^^^^^^
+
