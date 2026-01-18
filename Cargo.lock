@@ -778,7 +778,7 @@ dependencies = [
 [[package]]
 name = "mirai"
 version = "1.1.12"
-source = "git+https://github.com/davidsemakula/MIRAI.git?branch=pallet-verifier-2025-05-09#7b8b32bd1ca0742c3689c0ecc0a318492180af40"
+source = "git+https://github.com/davidsemakula/MIRAI.git?branch=pallet-verifier-2025-05-09#d830c9b170afa3b7f55bbc0d79995c843ad118d0"
 dependencies = [
  "bincode",
  "cargo_metadata",
@@ -815,7 +815,7 @@ checksum = "c9be0862c1b3f26a88803c4a49de6889c10e608b3ee9344e6ef5b45fb37ad3d1"
 [[package]]
 name = "mirai-annotations"
 version = "1.12.1"
-source = "git+https://github.com/davidsemakula/MIRAI.git?branch=pallet-verifier-2025-05-09#7b8b32bd1ca0742c3689c0ecc0a318492180af40"
+source = "git+https://github.com/davidsemakula/MIRAI.git?branch=pallet-verifier-2025-05-09#d830c9b170afa3b7f55bbc0d79995c843ad118d0"
 
 [[package]]
 name = "nom"
