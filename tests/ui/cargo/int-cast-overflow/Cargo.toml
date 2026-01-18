@@ -1,5 +1,5 @@
 [package]
-name = "minimal-tractable-int-cast-overflow"
+name = "int-cast-overflow"
 version = "0.1.0"
 edition = "2021"
 

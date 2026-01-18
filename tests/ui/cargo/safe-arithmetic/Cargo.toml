@@ -1,5 +1,5 @@
 [package]
-name = "minimal-tractable-safe-arith-saturating"
+name = "safe-arithmetic"
 version = "0.1.0"
 edition = "2021"
 
