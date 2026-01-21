@@ -154,6 +154,16 @@ fn main() {
         );
     }
 
+    // Deletes incremental artifacts (if any).
+    // NOTE: Using cached artifacts (specifically MIR) means we don't generate "dynamic summaries",
+    // making our analysis less precise, see [`SummariesCallbacks`] for details.
+    if let Some(dir_path) = cli_utils::arg_value("incremental") {
+        let dir_path = Path::new(&dir_path);
+        if dir_path.exists() && dir_path.is_dir() {
+            let _ = fs::remove_dir_all(dir_path);
+        }
+    }
+
     // Generates "tractable" entry points for FRAME pallet (if possible).
     let (entry_points_content, entry_points_info) = match generate_entry_points(&args) {
         Ok(res) => res,
