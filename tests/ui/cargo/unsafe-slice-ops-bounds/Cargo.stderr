@@ -1,0 +1,34 @@
+warning: possible index out of bounds
+  --> src/lib.rs:19:29
+   |
+LL |                 let _ = data[pos]; //~ WARN: possible index out of bounds
+   |                             ^^^^^
+   |
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:16:9
+   |
+LL |         index.index(self)
+   |         ^^^^^^^^^^^^^^^^^
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:274:10
+   |
+LL |         &(*slice)[self]
+   |          ^^^^^^^^^^^^^^
+
+warning: possible index out of bounds
+  --> src/lib.rs:30:29
+   |
+LL |                 let _ = data[pos]; //~ WARN: possible index out of bounds
+   |                             ^^^^^
+   |
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:16:9
+   |
+LL |         index.index(self)
+   |         ^^^^^^^^^^^^^^^^^
+note: related location
+  --> /Users/david/.rustup/toolchains/nightly-2025-05-09-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/slice/index.rs:274:10
+   |
+LL |         &(*slice)[self]
+   |          ^^^^^^^^^^^^^^
+
