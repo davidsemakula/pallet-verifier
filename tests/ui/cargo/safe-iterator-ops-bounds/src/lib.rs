@@ -117,6 +117,18 @@ mod pallet {
 
         #[pallet::call_index(7)]
         #[pallet::weight(0)]
+        pub fn rposition(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
+            let pos = data.iter().rposition(|item| *item == 0);
+            if let Some(pos) = pos {
+                // pos is always in bounds.
+                let _ = data[pos];
+            }
+
+            Ok(())
+        }
+
+        #[pallet::call_index(8)]
+        #[pallet::weight(0)]
         pub fn position_complex(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             let pos = data.iter().position(|item| *item == 0);
             match pos {
@@ -135,7 +147,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(8)]
+        #[pallet::call_index(9)]
         #[pallet::weight(0)]
         pub fn count(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             // Number of elements <= isize::MAX, so count is always < usize::MAX
@@ -145,7 +157,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(9)]
+        #[pallet::call_index(10)]
         #[pallet::weight(0)]
         pub fn count_transform(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             // Number of elements <= isize::MAX, so count is always < usize::MAX
@@ -160,7 +172,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(10)]
+        #[pallet::call_index(11)]
         #[pallet::weight(0)]
         pub fn count_chain(origin: OriginFor<T>, data1: Vec<u8>, data2: Vec<u8>) -> DispatchResult {
             // Number of elements <= 2 * isize::MAX, so count is always < usize::MAX
