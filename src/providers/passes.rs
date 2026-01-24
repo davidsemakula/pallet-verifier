@@ -2,12 +2,14 @@
 //!
 //! [MIRAI-annotations]: https://crates.io/crates/mirai-annotations
 
+mod collection_invariants;
 mod int_cast_overflow;
 mod iterator_invariants;
 mod slice_invariants;
 
 use rustc_middle::{mir::Body, ty::TyCtxt};
 
+pub use collection_invariants::CollectionInvariants;
 pub use int_cast_overflow::IntCastOverflowChecks;
 pub use iterator_invariants::IteratorInvariants;
 pub use slice_invariants::SliceInvariants;

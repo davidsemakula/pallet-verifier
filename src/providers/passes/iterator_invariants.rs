@@ -148,16 +148,6 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             );
         }
 
-        // Handles calls to collection `len` methods.
-        if self
-            .tcx
-            .opt_item_name(def_id)
-            .is_some_and(|name| name.as_str() == "len")
-            && args.len() == 1
-        {
-            self.process_len(args, destination, target.as_ref());
-        }
-
         // Handles propagated return place iterator (r)position invariants.
         let storage_invariant_env = storage::find_invariant_env(def_id, self.tcx)
             .filter(|invariant| invariant.source == InvariantSource::IteratorPosition);
@@ -768,38 +758,6 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             // Adds specialized summary for `Iterator::count` subject.
             summaries::add_summary_target(self.def_id, def_id, gen_args, self.tcx);
         }
-    }
-
-    /// Analyzes and annotates calls to collection `len` methods.
-    fn process_len(
-        &mut self,
-        args: &[Spanned<Operand<'tcx>>],
-        destination: &Place<'tcx>,
-        target: Option<&BasicBlock>,
-    ) {
-        // Only continues if `len` method operand/arg has a length/size with `isize::MAX` maxima
-        let Some(len_arg) = args.first() else {
-            return;
-        };
-        let len_arg_ty = len_arg.node.ty(self.local_decls, self.tcx);
-        if !analyze::is_isize_bound_collection(len_arg_ty, self.tcx) {
-            return;
-        }
-
-        // Only continues if the terminator has a target basic block.
-        let Some(target) = target else {
-            return;
-        };
-
-        // Declares an `isize::MAX` bound annotation.
-        self.annotations.push(Annotation::new_isize_max(
-            Location {
-                block: *target,
-                statement_index: 0,
-            },
-            CondOp::Le,
-            *destination,
-        ));
     }
 
     // Propagates return place iterator (r)position invariants.

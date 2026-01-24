@@ -11,7 +11,9 @@ use rustc_hir::def::DefKind;
 use rustc_middle::{mir::Body, ty::TyCtxt, util::Providers};
 use rustc_span::def_id::LocalDefId;
 
-use passes::{IntCastOverflowChecks, IteratorInvariants, MirPass, SliceInvariants};
+use passes::{
+    CollectionInvariants, IntCastOverflowChecks, IteratorInvariants, MirPass, SliceInvariants,
+};
 
 /// Overrides the `optimized_mir` query.
 pub fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
@@ -21,9 +23,10 @@ pub fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
     let mut body = (providers.optimized_mir)(tcx, did).clone();
 
     // Runs custom MIR passes.
-    let passes: [&dyn MirPass; 3] = [
+    let passes: [&dyn MirPass; 4] = [
         &IntCastOverflowChecks,
         &IteratorInvariants,
+        &CollectionInvariants,
         &SliceInvariants,
     ];
     for pass in passes {
