@@ -184,6 +184,19 @@ mod pallet {
 
             Ok(())
         }
+
+        #[pallet::call_index(12)]
+        #[pallet::weight(0)]
+        pub fn count_multiple(
+            origin: OriginFor<T>,
+            data1: Vec<u8>,
+            data2: Vec<u8>,
+        ) -> DispatchResult {
+            // Number of total elements <= 2 * isize::MAX, so count is always < usize::MAX
+            let count = data1.iter().count() + data2.iter().count();
+
+            Ok(())
+        }
     }
 }
 

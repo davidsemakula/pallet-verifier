@@ -5,6 +5,12 @@ LL |             let _ = count + 1; //~ WARN: add with overflow
    |                     ^^^^^^^^^
 
 warning: possible attempt to add with overflow
+  --> src/lib.rs:54:25
+   |
+LL |             let count = data1.iter().count() + data2.iter().count() + data3.iter().count(); //~ WARN: add with overflow
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: possible attempt to add with overflow
   --> src/lib.rs:21:17
    |
 LL |                 count += 1; //~ WARN: add with overflow

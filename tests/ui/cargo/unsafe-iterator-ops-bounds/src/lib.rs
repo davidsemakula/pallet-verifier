@@ -42,6 +42,19 @@ mod pallet {
 
             Ok(())
         }
+
+        #[pallet::call_index(12)]
+        #[pallet::weight(0)]
+        pub fn count_multiple(
+            origin: OriginFor<T>,
+            data1: Vec<u8>,
+            data2: Vec<u8>,
+            data3: Vec<u8>,
+        ) -> DispatchResult {
+            let count = data1.iter().count() + data2.iter().count() + data3.iter().count(); //~ WARN: add with overflow
+
+            Ok(())
+        }
     }
 }
 
