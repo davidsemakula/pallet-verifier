@@ -1,0 +1,12 @@
+warning: possible attempt to add with overflow
+  --> src/lib.rs:22:21
+   |
+LL |             let _ = len + 1; //~ WARN: add with overflow
+   |                     ^^^^^^^
+
+warning: possible attempt to add with overflow
+  --> src/lib.rs:35:23
+   |
+LL |             let len = data1.len() + data2.len() + data3.len(); //~ WARN: add with overflow
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
