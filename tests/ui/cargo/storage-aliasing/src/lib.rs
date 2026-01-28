@@ -1,9 +1,5 @@
-extern crate alloc;
-
 #[frame_support::pallet]
 mod pallet {
-    use alloc::vec::Vec;
-
     use frame_support::pallet_prelude::*;
     use frame_system::pallet_prelude::*;
 

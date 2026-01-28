@@ -15,7 +15,7 @@ mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        #[pallet::call_index(9)]
+        #[pallet::call_index(0)]
         #[pallet::weight(0)]
         pub fn len(origin: OriginFor<T>, data: BTreeSet<u8>) -> DispatchResult {
             let len = data.len();
@@ -24,7 +24,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(12)]
+        #[pallet::call_index(1)]
         #[pallet::weight(0)]
         pub fn len_multiple(
             origin: OriginFor<T>,

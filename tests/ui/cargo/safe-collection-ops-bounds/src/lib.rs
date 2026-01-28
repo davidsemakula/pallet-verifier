@@ -11,7 +11,7 @@ mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        #[pallet::call_index(9)]
+        #[pallet::call_index(0)]
         #[pallet::weight(0)]
         pub fn len(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             // Number of elements <= isize::MAX, so len is always < usize::MAX
@@ -21,7 +21,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(12)]
+        #[pallet::call_index(1)]
         #[pallet::weight(0)]
         pub fn len_multiple(
             origin: OriginFor<T>,
