@@ -7,8 +7,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::LangItem;
 use rustc_middle::{
     mir::{
-        BasicBlock, BasicBlockData, BasicBlocks, Body, HasLocalDecls, LocalDecls, Location,
-        Operand, Place, Rvalue, StatementKind, Terminator, TerminatorKind, visit::Visitor,
+        BasicBlock, BasicBlockData, BasicBlocks, Body, BorrowKind, HasLocalDecls, LocalDecls,
+        Location, Operand, Place, Rvalue, StatementKind, Terminator, TerminatorKind,
+        visit::Visitor,
     },
     ty::{
         AssocItemContainer, GenericArg, ImplSubject, List, Region, RegionKind, Ty, TyCtxt, TyKind,
@@ -57,6 +58,7 @@ pub type StorageInvariant<'tcx> = (
 );
 
 /// Identifier for storage item.
+#[derive(Debug, Clone)]
 pub enum StorageId {
     /// `DefId` of generated storage item.
     ///
@@ -266,7 +268,8 @@ pub fn propagate_invariants<'tcx>(
             for (annotation_location, cond_op, invariant_place) in &invariants {
                 // Finds the live or borrowed invariant propagation place.
                 let is_live_or_borrowed = live_domain.contains(invariant_place.local)
-                    || borrowed_domain.contains(invariant_place.local);
+                    || borrowed_domain.contains(invariant_place.local)
+                    || *block == annotation_location.block;
                 let invariant_prop_place =
                     is_live_or_borrowed.then_some(*invariant_place).or_else(|| {
                         // TODO: Remove this aliasing logic when SSA optimizations are enabled
@@ -278,6 +281,11 @@ pub fn propagate_invariants<'tcx>(
                                 if let StatementKind::Assign(assign) = &stmt.kind {
                                     if let Rvalue::Use(
                                         Operand::Copy(op_place) | Operand::Move(op_place),
+                                    )
+                                    | Rvalue::Ref(
+                                        _,
+                                        BorrowKind::Shared | BorrowKind::Fake(_),
+                                        op_place,
                                     ) = assign.1
                                     {
                                         let assign_place = assign.0;
