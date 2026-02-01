@@ -499,10 +499,9 @@ fn compile_dependency(rustc_path: String, args: impl Iterator<Item = String>) {
             std::iter::empty(),
             true,
         );
-    } else if crate_name
-        .as_ref()
-        .is_some_and(|crate_name| cli_utils::requires_unstable_features(crate_name))
-    {
+    } else if crate_name.as_ref().is_some_and(|crate_name| {
+        cli_utils::requires_unstable_features(crate_name) || (is_wasm && crate_name == "tokio")
+    }) {
         // Compiles dependencies that require unstable features with `pallet-verifier`.
         call_pallet_verifier(
             args.chain([ARG_DEP_FEATURES, "true"].map(ToString::to_string)),

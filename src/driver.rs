@@ -299,7 +299,33 @@ fn compile_dependency(args: &[String]) -> i32 {
     let target_path = analysis_target_path(args);
     let crate_name = cli_utils::arg_value("--crate-name").expect("Expected a target crate");
     let features = lang_features(&crate_name);
-    if let Some(features) = features {
+    if crate_name == "tokio" {
+        // NOTE: `tokio` doesn't support some features (e.g. `net`) for `Wasm` targets
+        // unless the `--cfg tokio_unstable` flag is set.
+        // Ref: <https://github.com/tokio-rs/tokio/blob/master/tokio/src/lib.rs#L463-L475>
+        let mut args = args.to_vec();
+        args.push("--cfg=tokio_unstable".to_string());
+        let target_path = analysis_target_path(&args);
+        let shims = include_str!("../artifacts/tokio_shims.rs").to_owned();
+        let mut file_loader_builder = VirtualFileLoaderBuilder::default();
+        file_loader_builder.add_path(
+            target_path,
+            None,
+            None,
+            Some(
+                [
+                    // Adds "shims" for features that aren't available for Wasm targets.
+                    ("__pallet_verifier_shims", shims),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            ),
+            features,
+        );
+        let file_loader = file_loader_builder.build();
+        run_compiler(&args, &mut callbacks, Some(Box::new(file_loader)))
+    } else if let Some(features) = features {
         let mut file_loader_builder = VirtualFileLoaderBuilder::default();
         file_loader_builder.enable_unstable_features(target_path, features);
         let file_loader = file_loader_builder.build();
