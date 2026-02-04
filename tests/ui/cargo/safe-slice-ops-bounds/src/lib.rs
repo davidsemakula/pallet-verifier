@@ -37,6 +37,25 @@ mod pallet {
 
         #[pallet::call_index(2)]
         #[pallet::weight(0)]
+        pub fn binary_search_complex_match(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
+            let res = data.binary_search(&0);
+            match res {
+                Ok(pos) => {
+                    // pos is always in bounds.
+                    let _ = data[pos];
+                }
+                Err(0) => (),
+                Err(pos) => {
+                    // pos - 1 is always in bounds, and doesn't overflow since pos > 0.
+                    let _ = data[pos - 1];
+                }
+            }
+
+            Ok(())
+        }
+
+        #[pallet::call_index(3)]
+        #[pallet::weight(0)]
         pub fn binary_search_by(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             let res = data.binary_search_by(|item| item.cmp(&10));
             if let Ok(pos) = res {
@@ -47,7 +66,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(3)]
+        #[pallet::call_index(4)]
         #[pallet::weight(0)]
         pub fn binary_search_by_key(origin: OriginFor<T>, data: Vec<(u8, u8)>) -> DispatchResult {
             let res = data.binary_search_by_key(&0, |&(x, y)| x);
@@ -59,7 +78,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(4)]
+        #[pallet::call_index(5)]
         #[pallet::weight(0)]
         pub fn partition_point(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             // Number of elements <= isize::MAX, so pos is always < usize::MAX

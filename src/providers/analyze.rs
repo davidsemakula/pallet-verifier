@@ -858,23 +858,23 @@ pub fn collect_switch_targets_for_discr_value<'tcx>(
         target_blocks: &mut FxHashSet<BasicBlock>,
         already_visited: &mut FxHashSet<BasicBlock>,
     ) {
-        for bb in basic_blocks.successors(anchor_block) {
-            if already_visited.contains(&bb) {
+        for successor_block in basic_blocks.successors(anchor_block) {
+            if already_visited.contains(&successor_block) {
                 continue;
             }
-            already_visited.insert(bb);
+            already_visited.insert(successor_block);
 
             // Finds switch target (if any) for the discriminant with the given value.
-            if let Some(target_bb) =
-                switch_target_for_discr_value(destination, value, &basic_blocks[bb])
+            if let Some(target_block) =
+                switch_target_for_discr_value(destination, value, &basic_blocks[successor_block])
             {
-                target_blocks.insert(target_bb);
+                target_blocks.insert(target_block);
             }
 
             collect_switch_targets_for_discr_value_inner(
                 destination,
                 value,
-                bb,
+                successor_block,
                 basic_blocks,
                 target_blocks,
                 already_visited,
@@ -887,9 +887,9 @@ pub fn collect_switch_targets_for_discr_value<'tcx>(
 fn switch_target_for_discr_value<'tcx>(
     place: Place<'tcx>,
     value: u128,
-    bb_data: &BasicBlockData<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
 ) -> Option<BasicBlock> {
-    bb_data.statements.iter().find_map(|stmt| {
+    block_data.statements.iter().find_map(|stmt| {
         let StatementKind::Assign(assign) = &stmt.kind else {
             return None;
         };
@@ -900,7 +900,7 @@ fn switch_target_for_discr_value<'tcx>(
             return None;
         }
 
-        let terminator = bb_data.terminator.as_ref()?;
+        let terminator = block_data.terminator.as_ref()?;
         let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {
             return None;
         };
@@ -934,23 +934,31 @@ pub fn variant_downcast_to_ty_place<'tcx>(
         | Rvalue::Ref(_, _, op_place) => Some(op_place),
         _ => None,
     }?;
-    if op_place.local != place.local {
-        return None;
-    }
-    if let Some((
-        (_, PlaceElem::Downcast(op_variant_name, op_variant_idx)),
-        (_, PlaceElem::Field(field_idx, field_ty)),
-    )) = op_place.iter_projections().collect_tuple()
-    {
-        if (op_variant_name.is_none()
+    is_variant_downcast_to_ty_place(*op_place, place, variant_name, variant_idx, ty)
+        .then_some(assign.0)
+}
+
+/// Returns true if the given `op_place` is a variant downcast to `ty` of `place`.
+pub fn is_variant_downcast_to_ty_place<'tcx>(
+    op_place: Place<'tcx>,
+    place: Place<'tcx>,
+    variant_name: &str,
+    variant_idx: VariantIdx,
+    ty: Ty<'tcx>,
+) -> bool {
+    if op_place.local == place.local
+        && let Some((
+            (_, PlaceElem::Downcast(op_variant_name, op_variant_idx)),
+            (_, PlaceElem::Field(field_idx, field_ty)),
+        )) = op_place.iter_projections().collect_tuple()
+        && ((op_variant_name.is_none()
             || op_variant_name.is_some_and(|name| name.as_str() == variant_name))
             && op_variant_idx == variant_idx
             && field_idx.as_u32() == 0
-            && field_ty == ty
-        {
-            return Some(assign.0);
-        }
+            && field_ty == ty)
+    {
+        true
+    } else {
+        false
     }
-
-    None
 }

@@ -146,7 +146,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
 
         // Finds place for operand/arg and basic block for a slice `Deref` call (if any).
         let dominators = self.basic_blocks.dominators();
-        let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
+        let Some((slice_deref_arg_place, slice_deref_block)) = analyze::deref_subject(
             binary_search_arg_place,
             location.block,
             location.block,
@@ -170,10 +170,14 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             unwrap_or_else_target_info,
         ) = binary_search_analysis(destination, target, location, self.basic_blocks, self.tcx);
 
+        // Retrieves info needed to construct a slice length/size call (if possible).
+        let slice_len_bound_info =
+            analyze::slice_len_call_info(binary_search_arg_place, self.local_decls, self.tcx);
+
         // Retrieves info needed to construct a collection length/size call for the slice subject (if possible).
-        let len_bound_info = analyze::borrowed_collection_len_call_info(
+        let collection_len_bound_info = analyze::borrowed_collection_len_call_info(
             slice_deref_arg_place,
-            slice_deref_bb,
+            slice_deref_block,
             self.basic_blocks,
             self.local_decls,
             self.tcx,
@@ -182,7 +186,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         // Finds FRAME storage subject (if any).
         let storage_info = storage::storage_subject(
             slice_deref_arg_place,
-            slice_deref_bb,
+            slice_deref_block,
             location.block,
             self.basic_blocks,
             dominators,
@@ -222,7 +226,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             );
 
             // Declares a collection length/size bound annotation.
-            if let Some((collection_place, region, len_call_info)) = &len_bound_info {
+            if let Some((collection_place, region, len_call_info)) = &collection_len_bound_info {
                 self.annotations.extend(locations.clone().map(|location| {
                     Annotation::Len(
                         location,
@@ -236,16 +240,14 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             }
 
             // Declares slice length/size bound annotations.
-            if let Some((region, call_info)) =
-                analyze::slice_len_call_info(binary_search_arg_place, self.local_decls, self.tcx)
-            {
+            if let Some((region, call_info)) = &slice_len_bound_info {
                 self.annotations.extend(locations.clone().map(|location| {
                     Annotation::Len(
                         location,
                         cond_op,
                         invariant_place,
                         binary_search_arg_place,
-                        region,
+                        *region,
                         call_info.clone(),
                     )
                 }));
@@ -264,7 +266,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             }
 
             // Tracks invariants that need to propagated to other storage uses.
-            if storage_info.is_some() && len_bound_info.is_some() {
+            if storage_info.is_some() && collection_len_bound_info.is_some() {
                 storage_invariants.insert((annotation_location, cond_op, invariant_place));
             }
         }
@@ -281,7 +283,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         }
 
         // Propagate index invariant to `Result` (and `Option`) adapter input closures (if any).
-        if len_bound_info.is_some() {
+        if collection_len_bound_info.is_some() {
             let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_block])
             else {
                 return;
@@ -290,11 +292,11 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             // Collects collection related places (including all deref subjects).
             let mut collection_def_places = vec![
                 (binary_search_arg_place, location.block),
-                (slice_deref_arg_place, slice_deref_bb),
+                (slice_deref_arg_place, slice_deref_block),
             ];
             let deref_subjects = analyze::deref_subjects_recursive(
                 slice_deref_arg_place,
-                slice_deref_bb,
+                slice_deref_block,
                 location.block,
                 self.basic_blocks,
                 dominators,
@@ -372,7 +374,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
 
         // Finds place for operand/arg and basic block for a slice `Deref` call (if any).
         let dominators = self.basic_blocks.dominators();
-        let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
+        let Some((slice_deref_arg_place, slice_deref_block)) = analyze::deref_subject(
             partition_point_arg_place,
             location.block,
             location.block,
@@ -399,7 +401,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         // (if possible).
         let len_bound_info = analyze::borrowed_collection_len_call_info(
             slice_deref_arg_place,
-            slice_deref_bb,
+            slice_deref_block,
             self.basic_blocks,
             self.local_decls,
             self.tcx,
@@ -419,7 +421,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             // Finds FRAME storage subject (if any).
             let storage_info = storage::storage_subject(
                 slice_deref_arg_place,
-                slice_deref_bb,
+                slice_deref_block,
                 location.block,
                 self.basic_blocks,
                 dominators,
@@ -764,7 +766,7 @@ fn binary_search_result_unification_analysis<'tcx>(
                 crate_adt_and_fn_name_check,
                 tcx,
             )?;
-            let next_target_bb = post_unwrap_target?;
+            let next_target_block = post_unwrap_target?;
 
             // Checks that second arg is an identity function or closure and, if true,
             // returns unwrap destination place and next target.
@@ -779,7 +781,7 @@ fn binary_search_result_unification_analysis<'tcx>(
             let unwrap_second_arg = unwrap_args.get(1)?;
             let is_identity = analyze::is_identity_fn(&unwrap_second_arg.node, tcx)
                 || analyze::is_identity_closure(&unwrap_second_arg.node, tcx);
-            is_identity.then_some((unwrap_dest_place, next_target_bb))
+            is_identity.then_some((unwrap_dest_place, next_target_block))
         });
 
     let (unwrap_place, post_unwrap_target) = unwrap_place_info?;
@@ -816,17 +818,72 @@ fn collect_variant_target_invariants<'tcx>(
 
     // Collects given variant target blocks for switches based on the discriminant of return value
     // of slice `binary_search` in successor blocks.
-    let switch_targets = analyze::collect_switch_targets_for_discr_value(
+    let targets = analyze::collect_switch_targets_for_discr_value(
         place,
         variant_idx.as_u32() as u128,
         block,
         basic_blocks,
     );
+    for target_block in targets {
+        collect_variant_target_invariants_inner(
+            place,
+            target_block,
+            variant_name,
+            variant_idx,
+            cond_op,
+            basic_blocks,
+            tcx,
+            &mut results,
+        );
+    }
+
+    return results;
 
     // Declares collection length/size bound invariants for variant downcast to `usize` places (if any)
-    // for the switch targets.
-    for target_bb in switch_targets {
-        for (stmt_idx, stmt) in basic_blocks[target_bb].statements.iter().enumerate() {
+    // for the given switch target.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_variant_target_invariants_inner<'tcx>(
+        place: Place<'tcx>,
+        block: BasicBlock,
+        variant_name: &str,
+        variant_idx: VariantIdx,
+        cond_op: CondOp,
+        basic_blocks: &BasicBlocks<'tcx>,
+        tcx: TyCtxt<'tcx>,
+        results: &mut FxHashSet<Invariant<'tcx>>,
+    ) {
+        let block_data = &basic_blocks[block];
+        if block_data.statements.is_empty()
+            && let Some(terminator) = &block_data.terminator
+        {
+            // Handles case of multiple match arms for a single variant.
+            if let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind
+                && let Operand::Copy(op_place) | Operand::Move(op_place) = discr
+                && analyze::is_variant_downcast_to_ty_place(
+                    *op_place,
+                    place,
+                    variant_name,
+                    variant_idx,
+                    tcx.types.usize,
+                )
+            {
+                for target_block in targets.all_targets() {
+                    collect_variant_target_invariants_inner(
+                        place,
+                        *target_block,
+                        variant_name,
+                        variant_idx,
+                        cond_op,
+                        basic_blocks,
+                        tcx,
+                        results,
+                    );
+                }
+                return;
+            }
+        }
+
+        for (stmt_idx, stmt) in basic_blocks[block].statements.iter().enumerate() {
             // Finds variant downcast to `usize` places (if any) for the switch target variant.
             let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
                 place,
@@ -840,14 +897,12 @@ fn collect_variant_target_invariants<'tcx>(
 
             // Declares a collection length/size bound invariant.
             let annotation_location = Location {
-                block: target_bb,
+                block,
                 statement_index: stmt_idx + 1,
             };
             results.insert((annotation_location, cond_op, downcast_place));
         }
     }
-
-    results
 }
 
 // Propagates return place storage index invariant to callers.
