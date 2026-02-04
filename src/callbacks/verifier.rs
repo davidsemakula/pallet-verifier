@@ -75,14 +75,12 @@ impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
         // Sets MIRAI options similar to MIRAI CLI defaults.
         // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/options.rs#L14-L72>
         // Ref: <https://github.com/endorlabs/MIRAI/blob/a94a8c77a453e1d2365b39aa638a4f5e6b1d4dc3/checker/src/callbacks.rs#L143-L149>
-        let max_time_body = 60;
-        // Between 300 and 600 seconds.
-        let max_time_crate = ((5 + self.entry_points.len()) * max_time_body as usize)
-            .max(max_time_body as usize * 10) as u64;
+        let max_time_body = 90;
+        let max_time_crate = (self.entry_points.len() * max_time_body).max(max_time_body) as u64;
         let options = mirai::options::Options {
             diag_level: mirai::options::DiagLevel::Paranoid,
             max_analysis_time_for_crate: max_time_crate,
-            max_analysis_time_for_body: max_time_body,
+            max_analysis_time_for_body: max_time_body as u64,
             ..mirai::options::Options::default()
         };
         self.mirai_config = Some(MiraiConfig {
