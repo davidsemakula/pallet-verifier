@@ -663,87 +663,88 @@ fn emit_diagnostics(
         // from our analysis code.
         // Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#foreign-functions>
         // Ref: <https://github.com/endorlabs/MIRAI/blob/main/documentation/Overview.md#incomplete-analysis>
-        let is_noisy = diagnostic
-            .messages
-            .first()
-            .and_then(|(msg, _)| msg.as_str())
-            .is_some_and(|msg| {
-                let is_missing_mir = || {
-                    msg.contains("MIR body")
-                        && (msg.contains("without") || msg.contains("did not resolve"))
-                };
-                // `-Cdebug-assertions=no` doesn't remove debug asserts from pre-compiled crates.
-                let is_debug_assert = || {
-                    msg.contains("assert")
-                        && diagnostic.span.primary_span().is_some_and(|span| {
-                            source_map
-                                .span_to_snippet(span.source_callsite())
-                                .is_ok_and(|snippet| {
-                                    snippet.contains("debug_assert!")
-                                        || snippet.contains("debug_assert_eq!")
-                                        || snippet.contains("debug_assert_ne!")
-                                })
-                        })
-                };
-                let is_truthy_assume = || {
-                    msg.contains("assumption")
-                        && (msg.contains("provably true") || msg.contains("provably false"))
-                };
-                let is_unreachable_assume = || {
-                    msg.contains("unreachable")
-                        && msg.contains("mark it")
-                        && msg.contains("verify_unreachable!")
-                };
-                let is_pointer_alloc_issue = || {
-                    msg.contains("pointer") && msg.contains("memory") && msg.contains("deallocated")
-                };
-                let is_from_std = || {
-                    diagnostic.children.iter().any(|sub_diag| {
-                        sub_diag.span.primary_span().is_some_and(|span| {
-                            source_map
-                                .span_to_location_info(span)
-                                .0
-                                .is_some_and(|source_file| {
-                                    matches!(
-                                        tcx.crate_name(source_file.cnum).as_str(),
-                                        "std" | "core" | "alloc"
-                                    )
-                                })
-                        })
-                    })
-                };
-                let is_arg_validity_related = || {
-                    let is_in_fn_like_macro = || {
-                        diagnostic.span.primary_span().is_some_and(|span| {
-                            source_map.span_to_snippet(span).is_ok_and(|snippet| {
-                                snippet
-                                    .splitn(2, "!(")
-                                    .collect_tuple()
-                                    .is_some_and(|(name, _)| {
-                                        !name.chars().any(|c| !c.is_alphanumeric() && c != '_')
+        let is_noisy =
+            diagnostic
+                .messages
+                .first()
+                .and_then(|(msg, _)| msg.as_str())
+                .is_some_and(|msg| {
+                    let is_missing_mir = || {
+                        msg.contains("MIR body")
+                            && (msg.contains("without") || msg.contains("did not resolve"))
+                    };
+                    // `-Cdebug-assertions=no` doesn't remove debug asserts from pre-compiled crates.
+                    let is_debug_assert = || {
+                        msg.contains("assert")
+                            && diagnostic.span.primary_span().is_some_and(|span| {
+                                source_map
+                                    .span_to_snippet(span.source_callsite())
+                                    .is_ok_and(|snippet| {
+                                        snippet.contains("debug_assert!")
+                                            || snippet.contains("debug_assert_eq!")
+                                            || snippet.contains("debug_assert_ne!")
                                     })
+                            })
+                    };
+                    let is_truthy_assume = || {
+                        msg.contains("assumption")
+                            && (msg.contains("provably true") || msg.contains("provably false"))
+                    };
+                    let is_unreachable_assume = || {
+                        msg.contains("unreachable")
+                            && msg.contains("mark it")
+                            && msg.contains("verify_unreachable!")
+                    };
+                    let is_pointer_alloc_issue = || {
+                        msg.contains("pointer")
+                            && (msg.contains("memory") || msg.contains("layout"))
+                            && msg.contains("deallocate")
+                    };
+                    let is_from_std = || {
+                        diagnostic.children.iter().any(|sub_diag| {
+                            sub_diag.span.primary_span().is_some_and(|span| {
+                                source_map.span_to_location_info(span).0.is_some_and(
+                                    |source_file| {
+                                        matches!(
+                                            tcx.crate_name(source_file.cnum).as_str(),
+                                            "std" | "core" | "alloc"
+                                        )
+                                    },
+                                )
                             })
                         })
                     };
-                    (msg.contains("invalid args") || msg.contains("dummy argument"))
-                        && (is_from_std() || is_in_fn_like_macro())
-                };
-                // More targeted replacement for disabled MIRAI unreachable! panic suppression.
-                // Ref: <https://github.com/davidsemakula/MIRAI/commit/64d9f234a4be09f793d146594096b4d6377d969e>
-                let is_std_internal_unreachable = || {
-                    msg.contains("internal error:")
-                        && msg.contains("entered unreachable")
-                        && is_from_std()
-                };
-                is_missing_mir()
-                    || msg.contains("incomplete analysis")
-                    || is_debug_assert()
-                    || is_truthy_assume()
-                    || is_unreachable_assume()
-                    || is_pointer_alloc_issue()
-                    || is_arg_validity_related()
-                    || is_std_internal_unreachable()
-            });
+                    let is_arg_validity_related = || {
+                        let is_in_fn_like_macro = || {
+                            diagnostic.span.primary_span().is_some_and(|span| {
+                                source_map.span_to_snippet(span).is_ok_and(|snippet| {
+                                    snippet.splitn(2, "!(").collect_tuple().is_some_and(
+                                        |(name, _)| {
+                                            !name.chars().any(|c| !c.is_alphanumeric() && c != '_')
+                                        },
+                                    )
+                                })
+                            })
+                        };
+                        (msg.contains("invalid args") || msg.contains("dummy argument"))
+                            && (is_from_std() || is_in_fn_like_macro())
+                    };
+                    // More targeted replacement for disabled MIRAI unreachable! panic suppression.
+                    // Ref: <https://github.com/davidsemakula/MIRAI/commit/64d9f234a4be09f793d146594096b4d6377d969e>
+                    let is_std_internal_unreachable = || {
+                        msg.contains("internal error:")
+                            && msg.contains("entered unreachable")
+                            && is_from_std()
+                    };
+                    is_missing_mir()
+                        || msg.contains("incomplete analysis")
+                        || is_debug_assert()
+                        || is_truthy_assume()
+                        || is_unreachable_assume()
+                        || is_pointer_alloc_issue()
+                        || is_arg_validity_related()
+                        || is_std_internal_unreachable()
+                });
         if is_noisy {
             diagnostic.cancel();
             continue;
