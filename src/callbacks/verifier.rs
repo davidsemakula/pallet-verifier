@@ -135,9 +135,9 @@ impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
             if tcx.item_name(mod_def_id.to_def_id()).as_str() == CONTRACTS_MOD_NAME {
                 contracts_mod_def_id = Some(mod_def_id);
             } else {
-                let (mod_data, mod_decl_span, mod_hir_id) = tcx.hir_get_module(mod_def_id);
+                let (mod_data, mod_decl_span, _) = tcx.hir_get_module(mod_def_id);
                 let mod_body_span = mod_data.spans.inner_span;
-                if utils::has_cfg_test_attr(mod_hir_id, tcx)
+                if utils::has_cfg_test_attr(mod_def_id.to_def_id(), tcx)
                     && !test_mod_spans.iter().any(|span: &Span| {
                         span.contains(mod_decl_span) || span.contains(mod_body_span)
                     })

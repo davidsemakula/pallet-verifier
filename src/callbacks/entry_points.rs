@@ -445,9 +445,8 @@ fn pallet_struct(tcx: TyCtxt) -> Option<LocalDefId> {
                     == "pallet"
             {
                 let struct_def_id = item_id.owner_id.def_id;
-                let has_t_generic_param = struct_generics.get_named(Symbol::intern("T")).is_some();
-                if has_t_generic_param
-                    && !is_test_only_item(item.hir_id(), tcx)
+                if struct_generics.get_named(Symbol::intern("T")).is_some()
+                    && !is_test_only_item(struct_def_id, tcx)
                     && is_visible_from_crate_root(struct_def_id.to_def_id(), tcx)
                 {
                     return Some(struct_def_id);
@@ -473,7 +472,7 @@ fn call_enum(pallet_mod_def_id: LocalModDefId, tcx: TyCtxt) -> Option<LocalDefId
             };
             let is_call_enum = ident.as_str() == "Call"
                 && config_trait(item_def_id, tcx).is_some()
-                && !is_test_only_item(item.hir_id(), tcx)
+                && !is_test_only_item(item_def_id, tcx)
                 && is_visible_from_crate_root(item_def_id.to_def_id(), tcx);
             is_call_enum.then_some(item_def_id)
         })
@@ -572,9 +571,12 @@ fn pallet_pub_assoc_fn_ids(pallet_struct_def_id: LocalDefId, tcx: TyCtxt) -> FxH
             })
     };
 
-    // Checks if a `LocalDefId` is "test-only".
-    let is_test_only =
-        |local_def_id| is_test_only_item(tcx.local_def_id_to_hir_id(local_def_id), tcx);
+    // Checks if a `LocalDefId` is gated to only "tests", "std" or "runtime benchmarks".
+    let is_test_std_or_runtime_benchmark_only = |local_def_id| {
+        is_test_only_item(local_def_id, tcx)
+            || utils::has_cfg_feature_std_attr(local_def_id.to_def_id(), tcx)
+            || utils::has_cfg_feature_runtime_benchmarks_attr(local_def_id.to_def_id(), tcx)
+    };
 
     // Collects assoc `fn`s for inherent `impl`s of `Pallet<T>` struct.
     let pallet_inherent_assoc_fns = tcx
@@ -583,7 +585,7 @@ fn pallet_pub_assoc_fn_ids(pallet_struct_def_id: LocalDefId, tcx: TyCtxt) -> FxH
         .filter(|impl_def_id| {
             impl_def_id
                 .as_local()
-                .is_some_and(|impl_def_id| !is_test_only(impl_def_id))
+                .is_some_and(|impl_def_id| !is_test_std_or_runtime_benchmark_only(impl_def_id))
         })
         .flat_map(|impl_def_id| {
             tcx.associated_items(impl_def_id)
@@ -596,7 +598,7 @@ fn pallet_pub_assoc_fn_ids(pallet_struct_def_id: LocalDefId, tcx: TyCtxt) -> FxH
                         && is_visible_from_crate_root(assoc_item.def_id, tcx)
                         && !span.from_expansion()
                         && !has_pallet_attribute(span)
-                        && !is_test_only(assoc_fn_def_id);
+                        && !is_test_std_or_runtime_benchmark_only(assoc_fn_def_id);
                     is_pub_assoc_fn.then_some(assoc_fn_def_id)
                 })
         });
@@ -619,38 +621,38 @@ fn pallet_pub_assoc_fn_ids(pallet_struct_def_id: LocalDefId, tcx: TyCtxt) -> FxH
                 _ => false,
             }
     }
-    let pallet_local_trait_impls = tcx
-        .all_local_trait_impls(())
-        .into_iter()
-        .filter(|(trait_def_id, _)| {
-            let is_pub_local_trait = trait_def_id
-                .as_local()
-                .is_some_and(|trait_def_id| !is_test_only(trait_def_id))
-                && tcx.visibility(*trait_def_id).is_public()
-                && is_visible_from_crate_root(**trait_def_id, tcx);
-            let is_pallet_dep = || {
-                let crate_name = tcx.crate_name(trait_def_id.krate);
-                crate_name.as_str().starts_with("pallet_") && !trait_def_id.is_local()
-            };
-            is_pub_local_trait
-                || is_pallet_dep()
-                || is_frame_support_tokens_trait(**trait_def_id, tcx)
-        })
-        .flat_map(|(_, trait_impls)| {
-            trait_impls.iter().filter(|impl_def_id| {
-                let impl_ty = impl_subject_ty(impl_def_id.to_def_id(), tcx);
-                let is_pallet_struct_impl = impl_ty
-                    .ty_adt_def()
-                    .is_some_and(|adt_def| adt_def.did() == pallet_struct_def_id.to_def_id());
-                is_pallet_struct_impl && !is_test_only(**impl_def_id)
+    let pallet_local_trait_impls =
+        tcx.all_local_trait_impls(())
+            .into_iter()
+            .filter(|(trait_def_id, _)| {
+                let is_pub_local_trait = trait_def_id.as_local().is_some_and(|trait_def_id| {
+                    !is_test_std_or_runtime_benchmark_only(trait_def_id)
+                }) && tcx.visibility(*trait_def_id).is_public()
+                    && is_visible_from_crate_root(**trait_def_id, tcx);
+                let is_pallet_dep_trait = || {
+                    let crate_name = tcx.crate_name(trait_def_id.krate);
+                    crate_name.as_str().starts_with("pallet_") && !trait_def_id.is_local()
+                };
+                is_pub_local_trait
+                    || is_pallet_dep_trait()
+                    || is_frame_support_tokens_trait(**trait_def_id, tcx)
             })
-        });
+            .flat_map(|(_, trait_impls)| {
+                trait_impls.iter().filter(|impl_def_id| {
+                    let impl_ty = impl_subject_ty(impl_def_id.to_def_id(), tcx);
+                    let is_pallet_struct_impl = impl_ty
+                        .ty_adt_def()
+                        .is_some_and(|adt_def| adt_def.did() == pallet_struct_def_id.to_def_id());
+                    is_pallet_struct_impl && !is_test_std_or_runtime_benchmark_only(**impl_def_id)
+                })
+            });
     let pallet_local_trait_assoc_fns = pallet_local_trait_impls.flat_map(|impl_def_id| {
         tcx.associated_items(impl_def_id.to_def_id())
             .in_definition_order()
             .filter_map(|assoc_item| {
                 let assoc_fn_def_id = assoc_item.def_id.as_local()?;
-                let is_pub_assoc_fn = assoc_item.is_fn() && !is_test_only(assoc_fn_def_id);
+                let is_pub_assoc_fn =
+                    assoc_item.is_fn() && !is_test_std_or_runtime_benchmark_only(assoc_fn_def_id);
                 is_pub_assoc_fn.then_some(assoc_fn_def_id)
             })
     });
@@ -2285,7 +2287,7 @@ fn impl_subject_ty(def_id: DefId, tcx: TyCtxt) -> Ty {
     }
 }
 
-/// Checks if an item (given it's `DefId`) is "visible" from the crate root.
+/// Returns true if an item (given its `DefId`) is "visible" from the crate root.
 fn is_visible_from_crate_root(def_id: DefId, tcx: TyCtxt) -> bool {
     let crate_vis = Visibility::Restricted(CRATE_DEF_ID.to_def_id());
     let vis = tcx.visibility(def_id);
@@ -2310,17 +2312,17 @@ fn is_visible_from_crate_root(def_id: DefId, tcx: TyCtxt) -> bool {
     false
 }
 
-/// Checks if an item (given it's `HirId`) is only accessible in tests.
-fn is_test_only_item(hir_id: HirId, tcx: TyCtxt) -> bool {
-    if utils::has_cfg_test_attr(hir_id, tcx) {
+/// Returns true if an item (given its `LocalDefId`) is only accessible in tests.
+fn is_test_only_item(def_id: LocalDefId, tcx: TyCtxt) -> bool {
+    if utils::has_cfg_test_attr(def_id.to_def_id(), tcx) {
         return true;
     }
-    let parent_mod_def_id = tcx.parent_module(hir_id);
-    let mod_hir_id = tcx.local_def_id_to_hir_id(parent_mod_def_id.to_local_def_id());
-    if mod_hir_id == hir_id {
+
+    let parent_mod_def_id = tcx.parent_module_from_def_id(def_id).to_local_def_id();
+    if parent_mod_def_id == def_id {
         return false;
     }
-    is_test_only_item(mod_hir_id, tcx)
+    is_test_only_item(parent_mod_def_id, tcx)
 }
 
 /// Creates turbofish args from a list of type args.

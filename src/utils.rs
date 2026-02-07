@@ -2,7 +2,7 @@
 
 use rustc_ast::MetaItemInner;
 use rustc_errors::DiagCtxtHandle;
-use rustc_hir::{HirId, def_id::CrateNum};
+use rustc_hir::{Attribute, def_id::CrateNum};
 use rustc_middle::ty::{GenericArg, List, TyCtxt, TyKind};
 use rustc_span::{Symbol, def_id::DefId};
 use rustc_type_ir::{IntTy, UintTy};
@@ -134,27 +134,64 @@ pub fn assoc_item_parent_trait(def_id: DefId, tcx: TyCtxt) -> Option<DefId> {
     })
 }
 
-/// Checks if an item (given it's `HirId`) "effectively" has a `#[cfg(test)]` attribute.
-pub fn has_cfg_test_attr(hir_id: HirId, tcx: TyCtxt) -> bool {
-    let attrs = tcx.hir_attrs(hir_id);
-    attrs.iter().any(|attr| {
-        let is_cfg_path = attr.has_any_name(&[Symbol::intern("cfg"), Symbol::intern("<cfg>")]);
-        is_cfg_path
+/// Returns true if an item (given it's `DefId`) "effectively" has a `#[cfg(test)]` attribute.
+pub fn has_cfg_test_attr(def_id: DefId, tcx: TyCtxt) -> bool {
+    tcx.get_all_attrs(def_id).any(|attr| {
+        is_cfg_attr(attr)
             && attr.meta_item_list().is_some_and(|meta_items| {
-                let test_symbol = Symbol::intern("test");
-                let is_test_path = |meta_items: &[MetaItemInner]| {
-                    meta_items
-                        .iter()
-                        .any(|meta_item| meta_item.has_name(test_symbol))
-                };
-                is_test_path(&meta_items)
-                    || meta_items.iter().any(|meta_item| {
-                        (meta_item.has_name(Symbol::intern("any"))
-                            || meta_item.has_name(Symbol::intern("all")))
-                            && meta_item.meta_item_list().is_some_and(is_test_path)
-                    })
+                contains_meta_item(&meta_items, |meta_item| {
+                    meta_item.has_name(Symbol::intern("test"))
+                })
             })
     })
+}
+
+/// Returns true if an item (given it's `DefId`) "effectively" has a
+/// `#[cfg(feature = "std")]` attribute.
+pub fn has_cfg_feature_std_attr(def_id: DefId, tcx: TyCtxt) -> bool {
+    tcx.get_all_attrs(def_id).any(|attr| {
+        is_cfg_attr(attr)
+            && attr.meta_item_list().is_some_and(|meta_items| {
+                contains_meta_item(&meta_items, |meta_item| {
+                    meta_item.has_name(Symbol::intern("feature"))
+                        && meta_item
+                            .value_str()
+                            .is_some_and(|value| value.as_str() == "std")
+                })
+            })
+    })
+}
+
+/// Returns true if an item (given it's `DefId`) "effectively" has a
+/// `#[cfg(feature = "runtime-benchmarks")]` attribute.
+pub fn has_cfg_feature_runtime_benchmarks_attr(def_id: DefId, tcx: TyCtxt) -> bool {
+    tcx.get_all_attrs(def_id).any(|attr| {
+        is_cfg_attr(attr)
+            && attr.meta_item_list().is_some_and(|meta_items| {
+                contains_meta_item(&meta_items, |meta_item| {
+                    meta_item.has_name(Symbol::intern("feature"))
+                        && meta_item
+                            .value_str()
+                            .is_some_and(|value| value.as_str() == "runtime-benchmarks")
+                })
+            })
+    })
+}
+
+/// Returns true if the given attribute is a `cfg` attribute.
+fn is_cfg_attr(attr: &Attribute) -> bool {
+    attr.has_any_name(&[Symbol::intern("cfg"), Symbol::intern("<cfg>")])
+}
+
+/// Returns true if the given meta item list contains an meta item that satisfies the given matcher.
+fn contains_meta_item(meta_items: &[MetaItemInner], matcher: fn(&MetaItemInner) -> bool) -> bool {
+    meta_items.iter().any(matcher)
+        || meta_items.iter().any(|meta_item| {
+            (meta_item.has_name(Symbol::intern("any")) || meta_item.has_name(Symbol::intern("all")))
+                && meta_item
+                    .meta_item_list()
+                    .is_some_and(|meta_items| contains_meta_item(meta_items, matcher))
+        })
 }
 
 /// Returns the highlight style for console text.
