@@ -2,7 +2,7 @@
 
 use rustc_driver::Compilation;
 use rustc_errors::{Diag, DiagMessage, Level, MultiSpan, Style, Subdiag};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_interface::interface::Compiler;
 use rustc_middle::{
@@ -175,12 +175,9 @@ impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
         }
 
         // Resolves and analyzes the generated entry points.
-        let mut dispatchable_entry_points = Vec::new();
-        let mut hook_entry_points = Vec::new();
-        let mut pub_assoc_fn_entry_points = Vec::new();
         let mut analyze_entry_points =
             |mut entry_points_info: Vec<(LocalDefId, LocalDefId, Symbol, Option<String>)>,
-             call_kind: CallKind| {
+             call_kind: &str| {
                 if entry_points_info.len() > 1 {
                     entry_points_info.sort_by_key(|(.., fn_name, trait_name)| {
                         (
@@ -220,46 +217,49 @@ impl rustc_driver::Callbacks for VerifierCallbacks<'_> {
                 }
             };
         let entry_points = utils::resolve_entry_points(self.entry_points, tcx, compiler.sess.dcx());
+        let mut entry_points_by_kind: FxHashMap<_, Vec<_>> = FxHashMap::default();
         for entry_point in entry_points {
             let fn_name = tcx.item_name(entry_point.callee_def_id.to_def_id());
-            let trait_name =
-                utils::assoc_item_parent_trait(entry_point.callee_def_id.to_def_id(), tcx)
-                    .map(|trait_def_id| tcx.def_path_str(trait_def_id));
+            let trait_def_id =
+                utils::assoc_item_parent_trait(entry_point.callee_def_id.to_def_id(), tcx);
+            let trait_name = trait_def_id.map(|trait_def_id| tcx.def_path_str(trait_def_id));
             let info = (
                 entry_point.def_id,
                 entry_point.callee_def_id,
                 fn_name,
                 trait_name,
             );
-            match entry_point.call_kind {
-                CallKind::Dispatchable => dispatchable_entry_points.push(info),
-                CallKind::Hook => hook_entry_points.push(info),
-                CallKind::PubAssocFn => pub_assoc_fn_entry_points.push(info),
+            let kind_info = match entry_point.call_kind {
+                CallKind::Dispatchable => ("dispatchable", 0u8),
+                CallKind::Hook => ("hook", 1),
+                CallKind::PubAssocFn => match trait_def_id {
+                    None => ("pub inherent assoc fn", 2),
+                    Some(trait_def_id) => {
+                        if trait_def_id.is_local() {
+                            ("pub local trait assoc fn", 3)
+                        } else {
+                            ("pub external trait assoc fn", 4)
+                        }
+                    }
+                },
+            };
+
+            match entry_points_by_kind.get_mut(&kind_info) {
+                Some(items) => items.push(info),
+                None => {
+                    entry_points_by_kind.insert(kind_info, vec![info]);
+                }
             }
         }
-
-        // Analyze dispatchables.
-        if !dispatchable_entry_points.is_empty() {
+        for ((kind, _), entry_points) in entry_points_by_kind
+            .into_iter()
+            .sorted_by_key(|((_, rank), _)| *rank)
+        {
             println!(
-                "{} dispatchables ...",
+                "{} {kind}s ...",
                 "Analyzing".style(utils::highlight_style())
             );
-            analyze_entry_points(dispatchable_entry_points, CallKind::Dispatchable);
-        }
-
-        // Analyze hooks.
-        if !hook_entry_points.is_empty() {
-            println!("{} hooks ...", "Analyzing".style(utils::highlight_style()));
-            analyze_entry_points(hook_entry_points, CallKind::Hook);
-        }
-
-        // Analyze pub assoc `fn`s.
-        if !pub_assoc_fn_entry_points.is_empty() {
-            println!(
-                "{} pub assoc fns ...",
-                "Analyzing".style(utils::highlight_style())
-            );
-            analyze_entry_points(pub_assoc_fn_entry_points, CallKind::PubAssocFn);
+            analyze_entry_points(entry_points, kind);
         }
 
         // Outputs call graph.

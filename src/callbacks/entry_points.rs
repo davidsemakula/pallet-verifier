@@ -539,10 +539,9 @@ fn dispatchable_ids(
             tcx.associated_items(impl_def_id)
                 .in_definition_order()
                 .filter_map(|assoc_item| {
-                    let AssocKind::Fn { name, .. } = assoc_item.kind else {
-                        return None;
-                    };
-                    if names.contains(name.as_str()) {
+                    if let AssocKind::Fn { name, .. } = assoc_item.kind
+                        && names.contains(name.as_str())
+                    {
                         assoc_item.def_id.as_local()
                     } else {
                         None
