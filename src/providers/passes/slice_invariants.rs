@@ -747,44 +747,39 @@ fn binary_search_result_unification_analysis<'tcx>(
         basic_blocks,
         tcx,
     );
-    let unwrap_place_info =
-        analyze::call_target(&basic_blocks[unwrap_arg_def_block]).and_then(|next_block| {
-            // Retrieves `Result::unwrap_else` destination place and next target block (if any).
-            let next_block_data = &basic_blocks[next_block];
-            fn crate_adt_and_fn_name_check(
-                crate_name: &str,
-                adt_name: &str,
-                fn_name: &str,
-            ) -> bool {
-                matches!(crate_name, "std" | "core")
-                    && adt_name == "Result"
-                    && fn_name == "unwrap_or_else"
-            }
-            let (unwrap_dest_place, post_unwrap_target) = analyze::safe_transform_destination(
-                unwrap_arg_place,
-                next_block_data,
-                crate_adt_and_fn_name_check,
-                tcx,
-            )?;
-            let next_target_block = post_unwrap_target?;
 
-            // Checks that second arg is an identity function or closure and, if true,
-            // returns unwrap destination place and next target.
-            // See [`analyze::is_identity_fn`] and [`analyze::is_identity_closure`] for details.
-            let unwrap_terminator = next_block_data.terminator.as_ref()?;
-            let TerminatorKind::Call {
-                args: unwrap_args, ..
-            } = &unwrap_terminator.kind
-            else {
-                return None;
-            };
-            let unwrap_second_arg = unwrap_args.get(1)?;
-            let is_identity = analyze::is_identity_fn(&unwrap_second_arg.node, tcx)
-                || analyze::is_identity_closure(&unwrap_second_arg.node, tcx);
-            is_identity.then_some((unwrap_dest_place, next_target_block))
-        });
+    // Retrieves `Result::unwrap_else` destination place and next target block (if any).
+    let next_block = analyze::call_target(&basic_blocks[unwrap_arg_def_block])?;
+    let block_data = &basic_blocks[next_block];
+    let terminator = block_data.terminator.as_ref()?;
+    let (unwrap_dest_place, post_unwrap_target) = analyze::first_arg_transformer_call_destination(
+        unwrap_arg_place,
+        terminator,
+        |crate_name, adt_name, fn_name| {
+            matches!(crate_name, "std" | "core")
+                && adt_name == "Result"
+                && fn_name == "unwrap_or_else"
+        },
+        tcx,
+    )?;
+    let post_unwrap_target = post_unwrap_target?;
 
-    let (unwrap_place, post_unwrap_target) = unwrap_place_info?;
+    // Checks that second arg is an identity function or closure and, if true,
+    // returns unwrap destination place and next target.
+    // See [`analyze::is_identity_fn`] and [`analyze::is_identity_closure`] for details.
+    let TerminatorKind::Call {
+        args: unwrap_args, ..
+    } = &terminator.kind
+    else {
+        return None;
+    };
+    let unwrap_second_arg = unwrap_args.get(1)?;
+    if !analyze::is_identity_fn(&unwrap_second_arg.node, tcx)
+        && !analyze::is_identity_closure(&unwrap_second_arg.node, tcx)
+    {
+        return None;
+    }
+
     // Declares collection length/size invariant for unwrap place.
     let annotation_location = Location {
         block: post_unwrap_target,
@@ -796,11 +791,11 @@ fn binary_search_result_unification_analysis<'tcx>(
         // where the second arg is an identity function or closure
         // (e.g. `std::convert::identity` or `|x| x`).
         CondOp::Le,
-        unwrap_place,
+        unwrap_dest_place,
     ));
 
     // Returns analysis results.
-    Some((invariants, (unwrap_place, post_unwrap_target)))
+    Some((invariants, (unwrap_dest_place, post_unwrap_target)))
 }
 
 /// Collects collection length/size bound invariants for variant downcast to `usize` places (if any)

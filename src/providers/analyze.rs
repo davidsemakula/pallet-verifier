@@ -477,9 +477,12 @@ pub fn track_safe_result_transformations<'tcx>(
 ) {
     let mut next_target_block = Some(target_block);
     while let Some(current_target_block) = next_target_block {
-        let target_bb_data = &basic_blocks[current_target_block];
+        let block_data = &basic_blocks[current_target_block];
+        let Some(terminator) = &block_data.terminator else {
+            continue;
+        };
         if let Some((transformer_destination, transformer_target_block)) =
-            safe_result_transform_destination(*switch_target_place, target_bb_data, tcx)
+            safe_result_transform_destination(*switch_target_place, terminator, tcx)
         {
             *switch_target_place = transformer_destination;
             *switch_target_block = current_target_block;
@@ -507,22 +510,25 @@ pub fn track_safe_primary_opt_result_variant_transformations<'tcx>(
     let mut next_target_block = Some(target_block);
     while let Some(current_target_block) = next_target_block {
         let block_data = &basic_blocks[current_target_block];
+        let Some(terminator) = &block_data.terminator else {
+            continue;
+        };
         if let Some((try_branch_destination, try_branch_target_bb)) =
-            try_branch_destination(*switch_target_place, block_data, tcx)
+            try_branch_destination(*switch_target_place, terminator, tcx)
         {
             *switch_target_place = try_branch_destination;
             *switch_target_block = current_target_block;
             *switch_target_variant = SwitchVariant::ControlFlowContinue;
             next_target_block = try_branch_target_bb;
         } else if let Some((transformer_destination, transformer_target_block)) =
-            safe_option_some_transform_destination(*switch_target_place, block_data, tcx, strict)
+            safe_option_some_transform_destination(*switch_target_place, terminator, tcx, strict)
         {
             *switch_target_place = transformer_destination;
             *switch_target_block = current_target_block;
             *switch_target_variant = SwitchVariant::OptionSome;
             next_target_block = transformer_target_block;
         } else if let Some((transformer_destination, transformer_target_block)) =
-            safe_result_ok_transform_destination(*switch_target_place, block_data, tcx)
+            safe_result_ok_transform_destination(*switch_target_place, terminator, tcx)
         {
             *switch_target_place = transformer_destination;
             *switch_target_block = current_target_block;
@@ -560,10 +566,13 @@ pub fn track_safe_result_err_transformations<'tcx>(
     }
     while let Some(current_target_block) = next_target_block {
         let block_data = &basic_blocks[current_target_block];
+        let Some(terminator) = &block_data.terminator else {
+            continue;
+        };
         if let Some((transformer_destination, transformer_target_block)) =
-            safe_transform_destination(
+            first_arg_transformer_call_destination(
                 *switch_target_place,
-                block_data,
+                terminator,
                 result_err_crate_adt_and_fn_name_check,
                 tcx,
             )
@@ -574,7 +583,7 @@ pub fn track_safe_result_err_transformations<'tcx>(
             next_target_block = None;
             opt_some_target_block = transformer_target_block;
         } else if let Some((transformer_destination, transformer_target_block)) =
-            safe_result_err_transform_destination(*switch_target_place, block_data, tcx)
+            safe_result_err_transform_destination(*switch_target_place, terminator, tcx)
         {
             *switch_target_place = transformer_destination;
             *switch_target_block = current_target_block;
@@ -611,10 +620,9 @@ pub fn call_target(block_data: &BasicBlockData) -> Option<BasicBlock> {
 /// (i.e. `?` operator) where the given place is the first argument.
 fn try_branch_destination<'tcx>(
     place: Place<'tcx>,
-    block_data: &BasicBlockData<'tcx>,
+    terminator: &Terminator<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    let terminator = block_data.terminator.as_ref()?;
     let TerminatorKind::Call {
         func,
         args,
@@ -647,20 +655,24 @@ fn try_branch_destination<'tcx>(
 /// (e.g. via `Option::inspect`, `Result::ok` calls e.t.c).
 fn safe_option_some_transform_destination<'tcx>(
     place: Place<'tcx>,
-    block_data: &BasicBlockData<'tcx>,
+    terminator: &Terminator<'tcx>,
     tcx: TyCtxt,
     strict: bool,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    let crate_adt_and_fn_name_check = |crate_name: &str, adt_name: &str, fn_name: &str| -> bool {
-        matches!(crate_name, "std" | "core")
-            && ((adt_name == "Option"
-                && (matches!(
-                    fn_name,
-                    "copied" | "cloned" | "inspect" | "as_ref" | "as_deref"
-                ) || (!strict && fn_name == "filter")))
-                || (adt_name == "Result" && fn_name == "ok"))
-    };
-    safe_transform_destination(place, block_data, crate_adt_and_fn_name_check, tcx)
+    first_arg_transformer_call_destination(
+        place,
+        terminator,
+        |crate_name, adt_name, fn_name| {
+            matches!(crate_name, "std" | "core")
+                && ((adt_name == "Option"
+                    && (matches!(
+                        fn_name,
+                        "copied" | "cloned" | "inspect" | "as_ref" | "as_deref"
+                    ) || (!strict && fn_name == "filter")))
+                    || (adt_name == "Result" && fn_name == "ok"))
+        },
+        tcx,
+    )
 }
 
 /// Returns destination place and target block (if any) of a transformation into `Result`
@@ -670,18 +682,22 @@ fn safe_option_some_transform_destination<'tcx>(
 /// (e.g. via `Result::inspect`, `Result::inspect_err` calls e.t.c).
 fn safe_result_transform_destination<'tcx>(
     place: Place<'tcx>,
-    block_data: &BasicBlockData<'tcx>,
+    terminator: &Terminator<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
-        matches!(crate_name, "std" | "core")
-            && adt_name == "Result"
-            && matches!(
-                fn_name,
-                "copied" | "cloned" | "inspect" | "inspect_err" | "as_ref" | "as_deref"
-            )
-    }
-    safe_transform_destination(place, block_data, crate_adt_and_fn_name_check, tcx)
+    first_arg_transformer_call_destination(
+        place,
+        terminator,
+        |crate_name, adt_name, fn_name| {
+            matches!(crate_name, "std" | "core")
+                && adt_name == "Result"
+                && matches!(
+                    fn_name,
+                    "copied" | "cloned" | "inspect" | "inspect_err" | "as_ref" | "as_deref"
+                )
+        },
+        tcx,
+    )
 }
 
 /// Returns destination place and target block (if any) of a transformation into `Result`
@@ -690,25 +706,29 @@ fn safe_result_transform_destination<'tcx>(
 /// (e.g. via `Result::map_err`, `Option::ok_or` calls e.t.c).
 fn safe_result_ok_transform_destination<'tcx>(
     place: Place<'tcx>,
-    block_data: &BasicBlockData<'tcx>,
+    terminator: &Terminator<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
-        matches!(crate_name, "std" | "core")
-            && ((adt_name == "Result"
-                && matches!(
-                    fn_name,
-                    "map_err"
-                        | "copied"
-                        | "cloned"
-                        | "inspect"
-                        | "inspect_err"
-                        | "as_ref"
-                        | "as_deref"
-                ))
-                || (adt_name == "Option" && matches!(fn_name, "ok_or" | "ok_or_else")))
-    }
-    safe_transform_destination(place, block_data, crate_adt_and_fn_name_check, tcx)
+    first_arg_transformer_call_destination(
+        place,
+        terminator,
+        |crate_name, adt_name, fn_name| {
+            matches!(crate_name, "std" | "core")
+                && ((adt_name == "Result"
+                    && matches!(
+                        fn_name,
+                        "map_err"
+                            | "copied"
+                            | "cloned"
+                            | "inspect"
+                            | "inspect_err"
+                            | "as_ref"
+                            | "as_deref"
+                    ))
+                    || (adt_name == "Option" && matches!(fn_name, "ok_or" | "ok_or_else")))
+        },
+        tcx,
+    )
 }
 
 /// Returns destination place and target block (if any) of a transformation into `Result`
@@ -717,32 +737,38 @@ fn safe_result_ok_transform_destination<'tcx>(
 /// (e.g. via `Result::map`, `Result::inspect` calls e.t.c).
 fn safe_result_err_transform_destination<'tcx>(
     place: Place<'tcx>,
-    block_data: &BasicBlockData<'tcx>,
+    terminator: &Terminator<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    fn crate_adt_and_fn_name_check(crate_name: &str, adt_name: &str, fn_name: &str) -> bool {
-        matches!(crate_name, "std" | "core")
-            && (adt_name == "Result"
-                && matches!(
-                    fn_name,
-                    "map" | "copied" | "cloned" | "inspect" | "inspect_err" | "as_ref" | "as_deref"
-                ))
-    }
-    safe_transform_destination(place, block_data, crate_adt_and_fn_name_check, tcx)
+    first_arg_transformer_call_destination(
+        place,
+        terminator,
+        |crate_name, adt_name, fn_name| {
+            matches!(crate_name, "std" | "core")
+                && (adt_name == "Result"
+                    && matches!(
+                        fn_name,
+                        "map"
+                            | "copied"
+                            | "cloned"
+                            | "inspect"
+                            | "inspect_err"
+                            | "as_ref"
+                            | "as_deref"
+                    ))
+        },
+        tcx,
+    )
 }
 
-/// Returns destination place and target block (if any) of a "safe" transformation
-/// where the given place is the first argument of the "transformer" call.
-///
-/// See [`safe_option_some_transform_destination`] and [`safe_result_transform_destination`] docs
-/// for details about the target "safe" transformations.
-pub fn safe_transform_destination<'tcx>(
+/// Returns destination place and target block (if any) if the given terminator matches
+/// the given `call_matcher` and the given place is the first argument of the call.
+pub fn first_arg_transformer_call_destination<'tcx>(
     place: Place<'tcx>,
-    block_data: &BasicBlockData<'tcx>,
-    transform_check: impl Fn(&str, &str, &str) -> bool,
+    terminator: &Terminator<'tcx>,
+    call_matcher: impl Fn(&str, &str, &str) -> bool,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    let terminator = block_data.terminator.as_ref()?;
     let TerminatorKind::Call {
         func,
         args,
@@ -772,8 +798,7 @@ pub fn safe_transform_destination<'tcx>(
     let adt_def = ty.ty_adt_def()?;
     let adt_name = tcx.item_name(adt_def.did());
 
-    let is_safe_transform =
-        transform_check(crate_name.as_str(), adt_name.as_str(), fn_name.as_str());
+    let is_safe_transform = call_matcher(crate_name.as_str(), adt_name.as_str(), fn_name.as_str());
     is_safe_transform.then_some((*destination, *target))
 }
 
