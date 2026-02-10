@@ -56,6 +56,29 @@ mod pallet {
 
         #[pallet::call_index(3)]
         #[pallet::weight(0)]
+        pub fn binary_search_unwrap_or(origin: OriginFor<T>, mut data: Vec<u8>) -> DispatchResult {
+            let pos = data.binary_search(&0).unwrap_or(data.len());
+            // pos is always <= data.len()
+            data.insert(pos, 255);
+
+            Ok(())
+        }
+
+        #[pallet::call_index(4)]
+        #[pallet::weight(0)]
+        pub fn binary_search_unwrap_or_else(
+            origin: OriginFor<T>,
+            mut data: Vec<u8>,
+        ) -> DispatchResult {
+            let pos = data.binary_search(&0).unwrap_or_else(|x| x);
+            // pos is always <= data.len()
+            data.insert(pos, 255);
+
+            Ok(())
+        }
+
+        #[pallet::call_index(5)]
+        #[pallet::weight(0)]
         pub fn binary_search_by(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             let res = data.binary_search_by(|item| item.cmp(&10));
             if let Ok(pos) = res {
@@ -66,7 +89,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(4)]
+        #[pallet::call_index(6)]
         #[pallet::weight(0)]
         pub fn binary_search_by_key(origin: OriginFor<T>, data: Vec<(u8, u8)>) -> DispatchResult {
             let res = data.binary_search_by_key(&0, |&(x, y)| x);
@@ -78,7 +101,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(5)]
+        #[pallet::call_index(7)]
         #[pallet::weight(0)]
         pub fn partition_point(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             // Number of elements <= isize::MAX, so pos is always < usize::MAX

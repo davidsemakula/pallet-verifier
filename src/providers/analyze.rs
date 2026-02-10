@@ -102,29 +102,27 @@ pub fn pre_anchor_assign_terminator<'tcx>(
         dominators: &Dominators<BasicBlock>,
         already_visited: &mut FxHashSet<BasicBlock>,
     ) -> Option<(Terminator<'tcx>, BasicBlock)> {
-        for pred_bb in &basic_blocks.predecessors()[current_block] {
-            if already_visited.contains(pred_bb) {
+        for pred_block in &basic_blocks.predecessors()[current_block] {
+            if already_visited.contains(pred_block) {
                 continue;
             }
-            already_visited.insert(*pred_bb);
+            already_visited.insert(*pred_block);
 
-            if pred_bb.index() != anchor_block.index()
-                && !dominators.dominates(anchor_block, *pred_bb)
+            if pred_block.index() != anchor_block.index()
+                && !dominators.dominates(anchor_block, *pred_block)
             {
-                let bb_data = &basic_blocks[*pred_bb];
-                for stmt in &bb_data.statements {
-                    add_place_aliases(places, stmt);
-                }
-                if let Some(terminator) = &bb_data.terminator {
+                let block_data = &basic_blocks[*pred_block];
+                add_place_aliases(places, block_data);
+                if let Some(terminator) = &block_data.terminator {
                     if let TerminatorKind::Call { destination, .. } = &terminator.kind {
                         if places.contains(destination) {
-                            return Some((terminator.clone(), *pred_bb));
+                            return Some((terminator.clone(), *pred_block));
                         }
                     }
                 }
                 let assign = pre_anchor_assign_terminator_inner(
                     places,
-                    *pred_bb,
+                    *pred_block,
                     anchor_block,
                     basic_blocks,
                     dominators,
@@ -139,14 +137,47 @@ pub fn pre_anchor_assign_terminator<'tcx>(
         None
     }
 
-    fn add_place_aliases<'tcx>(places: &mut FxHashSet<Place<'tcx>>, stmt: &Statement<'tcx>) {
-        if let StatementKind::Assign(assign) = &stmt.kind {
-            if places.contains(&assign.0) {
-                if let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) = &assign.1 {
-                    places.insert(*op_place);
-                }
+    fn add_place_aliases<'tcx>(
+        places: &mut FxHashSet<Place<'tcx>>,
+        block_data: &BasicBlockData<'tcx>,
+    ) {
+        for stmt in block_data.statements.iter().rev() {
+            if let StatementKind::Assign(assign) = &stmt.kind
+                && places.contains(&assign.0)
+                && let Some(op_place) = rvalue_alias_place(&assign.1)
+            {
+                places.insert(direct_place(op_place));
             }
         }
+    }
+}
+
+/// Collects places which are either copies/moves or references to the given place.
+pub fn collect_place_aliases<'tcx>(
+    place: Place<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
+) -> FxHashSet<Place<'tcx>> {
+    let mut aliases = FxHashSet::default();
+    for stmt in block_data.statements.iter().rev() {
+        if let StatementKind::Assign(assign) = &stmt.kind
+            && (assign.0 == place || aliases.contains(&assign.0))
+            && let Some(op_place) = rvalue_alias_place(&assign.1)
+        {
+            aliases.insert(direct_place(op_place));
+        }
+    }
+    aliases
+}
+
+/// Returns `Rvalue` place only if it represents either a copy/move or a reference.
+fn rvalue_alias_place<'tcx>(value: &Rvalue<'tcx>) -> Option<Place<'tcx>> {
+    if let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place))
+    | Rvalue::Ref(_, _, op_place)
+    | Rvalue::CopyForDeref(op_place) = value
+    {
+        Some(*op_place)
+    } else {
+        None
     }
 }
 
@@ -513,13 +544,13 @@ pub fn track_safe_primary_opt_result_variant_transformations<'tcx>(
         let Some(terminator) = &block_data.terminator else {
             continue;
         };
-        if let Some((try_branch_destination, try_branch_target_bb)) =
+        if let Some((try_branch_destination, try_branch_target_block)) =
             try_branch_destination(*switch_target_place, terminator, tcx)
         {
             *switch_target_place = try_branch_destination;
             *switch_target_block = current_target_block;
             *switch_target_variant = SwitchVariant::ControlFlowContinue;
-            next_target_block = try_branch_target_bb;
+            next_target_block = try_branch_target_block;
         } else if let Some((transformer_destination, transformer_target_block)) =
             safe_option_some_transform_destination(*switch_target_place, terminator, tcx, strict)
         {
@@ -828,14 +859,14 @@ pub fn is_identity_closure(operand: &Operand, tcx: TyCtxt) -> bool {
     if blocks.len() != 1 {
         return false;
     }
-    let bb_data = &blocks[blocks.start_node()];
-    let Some(terminator) = &bb_data.terminator else {
+    let block_data = &blocks[blocks.start_node()];
+    let Some(terminator) = &block_data.terminator else {
         return false;
     };
     if terminator.kind != TerminatorKind::Return {
         return false;
     }
-    let stmts = &bb_data.statements;
+    let stmts = &block_data.statements;
     if stmts.len() != 1 {
         return false;
     }

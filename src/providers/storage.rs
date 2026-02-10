@@ -638,7 +638,7 @@ pub enum PropagatedVariant {
     ///
     /// NOTE: This is equivalent to the `TOP` abstract value.
     Unknown(SwitchVariant, SwitchVariant),
-    /// A unification of variants (e.g. with `Result::unwrap_or_else`).
+    /// A unification of variants (e.g. with `Result::unwrap`, `Result::unwrap_or`, `Result::unwrap_or_else`).
     ///
     /// **NOTE:** This is NOT equivalent to the `TOP` abstract value because it's an "unwrapped" value.
     Union,
