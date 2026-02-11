@@ -206,7 +206,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
             // Finds place and basic block for slice `Deref` operand/arg (if any).
             if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
-                let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
+                let Some((slice_deref_arg_place, slice_deref_block)) = analyze::deref_subject(
                     iterator_subject_place,
                     iterator_subject_block,
                     location.block,
@@ -217,7 +217,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     return;
                 };
                 iterator_subject_place = slice_deref_arg_place;
-                iterator_subject_block = slice_deref_bb;
+                iterator_subject_block = slice_deref_block;
             }
 
             // Updates upper bound (if appropriate).
@@ -477,8 +477,12 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Collects collection length/size bound annotations (and storage invariants)
         // for variant downcast to `usize` places (if any) for the switch target.
         let mut storage_invariants = FxHashSet::default();
-        for target_bb in switch_targets {
-            for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
+        for target_block in switch_targets {
+            for (stmt_idx, stmt) in self.basic_blocks[target_block]
+                .statements
+                .iter()
+                .enumerate()
+            {
                 // Finds variant downcast to `usize` places (if any) for the switch target variant.
                 let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
                     switch_target_place,
@@ -492,7 +496,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
                 // Declares an upper bound annotation, if one was determined.
                 let annotation_location = Location {
-                    block: target_bb,
+                    block: target_block,
                     statement_index: stmt_idx + 1,
                 };
                 let cond_op = CondOp::Lt;
@@ -671,7 +675,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 }
 
                 // Finds place and basic block for slice `Deref` operand/arg (if any).
-                let Some((slice_deref_arg_place, slice_deref_bb)) = analyze::deref_subject(
+                let Some((slice_deref_arg_place, slice_deref_block)) = analyze::deref_subject(
                     iterator_subject_place,
                     iterator_subject_block,
                     location.block,
@@ -682,7 +686,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     return;
                 };
                 iterator_subject_place = slice_deref_arg_place;
-                iterator_subject_block = slice_deref_bb;
+                iterator_subject_block = slice_deref_block;
             }
 
             // Updates upper bound (if appropriate).
@@ -802,8 +806,12 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         // Collects collection length/size bound annotations (and storage invariants)
         // for variant downcast to `usize` places (if any) for the switch target.
         let mut storage_invariants = FxHashSet::default();
-        for target_bb in switch_targets {
-            for (stmt_idx, stmt) in self.basic_blocks[target_bb].statements.iter().enumerate() {
+        for target_block in switch_targets {
+            for (stmt_idx, stmt) in self.basic_blocks[target_block]
+                .statements
+                .iter()
+                .enumerate()
+            {
                 // Finds variant downcast to `usize` places (if any) for the switch target variant.
                 let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
                     switch_target_place,
@@ -818,7 +826,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 // Declares transformed storage invariants.
                 storage_invariants.insert((
                     Location {
-                        block: target_bb,
+                        block: target_block,
                         statement_index: stmt_idx + 1,
                     },
                     CondOp::Lt,
@@ -1227,18 +1235,19 @@ fn into_iter_operand<'tcx>(
     terminator: &Terminator<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<Place<'tcx>> {
-    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
-        return None;
-    };
-    let (def_id, ..) = func.const_fn_def()?;
-    let into_iter_def_id = tcx
-        .lang_items()
-        .get(LangItem::IntoIterIntoIter)
-        .expect("Expected `std::iter::IntoIterator::into_iter` lang item");
-    if def_id != into_iter_def_id {
-        return None;
+    if let TerminatorKind::Call { func, args, .. } = &terminator.kind
+        && let Some((def_id, ..)) = func.const_fn_def()
+        && def_id
+            == tcx
+                .lang_items()
+                .get(LangItem::IntoIterIntoIter)
+                .expect("Expected `std::iter::IntoIterator::into_iter` lang item")
+        && let Some(first_arg) = args.first()
+    {
+        first_arg.node.place()
+    } else {
+        None
     }
-    args.first()?.node.place()
 }
 
 /// Returns place (if any) for the arg/operand of a `Iterator` by reference conversion
@@ -1247,17 +1256,17 @@ fn iter_by_ref_operand<'tcx>(
     terminator: &Terminator<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<Place<'tcx>> {
-    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
-        return None;
-    };
-    let (def_id, ..) = func.const_fn_def()?;
-    let is_slice_iter_call = tcx.item_name(def_id).as_str() == "iter"
+    if let TerminatorKind::Call { func, args, .. } = &terminator.kind
+        && let Some((def_id, ..)) = func.const_fn_def()
+        && tcx.item_name(def_id).as_str() == "iter"
         && matches!(tcx.crate_name(def_id.krate).as_str(), "core" | "std")
-        && analyze::is_slice_assoc_item(def_id, tcx);
-    if !is_slice_iter_call {
-        return None;
+        && analyze::is_slice_assoc_item(def_id, tcx)
+        && let Some(first_arg) = args.first()
+    {
+        first_arg.node.place()
+    } else {
+        None
     }
-    args.first()?.node.place()
 }
 
 /// Returns place (if any) for the arg/operand of an iterator adapter initializer
@@ -1266,35 +1275,36 @@ fn iterator_adapter_operand<'tcx>(
     terminator: &Terminator<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<Place<'tcx>> {
-    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
-        return None;
-    };
-    let (def_id, ..) = func.const_fn_def()?;
-    let is_adapter_call = matches!(
-        tcx.item_name(def_id).as_str(),
-        "copied"
-            | "cloned"
-            | "enumerate"
-            | "filter"
-            | "filter_map"
-            | "inspect"
-            | "map"
-            | "map_while"
-            | "peekable"
-            | "rev"
-            | "skip"
-            | "skip_while"
-            | "take"
-            | "take_while"
-    ) && matches!(tcx.crate_name(def_id.krate).as_str(), "core" | "std")
+    if let TerminatorKind::Call { func, args, .. } = &terminator.kind
+        && let Some((def_id, ..)) = func.const_fn_def()
+        && matches!(
+            tcx.item_name(def_id).as_str(),
+            "copied"
+                | "cloned"
+                | "enumerate"
+                | "filter"
+                | "filter_map"
+                | "inspect"
+                | "map"
+                | "map_while"
+                | "peekable"
+                | "rev"
+                | "skip"
+                | "skip_while"
+                | "take"
+                | "take_while"
+        )
+        && matches!(tcx.crate_name(def_id.krate).as_str(), "core" | "std")
         && tcx
             .opt_associated_item(def_id)
             .and_then(|assoc_item| assoc_item.trait_container(tcx))
-            .is_some_and(|trait_def_id| tcx.item_name(trait_def_id).as_str() == "Iterator");
-    if !is_adapter_call {
-        return None;
+            .is_some_and(|trait_def_id| tcx.item_name(trait_def_id).as_str() == "Iterator")
+        && let Some(first_arg) = args.first()
+    {
+        first_arg.node.place()
+    } else {
+        None
     }
-    args.first()?.node.place()
 }
 
 /// Collects all recurring/loop blocks given an anchor block.
@@ -1325,18 +1335,18 @@ fn collect_loop_blocks(
         loop_blocks: &mut FxHashSet<BasicBlock>,
         already_visited: &mut FxHashSet<BasicBlock>,
     ) {
-        for pred_bb in &basic_blocks.predecessors()[current_block] {
-            if already_visited.contains(pred_bb) {
+        for pred_block in &basic_blocks.predecessors()[current_block] {
+            if already_visited.contains(pred_block) {
                 continue;
             }
-            already_visited.insert(*pred_bb);
+            already_visited.insert(*pred_block);
 
-            if pred_bb.index() != anchor_block.index()
-                && dominators.dominates(anchor_block, *pred_bb)
+            if pred_block.index() != anchor_block.index()
+                && dominators.dominates(anchor_block, *pred_block)
             {
-                loop_blocks.insert(*pred_bb);
+                loop_blocks.insert(*pred_block);
                 collect_loop_blocks_inner(
-                    *pred_bb,
+                    *pred_block,
                     anchor_block,
                     basic_blocks,
                     dominators,
@@ -1359,17 +1369,18 @@ fn collect_reachable_loop_successors(
 ) -> FxHashSet<BasicBlock> {
     let mut successors = FxHashSet::default();
     for loop_block in loop_blocks {
-        for successor_bb in basic_blocks.successors(*loop_block) {
-            if successor_bb.index() != anchor_block.index() && !loop_blocks.contains(&successor_bb)
+        for successor_block in basic_blocks.successors(*loop_block) {
+            if successor_block.index() != anchor_block.index()
+                && !loop_blocks.contains(&successor_block)
             {
-                let bb_data = &basic_blocks[successor_bb];
-                let is_unreachable = bb_data.statements.is_empty()
-                    && bb_data
+                let block_data = &basic_blocks[successor_block];
+                let is_unreachable = block_data.statements.is_empty()
+                    && block_data
                         .terminator
                         .as_ref()
                         .is_some_and(|terminator| terminator.kind == TerminatorKind::Unreachable);
                 if !is_unreachable {
-                    successors.insert(successor_bb);
+                    successors.insert(successor_block);
                 }
             }
         }
@@ -1380,27 +1391,20 @@ fn collect_reachable_loop_successors(
 /// Returns places (if any) of the destination and "other" operand for a unit increment assignment
 /// (i.e. `x += 1`).
 fn unit_incr_assign_places<'tcx>(stmt: &Statement<'tcx>) -> Option<(Place<'tcx>, Place<'tcx>)> {
-    let StatementKind::Assign(assign) = &stmt.kind else {
-        return None;
-    };
     // TODO: is `BinOp::Add` necessary?.
-    let Rvalue::BinaryOp(BinOp::Add | BinOp::AddWithOverflow, operands) = &assign.1 else {
-        return None;
-    };
-    let (const_operand, op_place) = match (&operands.0, &operands.1) {
-        (Operand::Constant(const_operand), Operand::Copy(place) | Operand::Move(place))
-        | (Operand::Copy(place) | Operand::Move(place), Operand::Constant(const_operand))
-            if const_operand.ty().is_integral() =>
-        {
-            Some((const_operand, place))
-        }
-        _ => None,
-    }?;
-    let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_operand.const_ else {
-        return None;
-    };
-    let is_scalar_one = scalar.try_to_bits(scalar.size()).is_ok_and(|val| val == 1);
-    is_scalar_one.then_some((assign.0, *op_place))
+    if let StatementKind::Assign(assign) = &stmt.kind
+        && let Rvalue::BinaryOp(BinOp::Add | BinOp::AddWithOverflow, operands) = &assign.1
+        && let (Operand::Constant(const_operand), Operand::Copy(place) | Operand::Move(place))
+        | (Operand::Copy(place) | Operand::Move(place), Operand::Constant(const_operand)) =
+            (&operands.0, &operands.1)
+        && const_operand.ty().is_integral()
+        && let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_operand.const_
+        && scalar.try_to_bits(scalar.size()).is_ok_and(|val| val == 1)
+    {
+        Some((assign.0, *place))
+    } else {
+        None
+    }
 }
 
 /// Returns true if place is initialized/assigned to zero before the given anchor block.
@@ -1424,23 +1428,21 @@ fn is_zero_initialized_before_anchor<'tcx>(
         place: Place<'tcx>,
         stmt: &Statement<'tcx>,
     ) -> Option<bool> {
-        let StatementKind::Assign(assign) = &stmt.kind else {
-            return None;
-        };
-        if place != assign.0 {
-            return None;
+        if let StatementKind::Assign(assign) = &stmt.kind
+            && place == assign.0
+        {
+            if let Rvalue::Use(operand) = &assign.1
+                && let Operand::Constant(const_operand) = operand
+                && let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_operand.const_
+                && scalar.try_to_bits(scalar.size()).is_ok_and(|val| val == 0)
+            {
+                Some(true)
+            } else {
+                Some(false)
+            }
+        } else {
+            None
         }
-        let Rvalue::Use(operand) = &assign.1 else {
-            return Some(false);
-        };
-        let Operand::Constant(const_operand) = operand else {
-            return Some(false);
-        };
-        let Const::Val(ConstValue::Scalar(Scalar::Int(scalar)), _) = const_operand.const_ else {
-            return Some(false);
-        };
-        let is_scalar_zero = scalar.try_to_bits(scalar.size()).is_ok_and(|val| val == 0);
-        Some(is_scalar_zero)
     }
 
     fn is_zero_initialized_before_anchor_inner<'tcx>(
@@ -1451,24 +1453,24 @@ fn is_zero_initialized_before_anchor<'tcx>(
         dominators: &Dominators<BasicBlock>,
         already_visited: &mut FxHashSet<BasicBlock>,
     ) -> bool {
-        for pred_bb in &basic_blocks.predecessors()[current_block] {
-            if already_visited.contains(pred_bb) {
+        for pred_block in &basic_blocks.predecessors()[current_block] {
+            if already_visited.contains(pred_block) {
                 continue;
             }
-            already_visited.insert(*pred_bb);
+            already_visited.insert(*pred_block);
 
-            if pred_bb.index() != anchor_block.index()
-                && !dominators.dominates(anchor_block, *pred_bb)
+            if pred_block.index() != anchor_block.index()
+                && !dominators.dominates(anchor_block, *pred_block)
             {
-                let bb_data = &basic_blocks[*pred_bb];
-                for stmt in &bb_data.statements {
+                let block_data = &basic_blocks[*pred_block];
+                for stmt in &block_data.statements {
                     if let Some(res) = is_zero_assignment_to_place(place, stmt) {
                         return res;
                     }
                 }
                 let res = is_zero_initialized_before_anchor_inner(
                     place,
-                    *pred_bb,
+                    *pred_block,
                     anchor_block,
                     basic_blocks,
                     dominators,
@@ -1495,55 +1497,41 @@ fn is_enumerate_index<'tcx>(
     tcx: TyCtxt<'tcx>,
 ) -> bool {
     let iter_next_arg_ty = iter_next_arg_place.ty(local_decls, tcx).ty;
-    let Some(adt_def) = iter_next_arg_ty.peel_refs().ty_adt_def() else {
-        return false;
-    };
-    let adt_def_id = adt_def.did();
-    if !matches!(tcx.crate_name(adt_def_id.krate).as_str(), "core" | "std")
-        || tcx.item_name(adt_def_id).as_str() != "Enumerate"
+    if let Some(adt_def) = iter_next_arg_ty.peel_refs().ty_adt_def()
+        && let adt_def_id = adt_def.did()
+        && matches!(tcx.crate_name(adt_def_id.krate).as_str(), "core" | "std")
+        && tcx.item_name(adt_def_id).as_str() == "Enumerate"
     {
-        return false;
-    }
-
-    for bb in loop_blocks {
-        for stmt in &basic_blocks[*bb].statements {
-            let StatementKind::Assign(assign) = &stmt.kind else {
-                continue;
-            };
-            if assign.0 != target_place {
-                continue;
-            }
-            let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) = &assign.1 else {
-                continue;
-            };
-            if op_place.local != iter_next_dest_place.local {
-                continue;
-            }
-            if let Some((
-                (_, PlaceElem::Downcast(variant_name, variant_idx)),
-                (_, PlaceElem::Field(inner_field_idx, inner_field_ty)),
-                (_, PlaceElem::Field(outer_field_idx, outer_field_ty)),
-            )) = op_place.iter_projections().collect_tuple()
-            {
-                let inner_field_ty_first = match inner_field_ty.kind() {
-                    TyKind::Tuple(ty_list) => ty_list.first(),
-                    _ => None,
-                };
-                if (variant_name.is_none()
-                    || variant_name.is_some_and(|name| name.as_str() == "Some"))
-                    && variant_idx.as_u32() == 1
-                    && inner_field_idx.as_u32() == 0
-                    && inner_field_ty_first.is_some_and(|ty| *ty == tcx.types.usize)
-                    && outer_field_idx.as_u32() == 0
-                    && outer_field_ty == tcx.types.usize
+        loop_blocks.iter().any(|block| {
+            basic_blocks[*block].statements.iter().any(|stmt| {
+                if let StatementKind::Assign(assign) = &stmt.kind
+                    && assign.0 == target_place
+                    && let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place)) =
+                        &assign.1
+                    && op_place.local == iter_next_dest_place.local
+                    && let Some((
+                        (_, PlaceElem::Downcast(variant_name, variant_idx)),
+                        (_, PlaceElem::Field(inner_field_idx, inner_field_ty)),
+                        (_, PlaceElem::Field(outer_field_idx, outer_field_ty)),
+                    )) = op_place.iter_projections().collect_tuple()
+                    && let TyKind::Tuple(inner_field_ty_list) = inner_field_ty.kind()
+                    && let Some(inner_field_ty_first) = inner_field_ty_list.first()
                 {
-                    return true;
+                    (variant_name.is_none()
+                        || variant_name.is_some_and(|name| name.as_str() == "Some"))
+                        && variant_idx.as_u32() == 1
+                        && outer_field_idx.as_u32() == 0
+                        && outer_field_ty == tcx.types.usize
+                        && inner_field_idx.as_u32() == 0
+                        && *inner_field_ty_first == tcx.types.usize
+                } else {
+                    false
                 }
-            }
-        }
+            })
+        })
+    } else {
+        false
     }
-
-    false
 }
 
 /// An upper bound.

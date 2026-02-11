@@ -417,14 +417,14 @@ fn emit_diagnostics(
                     let is_dispatch_error_impl =
                         assoc_item.impl_container(tcx).is_some_and(|impl_def_id| {
                             let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
-                            if let ImplSubject::Trait(trait_ref) = impl_subject {
-                                trait_ref.self_ty().ty_adt_def().is_some_and(|adt_def| {
-                                    let adt_def_id = adt_def.did();
-                                    let crate_name = tcx.crate_name(adt_def_id.krate);
-                                    let adt_name = tcx.item_name(adt_def_id);
-                                    crate_name.as_str() == "sp_runtime"
-                                        && adt_name.as_str() == "DispatchError"
-                                })
+                            if let ImplSubject::Trait(trait_ref) = impl_subject
+                                && let Some(adt_def) = trait_ref.self_ty().ty_adt_def()
+                            {
+                                let adt_def_id = adt_def.did();
+                                let crate_name = tcx.crate_name(adt_def_id.krate);
+                                let adt_name = tcx.item_name(adt_def_id);
+                                crate_name.as_str() == "sp_runtime"
+                                    && adt_name.as_str() == "DispatchError"
                             } else {
                                 false
                             }

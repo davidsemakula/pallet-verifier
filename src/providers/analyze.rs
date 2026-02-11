@@ -33,20 +33,18 @@ fn deref_place<'tcx>(
 ) -> Option<(Place<'tcx>, Region<'tcx>)> {
     let target_place = direct_place(place);
     basic_blocks[block].statements.iter().find_map(|stmt| {
-        let StatementKind::Assign(assign) = &stmt.kind else {
-            return None;
-        };
-        if target_place != assign.0 {
-            return None;
+        if let StatementKind::Assign(assign) = &stmt.kind
+            && target_place == assign.0
+            && let Rvalue::Ref(region, _, op_place) = &assign.1
+        {
+            let direct_op_place = direct_place(*op_place);
+            direct_op_place
+                .projection
+                .is_empty()
+                .then_some((direct_op_place, *region))
+        } else {
+            None
         }
-        let Rvalue::Ref(region, _, op_place) = &assign.1 else {
-            return None;
-        };
-        let direct_op_place = direct_place(*op_place);
-        direct_op_place
-            .projection
-            .is_empty()
-            .then_some((direct_op_place, *region))
     })
 }
 
@@ -410,22 +408,22 @@ pub fn slice_len_call_info<'tcx>(
     local_decls: &LocalDecls<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<(Region<'tcx>, LenCallBuilderInfo<'tcx>)> {
-    let TyKind::Ref(region, slice_ty, _) = place.ty(local_decls, tcx).ty.kind() else {
-        return None;
-    };
-    if !slice_ty.is_slice() {
-        return None;
+    if let TyKind::Ref(region, slice_ty, _) = place.ty(local_decls, tcx).ty.kind()
+        && slice_ty.is_slice()
+    {
+        let slice_len_def_id = tcx
+            .lang_items()
+            .get(LangItem::SliceLen)
+            .expect("Expected `[T]::len` lang item");
+        let gen_ty = slice_ty
+            .walk()
+            .nth(1)
+            .expect("Expected a generic arg for `[T]`");
+        let gen_args = tcx.mk_args(&[gen_ty]);
+        Some((*region, vec![(slice_len_def_id, gen_args, tcx.types.usize)]))
+    } else {
+        None
     }
-    let slice_len_def_id = tcx
-        .lang_items()
-        .get(LangItem::SliceLen)
-        .expect("Expected `[T]::len` lang item");
-    let gen_ty = slice_ty
-        .walk()
-        .nth(1)
-        .expect("Expected a generic arg for `[T]`");
-    let gen_args = tcx.mk_args(&[gen_ty]);
-    Some((*region, vec![(slice_len_def_id, gen_args, tcx.types.usize)]))
 }
 
 /// An `Option`, `Result` or `ControlFlow` variant.
@@ -654,30 +652,26 @@ fn try_branch_destination<'tcx>(
     terminator: &Terminator<'tcx>,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    let TerminatorKind::Call {
+    if let TerminatorKind::Call {
         func,
         args,
         destination,
         target,
         ..
     } = &terminator.kind
-    else {
-        return None;
-    };
-    let (def_id, ..) = func.const_fn_def()?;
-    let try_branch_def_id = tcx
-        .lang_items()
-        .get(LangItem::TryTraitBranch)
-        .expect("Expected `std::ops::Try::branch` lang item");
-    if def_id != try_branch_def_id {
-        return None;
+        && let Some((def_id, ..)) = func.const_fn_def()
+        && def_id
+            == tcx
+                .lang_items()
+                .get(LangItem::TryTraitBranch)
+                .expect("Expected `std::ops::Try::branch` lang item")
+        && let Some(first_arg_place) = args.first().and_then(|arg| arg.node.place())
+        && first_arg_place == place
+    {
+        Some((*destination, *target))
+    } else {
+        None
     }
-    let first_arg_place = args.first().and_then(|arg| arg.node.place())?;
-    if first_arg_place != place {
-        return None;
-    }
-
-    Some((*destination, *target))
 }
 
 /// Returns destination place and target block (if any) of a transformation into `Option`
@@ -793,44 +787,51 @@ fn safe_result_err_transform_destination<'tcx>(
 }
 
 /// Returns destination place and target block (if any) if the given terminator matches
-/// the given `call_matcher` and the given place is the first argument of the call.
+/// the given `call_matcher`, and the given place is the first argument of the terminator call.
 pub fn first_arg_transformer_call_destination<'tcx>(
     place: Place<'tcx>,
     terminator: &Terminator<'tcx>,
     call_matcher: impl Fn(&str, &str, &str) -> bool,
     tcx: TyCtxt,
 ) -> Option<(Place<'tcx>, Option<BasicBlock>)> {
-    let TerminatorKind::Call {
-        func,
-        args,
-        destination,
-        target,
-        ..
-    } = &terminator.kind
-    else {
-        return None;
-    };
-    let first_arg = args.first()?;
-    let first_arg_place = first_arg.node.place()?;
-    if first_arg_place != place {
-        return None;
+    if is_first_arg_transformer(place, terminator, call_matcher, tcx)
+        && let TerminatorKind::Call {
+            destination,
+            target,
+            ..
+        } = &terminator.kind
+    {
+        Some((*destination, *target))
+    } else {
+        None
     }
+}
 
-    let (def_id, ..) = func.const_fn_def()?;
-    let fn_name = tcx.item_name(def_id);
-    let crate_name = tcx.crate_name(def_id.krate);
-
-    let assoc_item = tcx.opt_associated_item(def_id)?;
-    let impl_def_id = assoc_item.impl_container(tcx)?;
-    let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
-    let ImplSubject::Inherent(ty) = impl_subject else {
-        return None;
-    };
-    let adt_def = ty.ty_adt_def()?;
-    let adt_name = tcx.item_name(adt_def.did());
-
-    let is_safe_transform = call_matcher(crate_name.as_str(), adt_name.as_str(), fn_name.as_str());
-    is_safe_transform.then_some((*destination, *target))
+/// Returns true if the given terminator matches the given `call_matcher`,
+/// and the given place is the first argument of the terminator call.
+pub fn is_first_arg_transformer<'tcx>(
+    place: Place<'tcx>,
+    terminator: &Terminator<'tcx>,
+    call_matcher: impl Fn(&str, &str, &str) -> bool,
+    tcx: TyCtxt,
+) -> bool {
+    if let TerminatorKind::Call { func, args, .. } = &terminator.kind
+        && let Some(first_arg) = args.first()
+        && let Some(first_arg_place) = first_arg.node.place()
+        && first_arg_place == place
+        && let Some((def_id, ..)) = func.const_fn_def()
+        && let Some(assoc_item) = tcx.opt_associated_item(def_id)
+        && let Some(impl_def_id) = assoc_item.impl_container(tcx)
+        && let ImplSubject::Inherent(ty) = tcx.impl_subject(impl_def_id).skip_binder()
+        && let Some(adt_def) = ty.ty_adt_def()
+    {
+        let fn_name = tcx.item_name(def_id);
+        let crate_name = tcx.crate_name(def_id.krate);
+        let adt_name = tcx.item_name(adt_def.did());
+        call_matcher(crate_name.as_str(), adt_name.as_str(), fn_name.as_str())
+    } else {
+        false
+    }
 }
 
 /// Returns true if the operand is the const identity function (i.e. `std::convert::identity`).
@@ -847,44 +848,26 @@ pub fn is_identity_fn(operand: &Operand, tcx: TyCtxt) -> bool {
 
 /// Returns true if the operand is an identity closure (i.e. `|x| x`).
 pub fn is_identity_closure(operand: &Operand, tcx: TyCtxt) -> bool {
-    let Some(const_op) = operand.constant() else {
-        return false;
-    };
-    let const_op_ty = const_op.const_.ty();
-    let TyKind::Closure(def_id, _) = const_op_ty.kind() else {
-        return false;
-    };
-    let body = tcx.optimized_mir(def_id);
-    let blocks = &body.basic_blocks;
-    if blocks.len() != 1 {
-        return false;
+    if let Some(const_op) = operand.constant()
+        && let TyKind::Closure(def_id, _) = const_op.const_.ty().kind()
+        && let body = tcx.optimized_mir(def_id)
+        && let blocks = &body.basic_blocks
+        && blocks.len() == 1
+        && let block_data = &blocks[blocks.start_node()]
+        && let Some(terminator) = &block_data.terminator
+        && terminator.kind == TerminatorKind::Return
+        && let stmts = &block_data.statements
+        && stmts.len() == 1
+        && let Some(stmt) = stmts.first()
+        && let StatementKind::Assign(assign) = &stmt.kind
+        && assign.0.local == RETURN_PLACE
+        && let Rvalue::Use(Operand::Copy(assign_rvalue_place) | Operand::Move(assign_rvalue_place)) =
+            &assign.1
+    {
+        assign_rvalue_place.local.as_usize() <= body.arg_count
+    } else {
+        false
     }
-    let block_data = &blocks[blocks.start_node()];
-    let Some(terminator) = &block_data.terminator else {
-        return false;
-    };
-    if terminator.kind != TerminatorKind::Return {
-        return false;
-    }
-    let stmts = &block_data.statements;
-    if stmts.len() != 1 {
-        return false;
-    }
-    let stmt = stmts.first().expect("Expected a stmt");
-    let StatementKind::Assign(assign) = &stmt.kind else {
-        return false;
-    };
-    let assign_place = assign.0;
-    let assign_rvalue = &assign.1;
-    if assign_place.local != RETURN_PLACE {
-        return false;
-    }
-    let Rvalue::Use(Operand::Copy(assign_rvalue_place) | Operand::Move(assign_rvalue_place)) =
-        assign_rvalue
-    else {
-        return false;
-    };
-    assign_rvalue_place.local.as_usize() <= body.arg_count
 }
 
 /// Collects target basic blocks (if any) for the given value of a switch on discriminant of given place.
@@ -946,31 +929,18 @@ fn switch_target_for_discr_value<'tcx>(
     block_data: &BasicBlockData<'tcx>,
 ) -> Option<BasicBlock> {
     block_data.statements.iter().find_map(|stmt| {
-        let StatementKind::Assign(assign) = &stmt.kind else {
-            return None;
-        };
-        let Rvalue::Discriminant(op_place) = assign.1 else {
-            return None;
-        };
-        if op_place != place {
-            return None;
+        if let StatementKind::Assign(assign) = &stmt.kind
+            && let Rvalue::Discriminant(op_place) = assign.1
+            && op_place == place
+            && let Some(terminator) = block_data.terminator.as_ref()
+            && let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind
+            && let Operand::Copy(discr_place) | Operand::Move(discr_place) = discr
+            && *discr_place == assign.0
+        {
+            Some(targets.target_for_value(value))
+        } else {
+            None
         }
-
-        let terminator = block_data.terminator.as_ref()?;
-        let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {
-            return None;
-        };
-        let discr_place = match discr {
-            Operand::Copy(place) | Operand::Move(place) => place,
-            Operand::Constant(_) => {
-                return None;
-            }
-        };
-        if *discr_place != assign.0 {
-            return None;
-        }
-
-        Some(targets.target_for_value(value))
     })
 }
 
@@ -982,16 +952,16 @@ pub fn variant_downcast_to_ty_place<'tcx>(
     ty: Ty<'tcx>,
     stmt: &Statement<'tcx>,
 ) -> Option<Place<'tcx>> {
-    let StatementKind::Assign(assign) = &stmt.kind else {
-        return None;
-    };
-    let op_place = match &assign.1 {
-        Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place))
-        | Rvalue::Ref(_, _, op_place) => Some(op_place),
-        _ => None,
-    }?;
-    is_variant_downcast_to_ty_place(*op_place, place, variant_name, variant_idx, ty)
-        .then_some(assign.0)
+    if let StatementKind::Assign(assign) = &stmt.kind
+        && let Rvalue::Use(Operand::Copy(op_place) | Operand::Move(op_place))
+        | Rvalue::Ref(_, _, op_place)
+        | Rvalue::CopyForDeref(op_place) = &assign.1
+    {
+        is_variant_downcast_to_ty_place(*op_place, place, variant_name, variant_idx, ty)
+            .then_some(assign.0)
+    } else {
+        None
+    }
 }
 
 /// Returns true if the given `op_place` is a variant downcast to `ty` of `place`.

@@ -204,25 +204,22 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                 post_order_from(self.basic_blocks, annotation_location.block)
                     .into_iter()
                     .filter_map(|successor| {
-                        if successor == annotation_location.block {
-                            return None;
+                        if successor != annotation_location.block
+                            && let Some(terminator) = &self.basic_blocks[successor].terminator
+                            && let TerminatorKind::Call { args, .. } = &terminator.kind
+                        {
+                            let is_invariant_arg = args.iter().any(|arg| {
+                                arg.node
+                                    .place()
+                                    .is_some_and(|place| place == invariant_place)
+                            });
+                            is_invariant_arg.then_some(Location {
+                                block: successor,
+                                statement_index: 0,
+                            })
+                        } else {
+                            None
                         }
-                        let Some(terminator) = &self.basic_blocks[successor].terminator else {
-                            return None;
-                        };
-                        let TerminatorKind::Call { args, .. } = &terminator.kind else {
-                            return None;
-                        };
-
-                        let is_invariant_arg = args.iter().any(|arg| {
-                            arg.node
-                                .place()
-                                .is_some_and(|place| place == invariant_place)
-                        });
-                        is_invariant_arg.then_some(Location {
-                            block: successor,
-                            statement_index: 0,
-                        })
                     }),
             );
 
@@ -284,12 +281,9 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         }
 
         // Propagate index invariant to `Result` (and `Option`) adapter input closures (if any).
-        if collection_len_bound_info.is_some() {
-            let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_block])
-            else {
-                return;
-            };
-
+        if collection_len_bound_info.is_some()
+            && let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_block])
+        {
             // Collects collection related places (including all deref subjects).
             let mut collection_def_places = vec![
                 (binary_search_arg_place, location.block),
@@ -814,9 +808,9 @@ fn binary_search_result_unwrap_analysis<'tcx>(
                     if let StatementKind::Assign(assign) = &stmt.kind
                         && assign.0 == unwrap_second_arg_place
                         && let Rvalue::UnaryOp(UnOp::PtrMetadata, op) = &assign.1
-                        && op.place().is_some_and(|place| place == slice_place)
+                        && let Some(op_place) = op.place()
                     {
-                        true
+                        op_place == slice_place
                     } else {
                         false
                     }
@@ -827,19 +821,15 @@ fn binary_search_result_unwrap_analysis<'tcx>(
                 // Note: This accounts for multiple derefs (e.g. `BoundedVec` -> `Vec` -> `slice`).
                 let is_slice_deref_subject_len_place = || {
                     let dominators = basic_blocks.dominators();
-                    let Some((assign_terminator, assign_block)) =
-                        analyze::pre_anchor_assign_terminator(
-                            unwrap_second_arg_place,
-                            block,
-                            block,
-                            basic_blocks,
-                            dominators,
-                        )
-                    else {
-                        return false;
-                    };
-
-                    if let TerminatorKind::Call { func, args, .. } = &assign_terminator.kind
+                    let assign_info = analyze::pre_anchor_assign_terminator(
+                        unwrap_second_arg_place,
+                        block,
+                        block,
+                        basic_blocks,
+                        dominators,
+                    );
+                    if let Some((assign_terminator, assign_block)) = assign_info
+                        && let TerminatorKind::Call { func, args, .. } = &assign_terminator.kind
                         && args.len() == 1
                         && let Some((def_id, _)) = func.const_fn_def()
                         && let Some(fn_name) = tcx.opt_item_name(def_id)
@@ -1046,22 +1036,20 @@ fn collect_variant_target_invariants<'tcx>(
 
         for (stmt_idx, stmt) in basic_blocks[block].statements.iter().enumerate() {
             // Finds variant downcast to `usize` places (if any) for the switch target variant.
-            let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
+            if let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
                 place,
                 variant_name,
                 variant_idx,
                 tcx.types.usize,
                 stmt,
-            ) else {
-                continue;
-            };
-
-            // Declares a collection length/size bound invariant.
-            let annotation_location = Location {
-                block,
-                statement_index: stmt_idx + 1,
-            };
-            results.insert((annotation_location, cond_op, downcast_place));
+            ) {
+                // Declares a collection length/size bound invariant.
+                let annotation_location = Location {
+                    block,
+                    statement_index: stmt_idx + 1,
+                };
+                results.insert((annotation_location, cond_op, downcast_place));
+            }
         }
     }
 }

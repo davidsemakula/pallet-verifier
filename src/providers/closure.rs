@@ -10,7 +10,7 @@ use rustc_middle::{
         LocalDecl, Location, Operand, Place, PlaceElem, Rvalue, Statement, StatementKind,
         TerminatorKind,
     },
-    ty::{ClosureArgs, ImplSubject, Region, RegionKind, TyCtxt, TyKind},
+    ty::{ClosureArgs, Region, RegionKind, TyCtxt, TyKind},
 };
 
 use serde::{Deserialize, Serialize};
@@ -133,43 +133,28 @@ pub fn propagate_opt_result_idx_invariant<'tcx>(
     let Some(terminator) = next_block.terminator.as_ref() else {
         return;
     };
-    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
-        return;
-    };
-    let Some(first_arg_place) = args.first().and_then(|arg| arg.node.place()) else {
-        return;
-    };
-    if first_arg_place != opt_res_place {
-        return;
-    }
-    let Some((def_id, ..)) = func.const_fn_def() else {
-        return;
-    };
-    let fn_name = tcx.item_name(def_id);
-    let crate_name = tcx.crate_name(def_id.krate);
-    let Some(impl_def_id) = tcx.impl_of_method(def_id) else {
-        return;
-    };
-    let impl_subject = tcx.impl_subject(impl_def_id).skip_binder();
-    let ImplSubject::Inherent(ty) = impl_subject else {
-        return;
-    };
-    let Some(adt_def) = ty.ty_adt_def() else {
-        return;
-    };
-    let adt_name = tcx.item_name(adt_def.did());
-    let is_adapter_with_closure_input = matches!(crate_name.as_str(), "std" | "core")
-        && (matches!(adt_name.as_str(), "Result" | "Option")
-            && matches!(
-                fn_name.as_str(),
-                "map" | "map_or" | "map_or_else" | "inspect" | "and_then"
-            )
-            || (adt_name.as_str() == "Result" && fn_name.as_str() == "is_ok_and")
-            || (adt_name.as_str() == "Option"
-                && matches!(fn_name.as_str(), "filter" | "is_some_and" | "take_if")));
+    let is_adapter_with_closure_input = analyze::is_first_arg_transformer(
+        opt_res_place,
+        terminator,
+        |crate_name, adt_name, fn_name| {
+            matches!(crate_name, "std" | "core")
+                && (matches!(adt_name, "Result" | "Option")
+                    && matches!(
+                        fn_name,
+                        "map" | "map_or" | "map_or_else" | "inspect" | "and_then"
+                    )
+                    || (adt_name == "Result" && fn_name == "is_ok_and")
+                    || (adt_name == "Option"
+                        && matches!(fn_name, "filter" | "is_some_and" | "take_if")))
+        },
+        tcx,
+    );
     if !is_adapter_with_closure_input {
         return;
     }
+    let TerminatorKind::Call { args, .. } = &terminator.kind else {
+        return;
+    };
 
     // Find capturing closure info (if any).
     let Some((closure_def_id, captured_locals, _)) = args
@@ -211,10 +196,10 @@ pub fn propagate_opt_result_idx_invariant<'tcx>(
                                     .iter()
                                     .any(|(collection_place, _)| src_place == *collection_place);
                                 let is_projected_place = collection_def_places.iter().any(
-                                    |(collection_place, collection_def_bb)| {
+                                    |(collection_place, collection_def_block)| {
                                         assign_place(
                                             *collection_place,
-                                            &basic_blocks[*collection_def_bb],
+                                            &basic_blocks[*collection_def_block],
                                         )
                                         .is_some_and(|place| place == src_place)
                                     },

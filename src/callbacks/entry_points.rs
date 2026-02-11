@@ -435,24 +435,21 @@ fn pallet_struct(tcx: TyCtxt) -> Option<LocalDefId> {
     tcx.hir_free_items()
         .filter_map(|item_id| {
             let item = tcx.hir_item(item_id);
-            let rustc_hir::ItemKind::Struct(ident, _, struct_generics) = item.kind else {
-                return None;
-            };
-            if ident.as_str() == "Pallet"
+            if let rustc_hir::ItemKind::Struct(ident, _, struct_generics) = item.kind
+                && ident.as_str() == "Pallet"
                 && tcx
                     .item_name(tcx.parent_module(item_id.hir_id()).to_def_id())
                     .as_str()
                     == "pallet"
+                && let struct_def_id = item_id.owner_id.def_id
+                && struct_generics.get_named(Symbol::intern("T")).is_some()
+                && !is_test_only_item(struct_def_id, tcx)
+                && is_visible_from_crate_root(struct_def_id.to_def_id(), tcx)
             {
-                let struct_def_id = item_id.owner_id.def_id;
-                if struct_generics.get_named(Symbol::intern("T")).is_some()
-                    && !is_test_only_item(struct_def_id, tcx)
-                    && is_visible_from_crate_root(struct_def_id.to_def_id(), tcx)
-                {
-                    return Some(struct_def_id);
-                }
+                Some(struct_def_id)
+            } else {
+                None
             }
-            None
         })
         .sorted_by_key(|def_id| tcx.def_path(def_id.to_def_id()).data.len())
         .next()
@@ -467,14 +464,16 @@ fn call_enum(pallet_mod_def_id: LocalModDefId, tcx: TyCtxt) -> Option<LocalDefId
         .filter_map(|item_id| {
             let item = tcx.hir_item(item_id);
             let item_def_id = item_id.owner_id.def_id;
-            let rustc_hir::ItemKind::Enum(ident, _, _) = item.kind else {
-                return None;
-            };
-            let is_call_enum = ident.as_str() == "Call"
+            if let rustc_hir::ItemKind::Enum(ident, _, _) = item.kind
+                && ident.as_str() == "Call"
                 && config_trait(item_def_id, tcx).is_some()
                 && !is_test_only_item(item_def_id, tcx)
-                && is_visible_from_crate_root(item_def_id.to_def_id(), tcx);
-            is_call_enum.then_some(item_def_id)
+                && is_visible_from_crate_root(item_def_id.to_def_id(), tcx)
+            {
+                Some(item_def_id)
+            } else {
+                None
+            }
         })
         // Picks `Call` enum with a definition "closest" to the crate root.
         .sorted_by_key(|def_id| tcx.def_path(def_id.to_def_id()).data.len())
@@ -553,7 +552,9 @@ fn dispatchable_ids(
 
 /// Finds definitions of a pallet's public associated functions.
 ///
-/// **NOTE:** This currently only returns:
+/// # Note
+///
+/// This currently only returns:
 /// - public associated functions of inherent implementations
 /// - associated functions of implementations of local public traits
 /// - associated functions of implementations of traits from `pallet-*` dependencies
@@ -1759,22 +1760,21 @@ fn process_used_items(
                             let mut impls = FxHashSet::default();
                             let adt_impl = |item_id: rustc_hir::ItemId| {
                                 let item = tcx.hir_item(item_id);
-                                let rustc_hir::ItemKind::Impl(impl_item) = item.kind else {
-                                    return None;
-                                };
-                                let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) =
-                                    impl_item.self_ty.kind
-                                else {
-                                    return None;
-                                };
-                                let Res::Def(
-                                    DefKind::Struct | DefKind::Enum | DefKind::Union,
-                                    adt_def_id,
-                                ) = path.res
-                                else {
-                                    return None;
-                                };
-                                (adt_def_id == item_def_id).then_some((impl_item, item.span))
+                                if let rustc_hir::ItemKind::Impl(impl_item) = item.kind
+                                    && let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(
+                                        _,
+                                        path,
+                                    )) = impl_item.self_ty.kind
+                                    && let Res::Def(
+                                        DefKind::Struct | DefKind::Enum | DefKind::Union,
+                                        adt_def_id,
+                                    ) = path.res
+                                    && adt_def_id == item_def_id
+                                {
+                                    Some((impl_item, item.span))
+                                } else {
+                                    None
+                                }
                             };
                             for (impl_item, span) in tcx.hir_free_items().filter_map(adt_impl) {
                                 // Collects child used items for `impl`.

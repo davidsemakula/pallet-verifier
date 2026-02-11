@@ -96,7 +96,7 @@ pub fn storage_subject<'tcx>(
     // Finds innermost (un-derefed) place and it's parent block.
     let mut derefed_target_place = place;
     let mut derefed_target_block = parent_block;
-    while let Some((derefed_place, bb)) = analyze::deref_subject(
+    while let Some((derefed_place, block)) = analyze::deref_subject(
         derefed_target_place,
         parent_block,
         anchor_block,
@@ -105,18 +105,18 @@ pub fn storage_subject<'tcx>(
         tcx,
     ) {
         derefed_target_place = derefed_place;
-        derefed_target_block = bb;
+        derefed_target_block = block;
     }
 
     // Finds FRAME storage subject (if any).
-    let (terminator, call_bb) = analyze::pre_anchor_assign_terminator(
+    let (terminator, call_block) = analyze::pre_anchor_assign_terminator(
         derefed_target_place,
         derefed_target_block,
         anchor_block,
         basic_blocks,
         dominators,
     )?;
-    storage_item(&terminator, tcx).map(|storage_item| (storage_item, call_bb))
+    storage_item(&terminator, tcx).map(|storage_item| (storage_item, call_block))
 }
 
 /// Returns info about the FRAME storage item (if any) for which the given `Terminator` call is
@@ -552,8 +552,8 @@ fn propagate_return_place_invariant<'tcx>(
     let Some(len_call_info) = analyze::collection_len_call(downcast_ty, tcx) else {
         return;
     };
-    for target_bb in switch_targets {
-        for (stmt_idx, stmt) in basic_blocks[target_bb].statements.iter().enumerate() {
+    for target_block in switch_targets {
+        for (stmt_idx, stmt) in basic_blocks[target_block].statements.iter().enumerate() {
             // Finds variant downcast to `downcast_ty` places (if any) for the switch target variant.
             let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
                 switch_target_place,
@@ -567,7 +567,7 @@ fn propagate_return_place_invariant<'tcx>(
 
             // Declares propagated invariant.
             let annotation_location = Location {
-                block: target_bb,
+                block: target_block,
                 statement_index: stmt_idx + 1,
             };
             invariants.push((annotation_location, downcast_place));
@@ -900,18 +900,15 @@ fn is_result_ty<'tcx>(ty: Ty<'tcx>, inner_ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> bo
 /// Returns true if the given `ty` is an ADT with the given `DefId` and has an `inner_ty`
 /// as a generic type param.
 fn is_adt_with_generic_type_param<'tcx>(ty: Ty<'tcx>, def_id: DefId, inner_ty: Ty<'tcx>) -> bool {
-    match ty.peel_refs().kind() {
-        TyKind::Adt(adt_def, gen_args) => {
-            if adt_def.did() == def_id {
-                gen_args.iter().any(|arg| {
-                    arg.as_type()
-                        .is_some_and(|ty| ty == inner_ty || ty.peel_refs() == inner_ty)
-                })
-            } else {
-                false
-            }
-        }
-        _ => false,
+    if let TyKind::Adt(adt_def, gen_args) = ty.peel_refs().kind()
+        && adt_def.did() == def_id
+    {
+        gen_args.iter().any(|arg| {
+            arg.as_type()
+                .is_some_and(|ty| ty == inner_ty || ty.peel_refs() == inner_ty)
+        })
+    } else {
+        false
     }
 }
 

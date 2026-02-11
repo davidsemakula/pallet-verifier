@@ -232,18 +232,16 @@ impl<'tcx, 'pass> LossyIntCastVisitor<'tcx, 'pass> {
                 .statements
                 .iter()
                 .find_map(|stmt| {
-                    let StatementKind::Assign(assign) = &stmt.kind else {
-                        return None;
-                    };
-                    if assign.0 != op_place {
-                        return None;
+                    if let StatementKind::Assign(assign) = &stmt.kind
+                        && assign.0 == op_place
+                        && let Rvalue::Discriminant(discr_place) = assign.1
+                        && let src_ty = discr_place.ty(self.local_decls, self.tcx).ty
+                        && let Some(adt_def) = src_ty.ty_adt_def()
+                    {
+                        matches!(adt_def.adt_kind(), AdtKind::Enum).then_some(adt_def)
+                    } else {
+                        None
                     }
-                    let Rvalue::Discriminant(discr_place) = assign.1 else {
-                        return None;
-                    };
-                    let src_ty = discr_place.ty(self.local_decls, self.tcx).ty;
-                    let adt_def = src_ty.ty_adt_def()?;
-                    matches!(adt_def.adt_kind(), AdtKind::Enum).then_some(adt_def)
                 })
         });
         if let Some(enum_def) = enum_def {
