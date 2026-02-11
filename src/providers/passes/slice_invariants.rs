@@ -169,7 +169,14 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             // `Result::unwrap`, `Result::unwrap_or`, `Result::unwrap_or_else`
             // (through "safe" transformations) destination place target info.
             unwrap_or_else_target_info,
-        ) = binary_search_analysis(destination, target, location, self.basic_blocks, self.tcx);
+        ) = binary_search_analysis(
+            destination,
+            target,
+            location,
+            self.basic_blocks,
+            self.local_decls,
+            self.tcx,
+        );
 
         // Retrieves info needed to construct a slice length/size call (if possible).
         let slice_len_bound_info =
@@ -553,6 +560,7 @@ fn binary_search_analysis<'tcx>(
     target: Option<&BasicBlock>,
     location: Location,
     basic_blocks: &BasicBlocks<'tcx>,
+    local_decls: &LocalDecls<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> (
     FxHashSet<Invariant<'tcx>>,
@@ -570,9 +578,14 @@ fn binary_search_analysis<'tcx>(
     // See [`analyze::track_safe_result_transformations`] for details.
     let mut unwrap_or_else_target_info = None;
     if let Some(target) = target {
-        if let Some(results) =
-            binary_search_result_unwrap_analysis(destination, *target, location, basic_blocks, tcx)
-        {
+        if let Some(results) = binary_search_result_unwrap_analysis(
+            destination,
+            *target,
+            location,
+            basic_blocks,
+            local_decls,
+            tcx,
+        ) {
             // Adds collection length/size invariant for unwrap place.
             invariants.extend(results.0);
 
@@ -721,6 +734,7 @@ fn binary_search_result_unwrap_analysis<'tcx>(
     target: BasicBlock,
     location: Location,
     basic_blocks: &BasicBlocks<'tcx>,
+    local_decls: &LocalDecls<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<(FxHashSet<Invariant<'tcx>>, (Place<'tcx>, BasicBlock))> {
     // Tracks collection length/size bound invariants.
@@ -808,9 +822,76 @@ fn binary_search_result_unwrap_analysis<'tcx>(
                     if let StatementKind::Assign(assign) = &stmt.kind
                         && assign.0 == unwrap_second_arg_place
                         && let Rvalue::UnaryOp(UnOp::PtrMetadata, op) = &assign.1
+                        && op.ty(local_decls, tcx).peel_refs().is_slice()
                         && let Some(op_place) = op.place()
                     {
+                        let is_direct_slice_alias = || {
+                            let slice_place_aliases = analyze::collect_place_aliases(
+                                slice_place,
+                                &basic_blocks[location.block],
+                            );
+                            let op_place_aliases =
+                                analyze::collect_place_aliases(op_place, block_data);
+                            slice_place_aliases.contains(&op_place)
+                                || op_place_aliases.iter().any(|place| {
+                                    *place == slice_place || slice_place_aliases.contains(place)
+                                })
+                        };
+
+                        let is_deref_of_same_subject_as_slice = || {
+                            let dominators = basic_blocks.dominators();
+                            let slice_deref_subjects = analyze::deref_subjects_recursive(
+                                slice_place,
+                                location.block,
+                                location.block,
+                                basic_blocks,
+                                dominators,
+                                tcx,
+                            );
+                            let slice_deref_subjects_and_aliases: FxHashSet<_> =
+                                slice_deref_subjects
+                                    .iter()
+                                    .map(|(place, _)| *place)
+                                    .chain(slice_deref_subjects.iter().flat_map(
+                                        |(deref_subject_place, deref_subject_block)| {
+                                            analyze::collect_place_aliases(
+                                                *deref_subject_place,
+                                                &basic_blocks[*deref_subject_block],
+                                            )
+                                        },
+                                    ))
+                                    .collect();
+
+                            let op_deref_subjects = analyze::deref_subjects_recursive(
+                                op_place,
+                                block,
+                                block,
+                                basic_blocks,
+                                dominators,
+                                tcx,
+                            );
+                            op_deref_subjects.iter().any(
+                                |(deref_subject_place, deref_subject_block)| {
+                                    if slice_deref_subjects_and_aliases
+                                        .contains(deref_subject_place)
+                                    {
+                                        return true;
+                                    }
+
+                                    let deref_subject_aliases = analyze::collect_place_aliases(
+                                        *deref_subject_place,
+                                        &basic_blocks[*deref_subject_block],
+                                    );
+                                    deref_subject_aliases.iter().any(|place| {
+                                        slice_deref_subjects_and_aliases.contains(place)
+                                    })
+                                },
+                            )
+                        };
+
                         op_place == slice_place
+                            || is_direct_slice_alias()
+                            || is_deref_of_same_subject_as_slice()
                     } else {
                         false
                     }
