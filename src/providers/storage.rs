@@ -589,6 +589,7 @@ pub struct StorageInvariantEnv {
     pub call_def_hash: String,
     pub storage_def_hash: String,
     pub source: InvariantSource,
+    pub location: (u32, usize),
     pub propagated_variant: PropagatedVariant,
 }
 
@@ -598,12 +599,14 @@ impl StorageInvariantEnv {
         call_def_id: DefId,
         storage_def_hash: String,
         source: InvariantSource,
+        location: (u32, usize),
         propagated_variant: PropagatedVariant,
         tcx: TyCtxt,
     ) -> Self {
         Self {
             call_def_hash: utils::def_hash_str(call_def_id, tcx),
             storage_def_hash,
+            location,
             propagated_variant,
             source,
         }
@@ -614,6 +617,7 @@ impl StorageInvariantEnv {
         call_def_id: DefId,
         storage_id: StorageId,
         source: InvariantSource,
+        location: (u32, usize),
         propagated_variant: PropagatedVariant,
         tcx: TyCtxt,
     ) -> Self {
@@ -621,6 +625,7 @@ impl StorageInvariantEnv {
             call_def_id,
             storage_id.as_hash(tcx),
             source,
+            location,
             propagated_variant,
             tcx,
         )

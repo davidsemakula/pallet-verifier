@@ -152,12 +152,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         let storage_invariant_env = storage::find_invariant_env(def_id, self.tcx)
             .filter(|invariant| invariant.source == InvariantSource::IteratorPosition);
         if let Some(storage_invariant_env) = storage_invariant_env {
-            self.propagate_iterator_position_invariant_env(
-                storage_invariant_env,
-                destination,
-                target.as_ref(),
-                location,
-            );
+            self.propagate_iterator_position_invariant_env(storage_invariant_env);
         }
     }
 
@@ -588,6 +583,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     self.def_id,
                     StorageId::DefId(storage_item.prefix),
                     InvariantSource::IteratorPosition,
+                    (location.block.as_u32(), location.statement_index),
                     PropagatedVariant::Primary(switch_variant),
                     self.tcx,
                 );
@@ -765,13 +761,25 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
     }
 
     // Propagates return place iterator (r)position invariants.
-    fn propagate_iterator_position_invariant_env(
-        &mut self,
-        invariant_env: StorageInvariantEnv,
-        destination: &Place<'tcx>,
-        target: Option<&BasicBlock>,
-        location: Location,
-    ) {
+    fn propagate_iterator_position_invariant_env(&mut self, invariant_env: StorageInvariantEnv) {
+        // Retrieves call info.
+        let location = Location {
+            block: invariant_env.location.0.into(),
+            statement_index: invariant_env.location.1,
+        };
+        let block_data = &self.basic_blocks[location.block];
+        let Some(terminator) = &block_data.terminator else {
+            return;
+        };
+        let TerminatorKind::Call {
+            destination,
+            target,
+            ..
+        } = &terminator.kind
+        else {
+            return;
+        };
+
         // Tracks `Option::Some` (or "safe" transformation) switch target info of return value of
         // `std::iter::Iterator::position` or `std::iter::Iterator::rposition`.
         // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
@@ -854,6 +862,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                 self.def_id,
                 invariant_env.storage_def_hash,
                 InvariantSource::IteratorPosition,
+                (location.block.as_u32(), location.statement_index),
                 PropagatedVariant::Primary(switch_variant),
                 self.tcx,
             );

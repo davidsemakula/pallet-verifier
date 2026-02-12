@@ -118,12 +118,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             let storage_invariant_env = storage::find_invariant_env(def_id, self.tcx)
                 .filter(|invariant| invariant.source == InvariantSource::SliceBinarySearch);
             if let Some(storage_invariant_env) = storage_invariant_env {
-                self.propagate_storage_binary_search_invariant_env(
-                    storage_invariant_env,
-                    destination,
-                    target.as_ref(),
-                    location,
-                );
+                self.propagate_storage_binary_search_invariant_env(storage_invariant_env);
             }
         }
     }
@@ -324,6 +319,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             propagate_storage_invariant(
                 self.def_id,
                 StorageId::DefId(storage_item.prefix),
+                location,
                 Some((switch_target_place, switch_variant)),
                 Some((switch_target_place_alt, switch_variant_alt)),
                 unwrap_or_else_target_info.map(|(place, _)| place),
@@ -445,10 +441,25 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
     fn propagate_storage_binary_search_invariant_env(
         &mut self,
         invariant_env: StorageInvariantEnv,
-        destination: &Place<'tcx>,
-        target: Option<&BasicBlock>,
-        location: Location,
     ) {
+        // Retrieves call info.
+        let location = Location {
+            block: invariant_env.location.0.into(),
+            statement_index: invariant_env.location.1,
+        };
+        let block_data = &self.basic_blocks[location.block];
+        let Some(terminator) = &block_data.terminator else {
+            return;
+        };
+        let TerminatorKind::Call {
+            destination,
+            target,
+            ..
+        } = &terminator.kind
+        else {
+            return;
+        };
+
         // Collects transformed storage invariants and switch target info.
         let (invariants, switch_target_info, switch_target_info_alt, unified_target_info) =
             match invariant_env.propagated_variant {
@@ -456,7 +467,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                     let (invariants, (switch_target_place, _, new_switch_variant)) =
                         binary_search_result_ok_analysis(
                             destination,
-                            target,
+                            target.as_ref(),
                             location,
                             switch_variant,
                             self.basic_blocks,
@@ -473,7 +484,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                     let (invariants, (switch_target_place_alt, _, new_switch_variant_alt)) =
                         binary_search_result_err_analysis(
                             destination,
-                            target,
+                            target.as_ref(),
                             location,
                             switch_variant_alt,
                             self.basic_blocks,
@@ -490,7 +501,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                     let (mut invariants, (switch_target_place, _, new_switch_variant)) =
                         binary_search_result_ok_analysis(
                             destination,
-                            target,
+                            target.as_ref(),
                             location,
                             switch_variant,
                             self.basic_blocks,
@@ -499,7 +510,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
                     let (invariants_alt, (switch_target_place_alt, _, new_switch_variant_alt)) =
                         binary_search_result_err_analysis(
                             destination,
-                            target,
+                            target.as_ref(),
                             location,
                             switch_variant_alt,
                             self.basic_blocks,
@@ -532,6 +543,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         propagate_storage_invariant(
             self.def_id,
             StorageId::DefHash(invariant_env.storage_def_hash),
+            location,
             switch_target_info,
             switch_target_info_alt,
             unified_target_info,
@@ -726,9 +738,9 @@ fn binary_search_result_err_analysis<'tcx>(
 ///
 /// # Note
 ///
-/// - For `Result:unwrap_or_else`, the second arg must be an identity function or closure.
 /// - For `Result::unwrap_or`, the second arg must be a slice length call for the binary search target,
 ///   or a collection length call for the binary search target's `Deref` subject.
+/// - For `Result:unwrap_or_else`, the second arg must be an identity function or closure.
 fn binary_search_result_unwrap_analysis<'tcx>(
     destination: &Place<'tcx>,
     target: BasicBlock,
@@ -1139,6 +1151,7 @@ fn collect_variant_target_invariants<'tcx>(
 fn propagate_storage_invariant<'tcx>(
     def_id: DefId,
     storage_id: StorageId,
+    location: Location,
     switch_target_info: Option<(Place<'tcx>, SwitchVariant)>,
     switch_target_info_alt: Option<(Place<'tcx>, SwitchVariant)>,
     unified_target_info: Option<Place<'tcx>>,
@@ -1183,6 +1196,7 @@ fn propagate_storage_invariant<'tcx>(
         def_id,
         storage_id,
         InvariantSource::SliceBinarySearch,
+        (location.block.as_u32(), location.statement_index),
         propagated_variant,
         tcx,
     );
