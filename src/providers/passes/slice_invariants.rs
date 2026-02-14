@@ -7,14 +7,14 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{
         BasicBlock, BasicBlocks, Body, HasLocalDecls, LocalDecls, Location, Operand, Place,
-        RETURN_PLACE, Rvalue, StatementKind, Terminator, TerminatorKind, UnOp, visit::Visitor,
+        RETURN_PLACE, Terminator, TerminatorKind, visit::Visitor,
     },
     ty::TyCtxt,
 };
 use rustc_span::source_map::Spanned;
 
 use crate::providers::{
-    analyze::{self, SwitchVariant},
+    analyze::{self, Invariant, SwitchVariant},
     annotate::{self, Annotation, CondOp},
     closure,
     passes::MirPass,
@@ -305,7 +305,7 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
 
             // Propagate invariants to closure (if any).
             let next_block_data = &self.basic_blocks[next_target];
-            closure::propagate_opt_result_idx_invariant(
+            closure::propagate_option_result_idx_invariant(
                 switch_target_place,
                 next_block_data,
                 &collection_def_places,
@@ -559,9 +559,6 @@ impl<'tcx> Visitor<'tcx> for SliceVisitor<'tcx, '_> {
     }
 }
 
-/// Convenience alias for tracking invariant info.
-type Invariant<'tcx> = (Location, CondOp, Place<'tcx>);
-
 /// Convenience alias for tracking switch target info.
 type SwitchTargetInfo<'tcx> = (Place<'tcx>, BasicBlock, SwitchVariant);
 
@@ -649,11 +646,11 @@ fn binary_search_result_ok_analysis<'tcx>(
     // Tracks `Result::Ok` switch target info of return value of slice `binary_search` methods.
     // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
     // `Option::Some` transformations)
-    // See [`analyze::track_safe_primary_opt_result_variant_transformations`] for details.
+    // See [`analyze::track_safe_primary_option_result_variant_transformations`] for details.
     let mut switch_target_place = *destination;
     let mut switch_target_block = location.block;
     if let Some(target) = target {
-        analyze::track_safe_primary_opt_result_variant_transformations(
+        analyze::track_safe_primary_option_result_variant_transformations(
             &mut switch_target_place,
             &mut switch_target_block,
             &mut switch_variant,
@@ -749,9 +746,6 @@ fn binary_search_result_unwrap_analysis<'tcx>(
     local_decls: &LocalDecls<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<(FxHashSet<Invariant<'tcx>>, (Place<'tcx>, BasicBlock))> {
-    // Tracks collection length/size bound invariants.
-    let mut invariants = FxHashSet::default();
-
     // Tracks/allows "safe" transformations before `unwrap_or_else` call
     // (e.g. via `Result::inspect`, `Result::inspect_err` e.t.c).
     // See [`analyze::track_safe_result_transformations`] for details.
@@ -769,282 +763,20 @@ fn binary_search_result_unwrap_analysis<'tcx>(
     // destination place, next target block (if any) and
     // collection length upper bound invariant condition (if any).
     let next_block = analyze::call_target(&basic_blocks[unwrap_arg_def_block])?;
-    let mut next_target_block = Some(next_block);
-    let mut unwrap_place_info = None;
-    let mut already_visited = FxHashSet::default();
-
-    while let Some(block) = next_target_block
-        && !already_visited.contains(&block)
-    {
-        let block_data = &basic_blocks[block];
-        already_visited.insert(block);
-        let terminator = block_data.terminator.as_ref()?;
-        if let Some((unwrap_dest_place, post_unwrap_target)) =
-            analyze::first_arg_transformer_call_destination(
-                unwrap_arg_place,
-                terminator,
-                |crate_name, adt_name, fn_name| {
-                    matches!(crate_name, "std" | "core")
-                        && adt_name == "Result"
-                        && fn_name == "unwrap"
-                },
-                tcx,
-            )
-        {
-            unwrap_place_info = Some((unwrap_dest_place, post_unwrap_target, CondOp::Lt));
-            next_target_block = None;
-        } else if let Some((unwrap_dest_place, post_unwrap_target)) =
-            analyze::first_arg_transformer_call_destination(
-                unwrap_arg_place,
-                terminator,
-                |crate_name, adt_name, fn_name| {
-                    matches!(crate_name, "std" | "core")
-                        && adt_name == "Result"
-                        && fn_name == "unwrap_or"
-                },
-                tcx,
-            )
-        {
-            // Checks if the second `Result::unwrap_or` arg is a slice length call for the binary search target,
-            // or a collection length call for the binary search target's `Deref` subject.
-            if let TerminatorKind::Call {
-                args: unwrap_args, ..
-            } = &terminator.kind
-                && let Some(unwrap_second_arg) = unwrap_args.get(1)
-                && let Some(unwrap_second_arg_place) = unwrap_second_arg.node.place()
-                && let Some(slice_place) = basic_blocks[location.block]
-                    .terminator
-                    .as_ref()
-                    .and_then(|terminator| {
-                        if let TerminatorKind::Call {
-                            args,
-                            destination: dest,
-                            ..
-                        } = &terminator.kind
-                            && dest == destination
-                        {
-                            args.first()?.node.place()
-                        } else {
-                            None
-                        }
-                    })
-            {
-                // Checks if the second `Result::unwrap_or` arg is a slice length call.
-                let is_slice_len_metadata_place = block_data.statements.iter().any(|stmt| {
-                    if let StatementKind::Assign(assign) = &stmt.kind
-                        && assign.0 == unwrap_second_arg_place
-                        && let Rvalue::UnaryOp(UnOp::PtrMetadata, op) = &assign.1
-                        && op.ty(local_decls, tcx).peel_refs().is_slice()
-                        && let Some(op_place) = op.place()
-                    {
-                        let is_direct_slice_alias = || {
-                            let slice_place_aliases = analyze::collect_place_aliases(
-                                slice_place,
-                                &basic_blocks[location.block],
-                            );
-                            let op_place_aliases =
-                                analyze::collect_place_aliases(op_place, block_data);
-                            slice_place_aliases.contains(&op_place)
-                                || op_place_aliases.iter().any(|place| {
-                                    *place == slice_place || slice_place_aliases.contains(place)
-                                })
-                        };
-
-                        let is_deref_of_same_subject_as_slice = || {
-                            let dominators = basic_blocks.dominators();
-                            let slice_deref_subjects = analyze::deref_subjects_recursive(
-                                slice_place,
-                                location.block,
-                                location.block,
-                                basic_blocks,
-                                dominators,
-                                tcx,
-                            );
-                            let slice_deref_subjects_and_aliases: FxHashSet<_> =
-                                slice_deref_subjects
-                                    .iter()
-                                    .map(|(place, _)| *place)
-                                    .chain(slice_deref_subjects.iter().flat_map(
-                                        |(deref_subject_place, deref_subject_block)| {
-                                            analyze::collect_place_aliases(
-                                                *deref_subject_place,
-                                                &basic_blocks[*deref_subject_block],
-                                            )
-                                        },
-                                    ))
-                                    .collect();
-
-                            let op_deref_subjects = analyze::deref_subjects_recursive(
-                                op_place,
-                                block,
-                                block,
-                                basic_blocks,
-                                dominators,
-                                tcx,
-                            );
-                            op_deref_subjects.iter().any(
-                                |(deref_subject_place, deref_subject_block)| {
-                                    if slice_deref_subjects_and_aliases
-                                        .contains(deref_subject_place)
-                                    {
-                                        return true;
-                                    }
-
-                                    let deref_subject_aliases = analyze::collect_place_aliases(
-                                        *deref_subject_place,
-                                        &basic_blocks[*deref_subject_block],
-                                    );
-                                    deref_subject_aliases.iter().any(|place| {
-                                        slice_deref_subjects_and_aliases.contains(place)
-                                    })
-                                },
-                            )
-                        };
-
-                        op_place == slice_place
-                            || is_direct_slice_alias()
-                            || is_deref_of_same_subject_as_slice()
-                    } else {
-                        false
-                    }
-                });
-
-                // Returns true if the second `Result::unwrap_or` arg is a collection length call,
-                // where the collection is a `Deref` subject of the slice.
-                // Note: This accounts for multiple derefs (e.g. `BoundedVec` -> `Vec` -> `slice`).
-                let is_slice_deref_subject_len_place = || {
-                    let dominators = basic_blocks.dominators();
-                    let assign_info = analyze::pre_anchor_assign_terminator(
-                        unwrap_second_arg_place,
-                        block,
-                        block,
-                        basic_blocks,
-                        dominators,
-                    );
-                    if let Some((assign_terminator, assign_block)) = assign_info
-                        && let TerminatorKind::Call { func, args, .. } = &assign_terminator.kind
-                        && args.len() == 1
-                        && let Some((def_id, _)) = func.const_fn_def()
-                        && let Some(fn_name) = tcx.opt_item_name(def_id)
-                        && fn_name.as_str() == "len"
-                        && let Some(len_arg_place) = args.first().and_then(|arg| arg.node.place())
-                    {
-                        // Returns true if any slice `Deref` subject which matches the receiver of the length call (if any).
-                        let deref_subjects = analyze::deref_subjects_recursive(
-                            slice_place,
-                            location.block,
-                            location.block,
-                            basic_blocks,
-                            dominators,
-                            tcx,
-                        );
-                        let len_arg_aliases = analyze::collect_place_aliases(
-                            len_arg_place,
-                            &basic_blocks[assign_block],
-                        );
-                        deref_subjects
-                            .iter()
-                            .any(|(deref_subject_place, deref_subject_block)| {
-                                if *deref_subject_place == len_arg_place
-                                    || len_arg_aliases.contains(deref_subject_place)
-                                {
-                                    return true;
-                                }
-
-                                let deref_subject_aliases = analyze::collect_place_aliases(
-                                    *deref_subject_place,
-                                    &basic_blocks[*deref_subject_block],
-                                );
-                                deref_subject_aliases.iter().any(|place| {
-                                    *place == len_arg_place || len_arg_aliases.contains(place)
-                                })
-                            })
-                    } else {
-                        false
-                    }
-                };
-
-                if is_slice_len_metadata_place || is_slice_deref_subject_len_place() {
-                    unwrap_place_info = Some((unwrap_dest_place, post_unwrap_target, CondOp::Le));
-                }
-            }
-            next_target_block = None;
-        } else if let Some((unwrap_dest_place, post_unwrap_target)) =
-            analyze::first_arg_transformer_call_destination(
-                unwrap_arg_place,
-                terminator,
-                |crate_name, adt_name, fn_name| {
-                    matches!(crate_name, "std" | "core")
-                        && adt_name == "Result"
-                        && fn_name == "unwrap_or_else"
-                },
-                tcx,
-            )
-        {
-            // Checks that second arg is an identity function or closure and, if true,
-            // returns unwrap destination place and next target.
-            // See [`analyze::is_identity_fn`] and [`analyze::is_identity_closure`] for details.
-            if let TerminatorKind::Call {
-                args: unwrap_args, ..
-            } = &terminator.kind
-                && let Some(unwrap_second_arg) = unwrap_args.get(1)
-                && (analyze::is_identity_fn(&unwrap_second_arg.node, tcx)
-                    || analyze::is_identity_closure(&unwrap_second_arg.node, tcx))
-            {
-                unwrap_place_info = Some((unwrap_dest_place, post_unwrap_target, CondOp::Le));
-            }
-            next_target_block = None;
-        } else {
-            next_target_block = match &terminator.kind {
-                TerminatorKind::Call {
-                    args,
-                    destination,
-                    target,
-                    ..
-                } if *destination != unwrap_arg_place
-                    && args.iter().all(|arg| {
-                        arg.node
-                            .place()
-                            .is_none_or(|place| place != unwrap_arg_place)
-                    }) =>
-                {
-                    *target
-                }
-                TerminatorKind::Drop { place, target, .. } if *place != unwrap_arg_place => {
-                    Some(*target)
-                }
-                TerminatorKind::Goto { target }
-                | TerminatorKind::Assert { target, .. }
-                | TerminatorKind::FalseEdge {
-                    real_target: target,
-                    ..
-                }
-                | TerminatorKind::FalseUnwind {
-                    real_target: target,
-                    ..
-                } => Some(*target),
-                TerminatorKind::Yield {
-                    value,
-                    resume: target,
-                    ..
-                } if value.place().is_none_or(|place| place != unwrap_arg_place) => Some(*target),
-                _ => None,
-            };
-        }
-    }
-
-    let (unwrap_dest_place, post_unwrap_target, cond_op) = unwrap_place_info?;
-    let post_unwrap_target = post_unwrap_target?;
-
-    // Declares collection length/size invariant for unwrap place.
-    let annotation_location = Location {
-        block: post_unwrap_target,
-        statement_index: 0,
+    let terminator = basic_blocks[location.block].terminator.as_ref()?;
+    let TerminatorKind::Call { args, .. } = &terminator.kind else {
+        return None;
     };
-    invariants.insert((annotation_location, cond_op, unwrap_dest_place));
-
-    // Returns analysis results.
-    Some((invariants, (unwrap_dest_place, post_unwrap_target)))
+    let slice_place = args.first()?.node.place()?;
+    analyze::option_result_unwrap_analysis(
+        unwrap_arg_place,
+        next_block,
+        slice_place,
+        location.block,
+        basic_blocks,
+        local_decls,
+        tcx,
+    )
 }
 
 /// Collects collection length/size bound invariants for variant downcast to `usize` places (if any)

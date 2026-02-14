@@ -1,20 +1,24 @@
 //! Common utilities and helpers for traversing and analyzing MIR.
 
-use rustc_abi::VariantIdx;
+use rustc_abi::{FieldIdx, VariantIdx};
 use rustc_data_structures::graph::{StartNode, Successors, dominators::Dominators};
 use rustc_hash::FxHashSet;
 use rustc_hir::LangItem;
+use rustc_index::IndexVec;
 use rustc_middle::{
     mir::{
-        BasicBlock, BasicBlockData, BasicBlocks, LocalDecls, Operand, Place, PlaceElem,
-        RETURN_PLACE, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+        AggregateKind, BasicBlock, BasicBlockData, BasicBlocks, Local, LocalDecls, Location,
+        Operand, Place, PlaceElem, RETURN_PLACE, Rvalue, Statement, StatementKind, Terminator,
+        TerminatorKind, UnOp,
     },
-    ty::{AssocTag, GenericArg, ImplSubject, List, Region, Ty, TyCtxt, TyKind},
+    ty::{AssocTag, ClosureArgs, GenericArg, ImplSubject, List, Region, Ty, TyCtxt, TyKind},
 };
 use rustc_span::{def_id::DefId, symbol::Ident};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+
+use crate::providers::annotate::CondOp;
 
 /// Finds the innermost place if the given place is a single deref of a local,
 /// otherwise returns the given place.
@@ -112,10 +116,10 @@ pub fn pre_anchor_assign_terminator<'tcx>(
                 let block_data = &basic_blocks[*pred_block];
                 add_place_aliases(places, block_data);
                 if let Some(terminator) = &block_data.terminator {
-                    if let TerminatorKind::Call { destination, .. } = &terminator.kind {
-                        if places.contains(destination) {
-                            return Some((terminator.clone(), *pred_block));
-                        }
+                    if let TerminatorKind::Call { destination, .. } = &terminator.kind
+                        && places.contains(destination)
+                    {
+                        return Some((terminator.clone(), *pred_block));
                     }
                 }
                 let assign = pre_anchor_assign_terminator_inner(
@@ -496,6 +500,35 @@ impl std::fmt::Display for SwitchVariant {
 /// Tracks switch target info through "safe" transformations
 /// (i.e. ones that don't change the `Result::Ok` nor `Result::Err` variant values) between
 /// `Option::Some`, `Result::Ok` and `ControlFlow::Continue`
+/// (e.g. via `Option::inspect`, `Option::as_ref` calls e.t.c).
+pub fn track_safe_option_transformations<'tcx>(
+    switch_target_place: &mut Place<'tcx>,
+    switch_target_block: &mut BasicBlock,
+    target_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    tcx: TyCtxt,
+) {
+    let mut next_target_block = Some(target_block);
+    while let Some(current_target_block) = next_target_block {
+        let block_data = &basic_blocks[current_target_block];
+        let Some(terminator) = &block_data.terminator else {
+            continue;
+        };
+        if let Some((transformer_destination, transformer_target_block)) =
+            safe_option_some_transform_destination(*switch_target_place, terminator, tcx, true)
+        {
+            *switch_target_place = transformer_destination;
+            *switch_target_block = current_target_block;
+            next_target_block = transformer_target_block;
+        } else {
+            next_target_block = None;
+        }
+    }
+}
+
+/// Tracks switch target info through "safe" transformations
+/// (i.e. ones that don't change the `Result::Ok` nor `Result::Err` variant values) between
+/// `Option::Some`, `Result::Ok` and `ControlFlow::Continue`
 /// (e.g. via `Result::inspect`, `Result::inspect_err` calls e.t.c).
 pub fn track_safe_result_transformations<'tcx>(
     switch_target_place: &mut Place<'tcx>,
@@ -527,7 +560,7 @@ pub fn track_safe_result_transformations<'tcx>(
 // `Option::Some`, `Result::Ok` and `ControlFlow::Continue`
 // (e.g. via `std::ops::Try::branch` calls, `Option::ok_or`, `Result::ok`, `Result::map_err`
 // and `Option::inspect` calls e.t.c).
-pub fn track_safe_primary_opt_result_variant_transformations<'tcx>(
+pub fn track_safe_primary_option_result_variant_transformations<'tcx>(
     switch_target_place: &mut Place<'tcx>,
     switch_target_block: &mut BasicBlock,
     switch_target_variant: &mut SwitchVariant,
@@ -624,7 +657,7 @@ pub fn track_safe_result_err_transformations<'tcx>(
     }
 
     if let Some(opt_some_target_block) = opt_some_target_block {
-        track_safe_primary_opt_result_variant_transformations(
+        track_safe_primary_option_result_variant_transformations(
             switch_target_place,
             switch_target_block,
             switch_target_variant,
@@ -834,42 +867,6 @@ pub fn is_first_arg_transformer<'tcx>(
     }
 }
 
-/// Returns true if the operand is the const identity function (i.e. `std::convert::identity`).
-///
-/// Ref: <https://doc.rust-lang.org/std/convert/fn.identity.html>
-pub fn is_identity_fn(operand: &Operand, tcx: TyCtxt) -> bool {
-    let Some((def_id, ..)) = operand.const_fn_def() else {
-        return false;
-    };
-    let fn_name = tcx.item_name(def_id);
-    let crate_name = tcx.crate_name(def_id.krate);
-    fn_name.as_str() == "identity" && matches!(crate_name.as_str(), "std" | "core")
-}
-
-/// Returns true if the operand is an identity closure (i.e. `|x| x`).
-pub fn is_identity_closure(operand: &Operand, tcx: TyCtxt) -> bool {
-    if let Some(const_op) = operand.constant()
-        && let TyKind::Closure(def_id, _) = const_op.const_.ty().kind()
-        && let body = tcx.optimized_mir(def_id)
-        && let blocks = &body.basic_blocks
-        && blocks.len() == 1
-        && let block_data = &blocks[blocks.start_node()]
-        && let Some(terminator) = &block_data.terminator
-        && terminator.kind == TerminatorKind::Return
-        && let stmts = &block_data.statements
-        && stmts.len() == 1
-        && let Some(stmt) = stmts.first()
-        && let StatementKind::Assign(assign) = &stmt.kind
-        && assign.0.local == RETURN_PLACE
-        && let Rvalue::Use(Operand::Copy(assign_rvalue_place) | Operand::Move(assign_rvalue_place)) =
-            &assign.1
-    {
-        assign_rvalue_place.local.as_usize() <= body.arg_count
-    } else {
-        false
-    }
-}
-
 /// Collects target basic blocks (if any) for the given value of a switch on discriminant of given place.
 pub fn collect_switch_targets_for_discr_value<'tcx>(
     place: Place<'tcx>,
@@ -984,6 +981,525 @@ pub fn is_variant_downcast_to_ty_place<'tcx>(
             && field_ty == ty)
     {
         true
+    } else {
+        false
+    }
+}
+
+/// Returns closure info if the given an arg operand represents a closure that captures some variables.
+pub fn capturing_closure_info<'tcx, 'analysis>(
+    arg: &Operand<'tcx>,
+    basic_block: &'analysis BasicBlockData<'tcx>,
+) -> Option<(
+    DefId,
+    &'analysis IndexVec<FieldIdx, Operand<'tcx>>,
+    ClosureArgs<TyCtxt<'tcx>>,
+)> {
+    // A direct const operand indicates a non-capturing closure which requires no annotation.
+    let arg_place = arg.place()?;
+    basic_block.statements.iter().find_map(|stmt| {
+        if let StatementKind::Assign(assign) = &stmt.kind {
+            if assign.0 == arg_place {
+                if let Rvalue::Aggregate(aggregate_kind, captured_locals) = &assign.1 {
+                    if let AggregateKind::Closure(def_id, args) = **aggregate_kind {
+                        return Some((def_id, captured_locals, ClosureArgs { args }));
+                    }
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Returns `Place` for captured index given a closure args.
+///
+/// # Note
+///
+/// For closures captured locals are represented as projections (i.e. struct fields)
+/// of the local with index 1.
+pub fn captured_idx_to_place<'tcx>(
+    idx: u32,
+    args: ClosureArgs<TyCtxt<'tcx>>,
+    tcx: TyCtxt<'tcx>,
+) -> Place<'tcx> {
+    let captured_local_ty = args.upvar_tys()[idx as usize];
+    let captured_locals = Local::from_u32(1);
+    let captured_locals_place = Place::from(captured_locals);
+    let field_idx = FieldIdx::from_u32(idx);
+    let projection = PlaceElem::Field(field_idx, captured_local_ty);
+    tcx.mk_place_elem(captured_locals_place, projection)
+}
+
+/// Convenience alias for tracking invariant info.
+pub type Invariant<'tcx> = (Location, CondOp, Place<'tcx>);
+
+/// Collects collection length/size bound invariants and returned
+/// `Option` or `Result` `unwrap`, `unwrap_or` or `unwrap_or_else` target info.
+///
+/// # Note
+///
+/// - For `unwrap_or`, the second arg must be a slice or collection length call for the subject place
+///   or its `Deref` subject.
+/// - For `unwrap_or_else`, the second arg must either be a closure that returns
+///   a slice or collection length call for the subject place (or its `Deref` subject),
+///   or for the case a `Result` type, an identity closure or function.
+pub fn option_result_unwrap_analysis<'tcx>(
+    unwrap_arg_place: Place<'tcx>,
+    next_block: BasicBlock,
+    subject_place: Place<'tcx>,
+    subject_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    local_decls: &LocalDecls<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<(FxHashSet<Invariant<'tcx>>, (Place<'tcx>, BasicBlock))> {
+    // Tracks collection length/size bound invariants.
+    let mut invariants = FxHashSet::default();
+    let mut next_target_block = Some(next_block);
+    let mut unwrap_place_info = None;
+    let mut already_visited = FxHashSet::default();
+    while let Some(block) = next_target_block
+        && !already_visited.contains(&block)
+    {
+        let block_data = &basic_blocks[block];
+        already_visited.insert(block);
+        let terminator = block_data.terminator.as_ref()?;
+        if let Some((unwrap_dest_place, post_unwrap_target)) =
+            first_arg_transformer_call_destination(
+                unwrap_arg_place,
+                terminator,
+                |crate_name, adt_name, fn_name| {
+                    matches!(crate_name, "std" | "core")
+                        && matches!(adt_name, "Option" | "Result")
+                        && fn_name == "unwrap"
+                },
+                tcx,
+            )
+        {
+            unwrap_place_info = Some((unwrap_dest_place, post_unwrap_target, CondOp::Lt));
+            next_target_block = None;
+        } else if let Some((unwrap_dest_place, post_unwrap_target)) =
+            first_arg_transformer_call_destination(
+                unwrap_arg_place,
+                terminator,
+                |crate_name, adt_name, fn_name| {
+                    matches!(crate_name, "std" | "core")
+                        && matches!(adt_name, "Option" | "Result")
+                        && fn_name == "unwrap_or"
+                },
+                tcx,
+            )
+        {
+            // Checks if the second `unwrap_or` arg is a slice or collection length call
+            // for the subject place or its `Deref` subject.
+            if let TerminatorKind::Call {
+                args: unwrap_args, ..
+            } = &terminator.kind
+                && let Some(unwrap_second_arg) = unwrap_args.get(1)
+                && let Some(unwrap_second_arg_place) = unwrap_second_arg.node.place()
+                && (block_data.statements.iter().any(|stmt| {
+                    is_subject_slice_len_metadata_assign(
+                        unwrap_second_arg_place,
+                        stmt,
+                        block,
+                        subject_place,
+                        subject_block,
+                        local_decls,
+                        basic_blocks,
+                        tcx,
+                    )
+                }) || pre_anchor_assign_terminator(
+                    unwrap_second_arg_place,
+                    block,
+                    block,
+                    basic_blocks,
+                    basic_blocks.dominators(),
+                )
+                .is_some_and(|(assign_terminator, assign_block)| {
+                    is_subject_collection_len_assign(
+                        unwrap_second_arg_place,
+                        &assign_terminator,
+                        assign_block,
+                        subject_place,
+                        subject_block,
+                        basic_blocks,
+                        tcx,
+                    )
+                }))
+            {
+                unwrap_place_info = Some((unwrap_dest_place, post_unwrap_target, CondOp::Le));
+            }
+            next_target_block = None;
+        } else if let Some((unwrap_dest_place, post_unwrap_target)) =
+            first_arg_transformer_call_destination(
+                unwrap_arg_place,
+                terminator,
+                |crate_name, adt_name, fn_name| {
+                    matches!(crate_name, "std" | "core")
+                        && matches!(adt_name, "Option" | "Result")
+                        && fn_name == "unwrap_or_else"
+                },
+                tcx,
+            )
+        {
+            // Checks that second arg is an identity function or closure and, if true,
+            // returns unwrap destination place and next target.
+            // See [`analyze::is_identity_fn`] and [`analyze::is_identity_closure`] for details.
+            let is_result_and_identity = |operand: &Operand| {
+                if let TyKind::Adt(adt_def, _) = unwrap_arg_place.ty(local_decls, tcx).ty.kind()
+                    && let adt_def_id = adt_def.did()
+                    && tcx.item_name(adt_def_id).as_str() == "Result"
+                    && matches!(tcx.crate_name(adt_def_id.krate).as_str(), "std" | "core")
+                {
+                    is_identity_fn(operand, tcx) || is_identity_closure(operand, tcx)
+                } else {
+                    false
+                }
+            };
+            if let TerminatorKind::Call {
+                args: unwrap_args, ..
+            } = &terminator.kind
+                && let Some(unwrap_second_arg) = unwrap_args.get(1)
+                && (is_result_and_identity(&unwrap_second_arg.node)
+                    || is_subject_len_closure(
+                        &unwrap_second_arg.node,
+                        block,
+                        subject_place,
+                        subject_block,
+                        basic_blocks,
+                        tcx,
+                    ))
+            {
+                unwrap_place_info = Some((unwrap_dest_place, post_unwrap_target, CondOp::Le));
+            }
+            next_target_block = None;
+        } else {
+            next_target_block = match &terminator.kind {
+                TerminatorKind::Call {
+                    args,
+                    destination,
+                    target,
+                    ..
+                } if *destination != unwrap_arg_place
+                    && args.iter().all(|arg| {
+                        arg.node
+                            .place()
+                            .is_none_or(|place| place != unwrap_arg_place)
+                    }) =>
+                {
+                    *target
+                }
+                TerminatorKind::Drop { place, target, .. } if *place != unwrap_arg_place => {
+                    Some(*target)
+                }
+                TerminatorKind::Goto { target }
+                | TerminatorKind::Assert { target, .. }
+                | TerminatorKind::FalseEdge {
+                    real_target: target,
+                    ..
+                }
+                | TerminatorKind::FalseUnwind {
+                    real_target: target,
+                    ..
+                } => Some(*target),
+                TerminatorKind::Yield {
+                    value,
+                    resume: target,
+                    ..
+                } if value.place().is_none_or(|place| place != unwrap_arg_place) => Some(*target),
+                _ => None,
+            };
+        }
+    }
+
+    let (unwrap_dest_place, post_unwrap_target, cond_op) = unwrap_place_info?;
+    let post_unwrap_target = post_unwrap_target?;
+
+    // Declares collection length/size invariant for unwrap place.
+    let annotation_location = Location {
+        block: post_unwrap_target,
+        statement_index: 0,
+    };
+    invariants.insert((annotation_location, cond_op, unwrap_dest_place));
+
+    // Returns analysis results.
+    Some((invariants, (unwrap_dest_place, post_unwrap_target)))
+}
+
+// Returns true if the given `place` is an alias of `subject` possibly via a shared deref subject.
+fn is_subject_or_deref_alias<'tcx>(
+    place: Place<'tcx>,
+    block: BasicBlock,
+    subject: Place<'tcx>,
+    subject_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> bool {
+    if place == subject {
+        return true;
+    }
+
+    let place_aliases = collect_place_aliases(place, &basic_blocks[block]);
+    if place_aliases.contains(&subject) {
+        return true;
+    }
+
+    let subject_aliases = collect_place_aliases(subject, &basic_blocks[subject_block]);
+    if subject_aliases.contains(&place)
+        || subject_aliases
+            .iter()
+            .any(|subject_alias| *subject_alias == place || place_aliases.contains(subject_alias))
+    {
+        return true;
+    }
+
+    // Collects all subject aliases (including `Deref` subjects and their aliases).
+    let subject_deref_subjects = deref_subjects_recursive(
+        subject,
+        subject_block,
+        subject_block,
+        basic_blocks,
+        basic_blocks.dominators(),
+        tcx,
+    );
+    let all_subject_aliases: FxHashSet<_> = std::iter::once(subject)
+        .chain(subject_aliases)
+        .chain(
+            subject_deref_subjects
+                .iter()
+                .map(|(deref_subject_place, _)| *deref_subject_place),
+        )
+        .chain(subject_deref_subjects.iter().flat_map(
+            |(deref_subject_place, deref_subject_block)| {
+                collect_place_aliases(*deref_subject_place, &basic_blocks[*deref_subject_block])
+            },
+        ))
+        .collect();
+
+    // Returns true if any place alias (including `Deref` subjects and their aliases) matches any subject alias.
+    let place_deref_subjects = deref_subjects_recursive(
+        place,
+        block,
+        block,
+        basic_blocks,
+        basic_blocks.dominators(),
+        tcx,
+    );
+    let mut all_place_aliases = std::iter::once(place)
+        .chain(place_aliases)
+        .chain(
+            place_deref_subjects
+                .iter()
+                .map(|(deref_subject_place, _)| *deref_subject_place),
+        )
+        .chain(place_deref_subjects.iter().flat_map(
+            |(deref_subject_place, deref_subject_block)| {
+                collect_place_aliases(*deref_subject_place, &basic_blocks[*deref_subject_block])
+            },
+        ));
+    all_place_aliases.any(|place_alias| all_subject_aliases.contains(&place_alias))
+}
+
+/// Returns true if the operand is the const identity function (i.e. `std::convert::identity`).
+///
+/// Ref: <https://doc.rust-lang.org/std/convert/fn.identity.html>
+fn is_identity_fn(operand: &Operand, tcx: TyCtxt) -> bool {
+    operand.const_fn_def().is_some_and(|(def_id, ..)| {
+        let fn_name = tcx.item_name(def_id);
+        let crate_name = tcx.crate_name(def_id.krate);
+        fn_name.as_str() == "identity" && matches!(crate_name.as_str(), "std" | "core")
+    })
+}
+
+/// Returns true if the operand is an identity closure (i.e. `|x| x`).
+fn is_identity_closure(operand: &Operand, tcx: TyCtxt) -> bool {
+    if let Some(const_op) = operand.constant()
+        && let TyKind::Closure(def_id, _) = const_op.const_.ty().kind()
+        && let body = tcx.optimized_mir(def_id)
+        && let blocks = &body.basic_blocks
+        && blocks.len() == 1
+        && let block_data = &blocks[blocks.start_node()]
+        && let Some(terminator) = &block_data.terminator
+        && terminator.kind == TerminatorKind::Return
+        && let stmts = &block_data.statements
+        && stmts.len() == 1
+        && let Some(stmt) = stmts.first()
+        && let StatementKind::Assign(assign) = &stmt.kind
+        && assign.0.local == RETURN_PLACE
+        && let Rvalue::Use(Operand::Copy(assign_rvalue_place) | Operand::Move(assign_rvalue_place)) =
+            &assign.1
+    {
+        assign_rvalue_place.local.as_usize() <= body.arg_count
+    } else {
+        false
+    }
+}
+
+/// Returns true if the operand is an len call for the given captured subject place (e.g. `|x| x.len()`).
+fn is_subject_len_closure<'tcx>(
+    operand: &Operand<'tcx>,
+    block: BasicBlock,
+    subject_place: Place<'tcx>,
+    subject_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> bool {
+    let closure_info = capturing_closure_info(operand, &basic_blocks[block]);
+    let Some((closure_def_id, captured_locals, closure_args)) = closure_info else {
+        return false;
+    };
+
+    // Finds captured subject place.
+    let captured_subject_idx = captured_locals
+        .iter_enumerated()
+        .find_map(|(idx, operand)| {
+            let op_place = operand.place()?;
+            is_subject_or_deref_alias(
+                op_place,
+                block,
+                subject_place,
+                subject_block,
+                basic_blocks,
+                tcx,
+            )
+            .then_some(idx)
+        });
+    let Some(captured_subject_idx) = captured_subject_idx else {
+        return false;
+    };
+    let captured_subject_place =
+        captured_idx_to_place(captured_subject_idx.as_u32(), closure_args, tcx);
+
+    // Returns true if all return place assigns are subject len calls.
+    let body = tcx.optimized_mir(closure_def_id);
+    body.basic_blocks
+        .iter_enumerated()
+        .all(|(closure_block, closure_block_data)| {
+            let terminator_is_valid =
+                closure_block_data
+                    .terminator
+                    .as_ref()
+                    .is_none_or(|terminator| {
+                        if let TerminatorKind::Call { destination, .. } = &terminator.kind {
+                            if destination.local == RETURN_PLACE {
+                                is_subject_collection_len_assign(
+                                    *destination,
+                                    terminator,
+                                    closure_block,
+                                    captured_subject_place,
+                                    closure_block,
+                                    &body.basic_blocks,
+                                    tcx,
+                                )
+                            } else {
+                                // Call terminators that don't assign to the return are fine.
+                                true
+                            }
+                        } else {
+                            // All other terminators are fine.
+                            true
+                        }
+                    });
+            let all_stmts_are_valid = || {
+                closure_block_data.statements.iter().all(|stmt| {
+                    if let StatementKind::Assign(assign) = &stmt.kind {
+                        if assign.0.local == RETURN_PLACE {
+                            is_subject_slice_len_metadata_assign(
+                                assign.0,
+                                stmt,
+                                closure_block,
+                                captured_subject_place,
+                                closure_block,
+                                &body.local_decls,
+                                &body.basic_blocks,
+                                tcx,
+                            )
+                        } else {
+                            // Statements that don't assign to the return are fine.
+                            true
+                        }
+                    } else {
+                        // All other statements are fine.
+                        true
+                    }
+                })
+            };
+            terminator_is_valid && all_stmts_are_valid()
+        })
+}
+
+/// Returns true if the statement assigns slice metadata of `subject_place`
+/// (possibly via a shared deref subject) to the given `place`.
+///
+/// # Note
+///
+/// This accounts for multiple derefs (e.g. `BoundedVec` -> `Vec` -> `slice`).
+#[allow(clippy::too_many_arguments)]
+fn is_subject_slice_len_metadata_assign<'tcx>(
+    place: Place<'tcx>,
+    stmt: &Statement<'tcx>,
+    block: BasicBlock,
+    subject_place: Place<'tcx>,
+    subject_block: BasicBlock,
+    local_decls: &LocalDecls<'tcx>,
+    basic_blocks: &BasicBlocks<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> bool {
+    if let StatementKind::Assign(assign) = &stmt.kind
+        && assign.0 == place
+        && let Rvalue::UnaryOp(UnOp::PtrMetadata, op) = &assign.1
+        && op.ty(local_decls, tcx).peel_refs().is_slice()
+        && let Some(op_place) = op.place()
+    {
+        is_subject_or_deref_alias(
+            op_place,
+            block,
+            subject_place,
+            subject_block,
+            basic_blocks,
+            tcx,
+        )
+    } else {
+        false
+    }
+}
+
+/// Returns true if the terminator assigns a collection len result of `subject_place`
+/// (possibly via a shared deref subject) to the given `place`.
+///
+/// # Note
+///
+/// This accounts for multiple derefs (e.g. `BoundedVec` -> `Vec` -> `slice`).
+fn is_subject_collection_len_assign<'tcx>(
+    place: Place<'tcx>,
+    terminator: &Terminator<'tcx>,
+    block: BasicBlock,
+    subject_place: Place<'tcx>,
+    subject_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> bool {
+    if let TerminatorKind::Call {
+        func,
+        args,
+        destination,
+        ..
+    } = &terminator.kind
+        && *destination == place
+        && args.len() == 1
+        && let Some((def_id, _)) = func.const_fn_def()
+        && let Some(fn_name) = tcx.opt_item_name(def_id)
+        && fn_name.as_str() == "len"
+        && let Some(len_arg) = args.first()
+        && let Some(len_arg_place) = len_arg.node.place()
+    {
+        is_subject_or_deref_alias(
+            len_arg_place,
+            block,
+            subject_place,
+            subject_block,
+            basic_blocks,
+            tcx,
+        )
     } else {
         false
     }

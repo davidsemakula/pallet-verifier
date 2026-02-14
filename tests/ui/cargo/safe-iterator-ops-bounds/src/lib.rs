@@ -149,6 +149,32 @@ mod pallet {
 
         #[pallet::call_index(9)]
         #[pallet::weight(0)]
+        pub fn position_unwrap_or(origin: OriginFor<T>, mut data: Vec<u8>) -> DispatchResult {
+            let pos = data
+                .iter()
+                .position(|item| *item == 0)
+                .unwrap_or(data.len());
+            // pos is always <= data.len()
+            data.insert(pos, 255);
+
+            Ok(())
+        }
+
+        #[pallet::call_index(10)]
+        #[pallet::weight(0)]
+        pub fn position_unwrap_or_else(origin: OriginFor<T>, mut data: Vec<u8>) -> DispatchResult {
+            let pos = data
+                .iter()
+                .position(|item| *item == 0)
+                .unwrap_or_else(|| data.len());
+            // pos is always <= data.len()
+            data.insert(pos, 255);
+
+            Ok(())
+        }
+
+        #[pallet::call_index(11)]
+        #[pallet::weight(0)]
         pub fn count(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             // Number of elements <= isize::MAX, so count is always < usize::MAX
             let count = data.iter().count();
@@ -157,7 +183,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(10)]
+        #[pallet::call_index(12)]
         #[pallet::weight(0)]
         pub fn count_transform(origin: OriginFor<T>, data: Vec<u8>) -> DispatchResult {
             // Number of elements <= isize::MAX, so count is always < usize::MAX
@@ -172,7 +198,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(11)]
+        #[pallet::call_index(13)]
         #[pallet::weight(0)]
         pub fn count_chain(origin: OriginFor<T>, data1: Vec<u8>, data2: Vec<u8>) -> DispatchResult {
             // Number of elements <= 2 * isize::MAX, so count is always < usize::MAX
@@ -185,7 +211,7 @@ mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(12)]
+        #[pallet::call_index(14)]
         #[pallet::weight(0)]
         pub fn count_multiple(
             origin: OriginFor<T>,

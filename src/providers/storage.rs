@@ -372,7 +372,7 @@ fn propagate_closure_arg_invariant<'tcx>(
     value_ty: Ty<'tcx>,
     // Storage call.
     terminator: &Terminator<'tcx>,
-    basic_block: &BasicBlockData<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<(DefId, usize, FieldIdx)> {
     // Finds a closure arg (if any) which has a storage value type arg and also captures some locals.
@@ -382,7 +382,7 @@ fn propagate_closure_arg_invariant<'tcx>(
     let (closure_def_id, captured_locals, storage_value_arg_idx) = args.iter().find_map(|arg| {
         // Find capturing closure info (if any).
         let (closure_def_id, captured_locals, closure_args) =
-            closure::capturing_closure_info(&arg.node, basic_block)?;
+            analyze::capturing_closure_info(&arg.node, block_data)?;
 
         // Extracts the "real" (i.e. user-supplied) closure args.
         // Ref: <https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.ClosureArgs.html>
@@ -412,22 +412,8 @@ fn propagate_closure_arg_invariant<'tcx>(
             operand.place().and_then(|op_place| {
                 (op_place == invariant_place).then_some(idx).or_else(|| {
                     // Handles aliased captures.
-                    basic_block
-                        .statements
-                        .iter()
-                        .find_map(|stmt| match &stmt.kind {
-                            StatementKind::Assign(assign) if op_place == assign.0 => {
-                                let src_place = match assign.1 {
-                                    Rvalue::Use(Operand::Copy(place) | Operand::Move(place)) => {
-                                        Some(place)
-                                    }
-                                    Rvalue::Ref(_, _, place) => Some(place),
-                                    _ => None,
-                                }?;
-                                (src_place == invariant_place).then_some(idx)
-                            }
-                            _ => None,
-                        })
+                    let aliases = analyze::collect_place_aliases(op_place, block_data);
+                    aliases.contains(&invariant_place).then_some(idx)
                 })
             })
         })?;
@@ -530,7 +516,7 @@ fn propagate_return_place_invariant<'tcx>(
     // for switches based on the discriminant of destination in successor blocks.
     let mut switch_target_place = *destination;
     let mut switch_target_block = block;
-    analyze::track_safe_primary_opt_result_variant_transformations(
+    analyze::track_safe_primary_option_result_variant_transformations(
         &mut switch_target_place,
         &mut switch_target_block,
         &mut switch_target_variant,

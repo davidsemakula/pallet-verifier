@@ -407,6 +407,110 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         }
 
+        // Tracks `Option::Some` switch target info of return value of
+        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition`.
+        // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
+        // `Result::Ok` transformations - see [`track_switch_target_transformations`] for details).
+        let mut switch_target_place = *destination;
+        let mut switch_target_block = location.block;
+        let mut switch_variant = SwitchVariant::OptionSome;
+        if let Some(target) = target {
+            analyze::track_safe_primary_option_result_variant_transformations(
+                &mut switch_target_place,
+                &mut switch_target_block,
+                &mut switch_variant,
+                *target,
+                self.basic_blocks,
+                self.tcx,
+                false,
+            );
+        }
+
+        // Finds `Option::Some` (or equivalent safe transformation) target blocks
+        // for switches based on the discriminant of return value of
+        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition` in successor blocks.
+        let switch_targets = analyze::collect_switch_targets_for_discr_value(
+            switch_target_place,
+            switch_variant.idx(self.tcx).as_u32() as u128,
+            switch_target_block,
+            self.basic_blocks,
+        );
+
+        // Collects collection length/size bound annotations
+        // for variant downcast to `usize` places (if any) for the switch targets.
+        let mut invariants = FxHashSet::default();
+        for target_block in switch_targets {
+            for (stmt_idx, stmt) in self.basic_blocks[target_block]
+                .statements
+                .iter()
+                .enumerate()
+            {
+                // Finds variant downcast to `usize` places (if any) for the switch target variant.
+                let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
+                    switch_target_place,
+                    switch_variant.name(),
+                    switch_variant.idx(self.tcx),
+                    self.tcx.types.usize,
+                    stmt,
+                ) else {
+                    continue;
+                };
+
+                // Declares an upper bound annotation, if one was determined.
+                let annotation_location = Location {
+                    block: target_block,
+                    statement_index: stmt_idx + 1,
+                };
+                let cond_op = CondOp::Lt;
+                if let Some(upper_bound) = upper_bound.ty_bound(&self.place_ty(downcast_place)) {
+                    self.annotations.push(Annotation::new_const_max(
+                        annotation_location,
+                        cond_op,
+                        downcast_place,
+                        upper_bound,
+                    ));
+                }
+
+                // Declares a collection length/size bound invariants (if appropriate).
+                if solo_iterator_subject_info.is_some() {
+                    invariants.insert((annotation_location, cond_op, downcast_place));
+                }
+            }
+        }
+
+        // Collects collection length/size bound invariants `Option::unwrap`, `Option::unwrap_or`
+        // or `Option::unwrap_or_else` destinations.
+        if let Some((iterator_subject, iterator_subject_block)) = solo_iterator_subject_info
+            && let Some(target) = target
+        {
+            // Tracks/allows "safe" transformations before `unwrap_or_else` call
+            // (e.g. via `Option::inspect`, `Option::as_ref` e.t.c).
+            // See [`analyze::track_safe_option_transformations`] for details.
+            let mut unwrap_arg_place = *destination;
+            let mut unwrap_arg_def_block = location.block;
+            analyze::track_safe_option_transformations(
+                &mut unwrap_arg_place,
+                &mut unwrap_arg_def_block,
+                *target,
+                self.basic_blocks,
+                self.tcx,
+            );
+
+            if let Some(next_block) = analyze::call_target(&self.basic_blocks[unwrap_arg_def_block])
+                && let Some((unwrap_invariants, _)) = analyze::option_result_unwrap_analysis(
+                    unwrap_arg_place,
+                    next_block,
+                    iterator_subject,
+                    iterator_subject_block,
+                    self.basic_blocks,
+                    self.local_decls,
+                    self.tcx,
+                )
+            {
+                invariants.extend(unwrap_invariants);
+            }
+        }
+
         // Finds collection place info (if any).
         let collection_place_info = solo_iterator_subject_info.and_then(
             |(iterator_subject_place, iterator_subject_block)| {
@@ -440,92 +544,30 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             },
         );
 
-        // Tracks `Option::Some` switch target info of return value of
-        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition`.
-        // Also tracks variant "safe" transformations (e.g. `ControlFlow::Continue` and
-        // `Result::Ok` transformations - see [`track_switch_target_transformations`] for details).
-        let mut switch_target_place = *destination;
-        let mut switch_target_block = location.block;
-        let mut switch_variant = SwitchVariant::OptionSome;
-        if let Some(target) = target {
-            analyze::track_safe_primary_opt_result_variant_transformations(
-                &mut switch_target_place,
-                &mut switch_target_block,
-                &mut switch_variant,
-                *target,
-                self.basic_blocks,
-                self.tcx,
-                false,
-            );
-        }
-
-        // Finds `Option::Some` (or equivalent safe transformation) target blocks
-        // for switches based on the discriminant of return value of
-        // `std::iter::Iterator::position` or `std::iter::Iterator::rposition` in successor blocks.
-        let switch_targets = analyze::collect_switch_targets_for_discr_value(
-            switch_target_place,
-            switch_variant.idx(self.tcx).as_u32() as u128,
-            switch_target_block,
-            self.basic_blocks,
-        );
-
-        // Collects collection length/size bound annotations (and storage invariants)
-        // for variant downcast to `usize` places (if any) for the switch target.
+        // Composes a collection length/size bound annotations (if appropriate).
         let mut storage_invariants = FxHashSet::default();
-        for target_block in switch_targets {
-            for (stmt_idx, stmt) in self.basic_blocks[target_block]
-                .statements
-                .iter()
-                .enumerate()
-            {
-                // Finds variant downcast to `usize` places (if any) for the switch target variant.
-                let Some(downcast_place) = analyze::variant_downcast_to_ty_place(
-                    switch_target_place,
-                    switch_variant.name(),
-                    switch_variant.idx(self.tcx),
-                    self.tcx.types.usize,
-                    stmt,
-                ) else {
-                    continue;
-                };
+        if let Some((collection_place, region)) = collection_place_info
+            && let Some(len_call_info) = len_bound_info.as_ref()
+        {
+            for (annotation_location, cond_op, invariant_place) in invariants {
+                self.annotations.push(Annotation::Len(
+                    annotation_location,
+                    cond_op,
+                    invariant_place,
+                    collection_place,
+                    region,
+                    len_call_info.clone(),
+                ));
 
-                // Declares an upper bound annotation, if one was determined.
-                let annotation_location = Location {
-                    block: target_block,
-                    statement_index: stmt_idx + 1,
-                };
-                let cond_op = CondOp::Lt;
-                if let Some(upper_bound) = upper_bound.ty_bound(&self.place_ty(downcast_place)) {
-                    self.annotations.push(Annotation::new_const_max(
-                        annotation_location,
-                        cond_op,
-                        downcast_place,
-                        upper_bound,
-                    ));
-                }
-
-                // Declares a collection length/size bound annotation (if appropriate).
-                if let Some(((collection_place, region), len_call_info)) =
-                    collection_place_info.zip(len_bound_info.clone())
-                {
-                    self.annotations.push(Annotation::Len(
-                        annotation_location,
-                        cond_op,
-                        downcast_place,
-                        collection_place,
-                        region,
-                        len_call_info,
-                    ));
-
-                    // Tracks invariants that need to propagated to other storage uses.
-                    if storage_info.is_some() {
-                        storage_invariants.insert((annotation_location, cond_op, downcast_place));
-                    }
+                // Tracks invariants that need to propagated to other storage uses.
+                if storage_info.is_some() {
+                    storage_invariants.insert((annotation_location, cond_op, invariant_place));
                 }
             }
         }
 
-        // Only continues if iterator subject has a known length/size returning method, and is passed by reference.
+        // Only continues if iterator subject has a known length/size returning method,
+        // and is passed by reference.
         if len_bound_info.is_none() {
             return;
         }
@@ -542,10 +584,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
         }
 
         // Propagate position invariant to `Option` (and `Result`) adapter input closures (if any).
-        if let Some(((iterator_subject_place, iterator_subject_block), next_target)) =
-            solo_iterator_subject_info.zip(analyze::call_target(
-                &self.basic_blocks[switch_target_block],
-            ))
+        if let Some((iterator_subject_place, iterator_subject_block)) = solo_iterator_subject_info
+            && let Some(next_target) = analyze::call_target(&self.basic_blocks[switch_target_block])
         {
             // Collects collection related places (including all deref subjects).
             let mut collection_def_places = vec![(iterator_subject_place, iterator_subject_block)];
@@ -563,10 +603,10 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
             // Propagate invariants to closure (if any).
             let next_block_data = &self.basic_blocks[next_target];
-            closure::propagate_opt_result_idx_invariant(
+            closure::propagate_option_result_idx_invariant(
                 switch_target_place,
                 next_block_data,
-                &[(iterator_subject_place, iterator_subject_block)],
+                &collection_def_places,
                 self.basic_blocks,
                 self.tcx,
             );
@@ -790,7 +830,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             return;
         };
         if let Some(target) = target {
-            analyze::track_safe_primary_opt_result_variant_transformations(
+            analyze::track_safe_primary_option_result_variant_transformations(
                 &mut switch_target_place,
                 &mut switch_target_block,
                 &mut switch_variant,

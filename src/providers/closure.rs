@@ -1,14 +1,11 @@
 //! Common utilities and helpers for analyzing and annotating closures.
 
-use rustc_abi::FieldIdx;
 use rustc_hash::FxHashSet;
 use rustc_hir::def_id::DefId;
-use rustc_index::IndexVec;
 use rustc_middle::{
     mir::{
-        AggregateKind, BasicBlock, BasicBlockData, BasicBlocks, Body, HasLocalDecls, Local,
-        LocalDecl, Location, Operand, Place, PlaceElem, Rvalue, Statement, StatementKind,
-        TerminatorKind,
+        BasicBlock, BasicBlockData, BasicBlocks, Body, HasLocalDecls, Local, LocalDecl, Location,
+        Operand, Place, Rvalue, Statement, StatementKind, TerminatorKind,
     },
     ty::{ClosureArgs, Region, RegionKind, TyCtxt, TyKind},
 };
@@ -44,7 +41,7 @@ impl ClosureInvariantEnv {
 }
 
 /// Convenience type alias for closure invariant info tuple
-/// (i.e. a tuple representing the conditional operation, operand place, collection place ).
+/// (i.e. a tuple representing the conditional operation, operand place, collection place).
 pub type ClosureInvariantInfo = (CondOp, ClosurePlaceIdx, ClosurePlaceIdx);
 
 /// A serializable closure place idx.
@@ -76,54 +73,19 @@ impl ClosurePlaceIdx {
                 Place::from(arg_local)
             }
             Self::Capture(idx) => {
-                // Finds the type of the captured place.
                 let closure_ty = tcx.type_of(def_id).skip_binder();
-                let TyKind::Closure(_, closure_args) = closure_ty.kind() else {
+                let TyKind::Closure(_, args) = closure_ty.kind() else {
                     panic!("Expected a closure, found {def_id:?}");
                 };
-                let closure_args = ClosureArgs::<TyCtxt> { args: closure_args };
-                let captured_locals_ty = closure_args.upvar_tys()[idx as usize];
-
-                // Finds the captured place.
-                // NOTE: For closures captured locals are represented as projections (i.e. struct fields)
-                // of the local with index 1.
-                let captured_locals = Local::from_u32(1);
-                let captured_locals_place = Place::from(captured_locals);
-                let field_idx = FieldIdx::from_u32(idx);
-                let projection = PlaceElem::Field(field_idx, captured_locals_ty);
-                tcx.mk_place_elem(captured_locals_place, projection)
+                let args = ClosureArgs::<TyCtxt> { args };
+                analyze::captured_idx_to_place(idx, args, tcx)
             }
         }
     }
 }
 
-/// Returns closure info if the given an arg operand represents a closure that captures some variables.
-pub fn capturing_closure_info<'tcx, 'analysis>(
-    arg: &Operand<'tcx>,
-    basic_block: &'analysis BasicBlockData<'tcx>,
-) -> Option<(
-    DefId,
-    &'analysis IndexVec<FieldIdx, Operand<'tcx>>,
-    ClosureArgs<TyCtxt<'tcx>>,
-)> {
-    // A direct const operand indicates a non-capturing closure which requires no annotation.
-    let arg_place = arg.place()?;
-    basic_block.statements.iter().find_map(|stmt| {
-        if let StatementKind::Assign(assign) = &stmt.kind {
-            if assign.0 == arg_place {
-                if let Rvalue::Aggregate(aggregate_kind, captured_locals) = &assign.1 {
-                    if let AggregateKind::Closure(def_id, args) = **aggregate_kind {
-                        return Some((def_id, captured_locals, ClosureArgs { args }));
-                    }
-                }
-            }
-        }
-        None
-    })
-}
-
 /// Propagate collection index/position invariant to `Result` or `Option` adapter input closures.
-pub fn propagate_opt_result_idx_invariant<'tcx>(
+pub fn propagate_option_result_idx_invariant<'tcx>(
     opt_res_place: Place<'tcx>,
     next_block: &BasicBlockData<'tcx>,
     collection_def_places: &[(Place<'tcx>, BasicBlock)],
@@ -159,7 +121,7 @@ pub fn propagate_opt_result_idx_invariant<'tcx>(
     // Find capturing closure info (if any).
     let Some((closure_def_id, captured_locals, _)) = args
         .iter()
-        .find_map(|arg| capturing_closure_info(&arg.node, next_block))
+        .find_map(|arg| analyze::capturing_closure_info(&arg.node, next_block))
     else {
         return;
     };
