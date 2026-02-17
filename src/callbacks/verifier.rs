@@ -574,7 +574,7 @@ fn emit_diagnostics(
         })
     };
     // Checks if span points to an `Result::expect` or `Option::expect`.
-    let is_result_or_opt_expect = |mspan: &MultiSpan| {
+    let is_result_or_option_expect = |mspan: &MultiSpan| {
         mspan.primary_span().is_some_and(|span| {
             source_map.span_to_snippet(span).is_ok_and(|snippet| {
                 if let (Some(source_file), ..) = source_map.span_to_location_info(span) {
@@ -652,7 +652,7 @@ fn emit_diagnostics(
         if is_hook_allowed_to_panic
             && is_hooks_impl_callee()
             && ((is_panicking_macro_except_unimpl(last_mspan) && is_span_local(last_mspan))
-                || (is_result_or_opt_expect(last_mspan) && is_penultimate_span_local()))
+                || (is_result_or_option_expect(last_mspan) && is_penultimate_span_local()))
         {
             diagnostic.cancel();
             continue;

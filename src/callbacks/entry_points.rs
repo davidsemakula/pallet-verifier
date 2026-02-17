@@ -1857,9 +1857,9 @@ fn process_used_items(
                                     let trait_user_name =
                                         trait_segments.last().map(|segment| segment.ident.name);
                                     let trait_def_name = trait_def_path.split("::").last();
-                                    if let Some((alias, _)) = trait_user_name
-                                        .zip(trait_def_name)
-                                        .filter(|(user_name, name)| user_name.as_str() != *name)
+                                    if let Some(alias) = trait_user_name
+                                        && let Some(name) = trait_def_name
+                                        && alias.as_str() != name
                                     {
                                         // Add trait along with it's alias.
                                         used_items.insert((trait_def_id, Some(alias)));
@@ -1885,9 +1885,9 @@ fn process_used_items(
                                 path.segments.last().map(|segment| segment.ident.name);
                             let adt_def_name = adt_def_path.split("::").last();
 
-                            if let Some((alias, _)) = adt_user_name
-                                .zip(adt_def_name)
-                                .filter(|(user_name, name)| user_name.as_str() != *name)
+                            if let Some(alias) = adt_user_name
+                                && let Some(name) = adt_def_name
+                                && alias.as_str() != name
                             {
                                 // Add ADT along with it's alias.
                                 used_items.insert((def_id, Some(alias)));
