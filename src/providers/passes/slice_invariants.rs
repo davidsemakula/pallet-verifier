@@ -13,13 +13,17 @@ use rustc_middle::{
 };
 use rustc_span::source_map::Spanned;
 
-use crate::providers::{
-    analyze::{self, Invariant, SwitchVariant},
-    annotate::{self, Annotation, CondOp},
-    closure,
-    passes::MirPass,
-    storage::{
-        self, InvariantSource, PropagatedVariant, StorageId, StorageInvariant, StorageInvariantEnv,
+use crate::{
+    CondOp,
+    providers::{
+        analyze::{self, Invariant, SwitchVariant},
+        annotate::{self, Annotation},
+        closure,
+        passes::MirPass,
+        storage::{
+            self, InvariantSource, PropagatedVariant, StorageId, StorageInvariant,
+            StorageInvariantEnv,
+        },
     },
 };
 
@@ -174,17 +178,12 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         );
 
         // Retrieves info needed to construct a slice length/size call (if possible).
-        let slice_len_bound_info =
-            analyze::slice_len_call_info(binary_search_arg_place, self.local_decls, self.tcx);
+        let binary_search_arg_ty = binary_search_arg_place.ty(self.local_decls, self.tcx).ty;
+        let slice_len_bound_info = analyze::slice_len_call_info(binary_search_arg_ty, self.tcx);
 
         // Retrieves info needed to construct a collection length/size call for the slice subject (if possible).
-        let collection_len_bound_info = analyze::borrowed_collection_len_call_info(
-            slice_deref_arg_place,
-            slice_deref_block,
-            self.basic_blocks,
-            self.local_decls,
-            self.tcx,
-        );
+        let slice_deref_arg_ty = slice_deref_arg_place.ty(self.local_decls, self.tcx).ty;
+        let collection_len_bound_info = analyze::collection_len_call(slice_deref_arg_ty, self.tcx);
 
         // Finds FRAME storage subject (if any).
         let storage_info = storage::storage_subject(
@@ -226,28 +225,28 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             );
 
             // Declares a collection length/size bound annotation.
-            if let Some((collection_place, region, len_call_info)) = &collection_len_bound_info {
+            if let Some(len_call_info) = &collection_len_bound_info {
                 self.annotations.extend(locations.clone().map(|location| {
                     Annotation::Len(
                         location,
                         cond_op,
                         invariant_place,
-                        *collection_place,
-                        *region,
+                        slice_deref_arg_place,
+                        Some(slice_deref_block),
                         len_call_info.clone(),
                     )
                 }));
             }
 
             // Declares slice length/size bound annotations.
-            if let Some((region, call_info)) = &slice_len_bound_info {
+            if let Some(call_info) = &slice_len_bound_info {
                 self.annotations.extend(locations.clone().map(|location| {
                     Annotation::Len(
                         location,
                         cond_op,
                         invariant_place,
                         binary_search_arg_place,
-                        *region,
+                        None,
                         call_info.clone(),
                     )
                 }));
@@ -357,15 +356,14 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
         let cond_op = CondOp::Le;
 
         // Declares a slice length/size bound annotation.
-        if let Some((region, call_info)) =
-            analyze::slice_len_call_info(partition_point_arg_place, self.local_decls, self.tcx)
-        {
+        let partition_point_arg_ty = partition_point_arg_place.ty(self.local_decls, self.tcx).ty;
+        if let Some(call_info) = analyze::slice_len_call_info(partition_point_arg_ty, self.tcx) {
             self.annotations.push(Annotation::Len(
                 annotation_location,
                 cond_op,
                 *destination,
                 partition_point_arg_place,
-                region,
+                None,
                 call_info,
             ));
         }
@@ -395,24 +393,16 @@ impl<'tcx, 'pass> SliceVisitor<'tcx, 'pass> {
             ));
         }
 
-        // Retrieves info needed to construct a collection length/size call for the slice subject
-        // (if possible).
-        let len_bound_info = analyze::borrowed_collection_len_call_info(
-            slice_deref_arg_place,
-            slice_deref_block,
-            self.basic_blocks,
-            self.local_decls,
-            self.tcx,
-        );
-
-        // Declares a collection length/size bound annotation.
-        if let Some((collection_place, region, len_call_info)) = len_bound_info {
+        // Declares a collection length/size bound annotation (if possible).
+        let slice_deref_arg_ty = slice_deref_arg_place.ty(self.local_decls, self.tcx).ty;
+        let len_bound_info = analyze::collection_len_call(slice_deref_arg_ty, self.tcx);
+        if let Some(len_call_info) = len_bound_info {
             self.annotations.push(Annotation::Len(
                 annotation_location,
                 cond_op,
                 *destination,
-                collection_place,
-                region,
+                slice_deref_arg_place,
+                Some(slice_deref_block),
                 len_call_info,
             ));
 

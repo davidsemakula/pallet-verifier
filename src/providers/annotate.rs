@@ -4,21 +4,24 @@
 
 use rustc_abi::{Align, Size};
 use rustc_const_eval::interpret::{Allocation, Scalar};
+use rustc_hash::FxHashSet;
 use rustc_hir::def::DefKind;
 use rustc_middle::{
     middle::exported_symbols::ExportedSymbol,
     mir::{
-        BasicBlockData, BinOp, Body, BorrowKind, CallSource, Const, ConstOperand, ConstValue,
+        BasicBlock, BasicBlockData, Body, BorrowKind, CallSource, Const, ConstOperand, ConstValue,
         HasLocalDecls, LocalDecl, Location, Operand, Place, Rvalue, Statement, StatementKind,
         Terminator, TerminatorKind, UnwindAction,
     },
-    ty::{GenericArg, List, Region, ScalarInt, Ty, TyCtxt},
+    ty::{Region, RegionKind, ScalarInt, Ty, TyCtxt, TyKind},
 };
-use rustc_span::{Span, def_id::DefId, source_map::dummy_spanned};
+use rustc_span::{Span, source_map::dummy_spanned};
 
-use serde::{Deserialize, Serialize};
-
-use crate::utils;
+use crate::{
+    CondOp,
+    providers::analyze::{self, LenCallBuilderInfo},
+    utils,
+};
 
 /// An annotation to add to MIR.
 #[derive(Debug, Clone)]
@@ -32,16 +35,16 @@ pub enum Annotation<'tcx> {
         Location,
         /// Conditional operation for the annotation.
         CondOp,
-        /// The operand place (e.g. a index place).
+        /// The operand place (e.g. an index place).
         Place<'tcx>,
-        /// The collection place and region.
+        /// The collection place and definition block (if any).
         Place<'tcx>,
-        Region<'tcx>,
+        Option<BasicBlock>,
         /// A list of call info needed to build a collection length/size call.
         /// A list is necessary because some length/size calls require a `Deref` call before
-        ///  the target length/size call (e.g. for `BoundedVec`).
-        /// See also [`collection_len_call`].
-        Vec<(DefId, &'tcx List<GenericArg<'tcx>>, Ty<'tcx>)>,
+        /// the target length/size call (e.g. for `BoundedVec`).
+        /// See also [`analyze::collection_len_call`].
+        LenCallBuilderInfo<'tcx>,
     ),
 }
 
@@ -150,107 +153,184 @@ impl<'tcx> Annotation<'tcx> {
                 cond_op,
                 op_place,
                 collection_place,
-                collection_region,
+                collection_block,
                 collection_len_builder_calls,
             ) => {
-                // Initializes variables for tracking state of collection length/size "builder" calls.
-                let mut current_block = location.block;
-                let mut current_statements = predecessors;
-                let mut current_arg_place = collection_place;
-                let mut final_len_bound_place = None;
-                for (len_builder_def_id, len_builder_gen_args, len_builder_ty) in
-                    collection_len_builder_calls
-                {
-                    // Sets arg ref place.
-                    let current_arg_ty = current_arg_place.ty(body.local_decls(), tcx).ty;
-                    let current_arg_ref_place = if current_arg_ty.is_ref() {
-                        current_arg_place
-                    } else {
-                        // Creates arg ref statement.
-                        let current_arg_ref_ty = Ty::new_ref(
-                            tcx,
-                            collection_region,
-                            current_arg_ty,
-                            rustc_ast::Mutability::Not,
-                        );
-                        let current_arg_ref_local_decl =
-                            LocalDecl::with_source_info(current_arg_ref_ty, source_info);
-                        let current_arg_ref_local =
-                            body.local_decls.push(current_arg_ref_local_decl);
-                        let current_arg_ref_place = Place::from(current_arg_ref_local);
-                        let current_arg_ref_rvalue =
-                            Rvalue::Ref(collection_region, BorrowKind::Shared, current_arg_place);
-                        let current_arg_ref_stmt = Statement {
-                            source_info,
-                            kind: StatementKind::Assign(Box::new((
-                                current_arg_ref_place,
-                                current_arg_ref_rvalue,
-                            ))),
-                        };
-                        current_statements.push(current_arg_ref_stmt);
-                        current_arg_ref_place
-                    };
-
-                    // Creates an empty next block.
-                    let next_block_data = BasicBlockData::new(None, false);
-                    let next_block = body.basic_blocks_mut().push(next_block_data);
-
-                    // Creates collection length/size "builder" call.
-                    let len_builder_local_decl =
-                        LocalDecl::with_source_info(len_builder_ty, source_info);
-                    let len_builder_local = body.local_decls.push(len_builder_local_decl);
-                    let len_builder_destination_place = Place::from(len_builder_local);
-                    let len_builder_handle = Operand::function_handle(
+                // Add `Deref` subjects and targets to annotation places.
+                let mut annotation_places_and_info = FxHashSet::default();
+                annotation_places_and_info.insert((
+                    collection_place,
+                    collection_block,
+                    collection_len_builder_calls.clone(),
+                ));
+                if let Some(collection_block) = collection_block {
+                    // Adds `Deref` subjects.
+                    let deref_subjects = analyze::deref_subjects_recursive(
+                        collection_place,
+                        collection_block,
+                        location.block,
+                        &body.basic_blocks,
+                        body.basic_blocks.dominators(),
                         tcx,
-                        len_builder_def_id,
-                        len_builder_gen_args,
-                        Span::default(),
                     );
-                    let len_builder_call = Terminator {
-                        source_info,
-                        kind: TerminatorKind::Call {
-                            func: len_builder_handle,
-                            args: Box::new([dummy_spanned(Operand::Move(current_arg_ref_place))]),
-                            destination: len_builder_destination_place,
-                            target: Some(next_block),
-                            unwind: UnwindAction::Unreachable,
-                            call_source: CallSource::Misc,
-                            fn_span: Span::default(),
+                    annotation_places_and_info.extend(deref_subjects.iter().filter_map(
+                        |(place, block)| {
+                            let place_ty = place.ty(&body.local_decls, tcx).ty;
+                            analyze::collection_len_call(place_ty, tcx)
+                                .map(|len_builder_calls| (*place, Some(*block), len_builder_calls))
                         },
-                    };
+                    ));
 
-                    // Updates current block statements and terminator.
-                    let basic_blocks = body.basic_blocks_mut();
-                    basic_blocks[current_block].statements = current_statements;
-                    basic_blocks[current_block].terminator = Some(len_builder_call);
-
-                    // Next iteration.
-                    current_block = next_block;
-                    current_statements = Vec::new();
-                    current_arg_place = len_builder_destination_place;
-                    final_len_bound_place = Some(len_builder_destination_place);
+                    // Adds `Deref` targets.
+                    annotation_places_and_info.extend(
+                        std::iter::once((collection_place, collection_block))
+                            .chain(deref_subjects)
+                            .flat_map(|(place, block)| {
+                                analyze::deref_targets_recursive(
+                                    place,
+                                    block,
+                                    location.block,
+                                    &body.basic_blocks,
+                                    body.basic_blocks.dominators(),
+                                    tcx,
+                                )
+                            })
+                            .filter_map(|(place, block)| {
+                                let place_ty = place.ty(&body.local_decls, tcx).ty;
+                                analyze::slice_len_call_info(place_ty, tcx)
+                                    .or_else(|| analyze::collection_len_call(place_ty, tcx))
+                                    .map(|len_builder_calls| {
+                                        (place, Some(block), len_builder_calls)
+                                    })
+                            }),
+                    );
                 }
 
-                // Creates collection length/size bound statement
-                // (if a length/size call was successfully constructed).
-                if let Some(final_len_bound_place) = final_len_bound_place {
-                    let deref_op_place = if op_place.ty(body.local_decls(), tcx).ty.is_ref() {
-                        tcx.mk_place_deref(op_place)
-                    } else {
-                        op_place
-                    };
-                    let arg_rvalue = Rvalue::BinaryOp(
-                        cond_op.into(),
-                        Box::new((
-                            Operand::Copy(deref_op_place),
-                            Operand::Copy(final_len_bound_place),
-                        )),
-                    );
-                    let arg_stmt = Statement {
-                        source_info,
-                        kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
-                    };
-                    current_statements.push(arg_stmt);
+                // Initializes variables for tracking inserted blocks for collection length/size "builder" calls.
+                let mut current_block = location.block;
+                let mut current_statements = predecessors;
+
+                for (collection_place, collection_block, collection_len_builder_calls) in
+                    annotation_places_and_info
+                {
+                    // Initializes variables for tracking state of collection length/size "builder" calls.
+                    let (collection_place, collection_region) = collection_block
+                        .and_then(|block| {
+                            analyze::deref_place_recursive(
+                                collection_place,
+                                block,
+                                &body.basic_blocks,
+                            )
+                        })
+                        .map(|(place, region)| (place, Some(region)))
+                        .unwrap_or((collection_place, None));
+                    let mut current_arg_place = collection_place;
+                    let mut final_len_bound_place = None;
+                    for (len_builder_def_id, len_builder_gen_args, len_builder_ty) in
+                        collection_len_builder_calls
+                    {
+                        // Sets arg ref place.
+                        let current_arg_ty = current_arg_place.ty(body.local_decls(), tcx).ty;
+                        let current_arg_ref_place = if current_arg_ty.is_ref() {
+                            current_arg_place
+                        } else {
+                            // Creates arg ref statement.
+                            let ref_region = collection_region.unwrap_or_else(|| {
+                                let collection_place_ty =
+                                    collection_place.ty(body.local_decls(), tcx).ty;
+                                match collection_place_ty.kind() {
+                                    TyKind::Ref(region, _, _) => *region,
+                                    _ => Region::new_from_kind(tcx, RegionKind::ReErased),
+                                }
+                            });
+
+                            let current_arg_ref_ty = Ty::new_ref(
+                                tcx,
+                                ref_region,
+                                current_arg_ty,
+                                rustc_ast::Mutability::Not,
+                            );
+                            let current_arg_ref_local_decl =
+                                LocalDecl::with_source_info(current_arg_ref_ty, source_info);
+                            let current_arg_ref_local =
+                                body.local_decls.push(current_arg_ref_local_decl);
+                            let current_arg_ref_place = Place::from(current_arg_ref_local);
+                            let current_arg_ref_rvalue =
+                                Rvalue::Ref(ref_region, BorrowKind::Shared, current_arg_place);
+                            let current_arg_ref_stmt = Statement {
+                                source_info,
+                                kind: StatementKind::Assign(Box::new((
+                                    current_arg_ref_place,
+                                    current_arg_ref_rvalue,
+                                ))),
+                            };
+                            current_statements.push(current_arg_ref_stmt);
+                            current_arg_ref_place
+                        };
+
+                        // Creates an empty next block.
+                        let next_block_data = BasicBlockData::new(None, false);
+                        let next_block = body.basic_blocks_mut().push(next_block_data);
+
+                        // Creates collection length/size "builder" call.
+                        let len_builder_local_decl =
+                            LocalDecl::with_source_info(len_builder_ty, source_info);
+                        let len_builder_local = body.local_decls.push(len_builder_local_decl);
+                        let len_builder_destination_place = Place::from(len_builder_local);
+                        let len_builder_handle = Operand::function_handle(
+                            tcx,
+                            len_builder_def_id,
+                            len_builder_gen_args,
+                            Span::default(),
+                        );
+                        let len_builder_call = Terminator {
+                            source_info,
+                            kind: TerminatorKind::Call {
+                                func: len_builder_handle,
+                                args: Box::new([dummy_spanned(Operand::Move(
+                                    current_arg_ref_place,
+                                ))]),
+                                destination: len_builder_destination_place,
+                                target: Some(next_block),
+                                unwind: UnwindAction::Unreachable,
+                                call_source: CallSource::Misc,
+                                fn_span: Span::default(),
+                            },
+                        };
+
+                        // Updates current block statements and terminator.
+                        let basic_blocks = body.basic_blocks_mut();
+                        basic_blocks[current_block].statements = current_statements;
+                        basic_blocks[current_block].terminator = Some(len_builder_call);
+
+                        // Next iteration.
+                        current_block = next_block;
+                        current_statements = Vec::new();
+                        current_arg_place = len_builder_destination_place;
+                        final_len_bound_place = Some(len_builder_destination_place);
+                    }
+
+                    // Creates collection length/size bound statement
+                    // (if a length/size call was successfully constructed).
+                    if let Some(final_len_bound_place) = final_len_bound_place {
+                        let deref_op_place = if op_place.ty(body.local_decls(), tcx).ty.is_ref() {
+                            tcx.mk_place_deref(op_place)
+                        } else {
+                            op_place
+                        };
+                        let arg_rvalue = Rvalue::BinaryOp(
+                            cond_op.into(),
+                            Box::new((
+                                Operand::Copy(deref_op_place),
+                                Operand::Copy(final_len_bound_place),
+                            )),
+                        );
+                        let arg_stmt = Statement {
+                            source_info,
+                            kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
+                        };
+                        current_statements.push(arg_stmt);
+                    }
                 }
 
                 // Returns target block and statements.
@@ -287,7 +367,7 @@ impl<'tcx> Annotation<'tcx> {
     }
 
     /// Returns the target location for adding the annotation.
-    pub fn location(&self) -> &Location {
+    fn location(&self) -> &Location {
         match &self {
             Annotation::CastOverflow(location, ..)
             | Annotation::ConstMax(location, ..)
@@ -339,39 +419,6 @@ impl AnnotationFn {
 impl std::fmt::Display for AnnotationFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.fn_name())
-    }
-}
-
-/// Conditional operator.
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
-pub enum CondOp {
-    /// The `==` operator (equality).
-    Eq,
-    /// The `<=` operator (less than or equal to).
-    Le,
-    /// The `<` operator (less than).
-    Lt,
-    /// The `!=` operator (not equal to).
-    Ne,
-    /// The `>=` operator (greater than or equal to).
-    Ge,
-    /// The `>` operator (greater than).
-    Gt,
-}
-
-/// We can't implement `From<BinOp> for CondOp` (because `CondOp` is a subset of `BinOp`),
-/// so we implement `Into<BinOp> for CondOp` instead.
-#[allow(clippy::from_over_into)]
-impl Into<BinOp> for CondOp {
-    fn into(self) -> BinOp {
-        match self {
-            CondOp::Eq => BinOp::Eq,
-            CondOp::Lt => BinOp::Lt,
-            CondOp::Le => BinOp::Le,
-            CondOp::Ne => BinOp::Ne,
-            CondOp::Ge => BinOp::Ge,
-            CondOp::Gt => BinOp::Gt,
-        }
     }
 }
 

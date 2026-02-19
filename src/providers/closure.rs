@@ -7,16 +7,14 @@ use rustc_middle::{
         BasicBlock, BasicBlockData, BasicBlocks, Body, HasLocalDecls, Local, LocalDecl, Location,
         Operand, Place, Rvalue, Statement, StatementKind, TerminatorKind,
     },
-    ty::{ClosureArgs, Region, RegionKind, TyCtxt, TyKind},
+    ty::{ClosureArgs, TyCtxt, TyKind},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    providers::{
-        analyze,
-        annotate::{Annotation, CondOp},
-    },
+    CondOp,
+    providers::{analyze, annotate::Annotation},
     utils,
 };
 
@@ -284,16 +282,12 @@ fn apply_propagated_invariant<'tcx>(
     };
 
     // Adds propagated invariant annotation.
-    let region = match collection_place_ty.kind() {
-        TyKind::Ref(region, _, _) => *region,
-        _ => Region::new_from_kind(tcx, RegionKind::ReErased),
-    };
     let annotation = Annotation::Len(
         annotation_location,
         cond_op,
         derefed_op_place,
         derefed_collection_place,
-        region,
+        None,
         len_call_info,
     );
     annotation.insert(body, tcx);

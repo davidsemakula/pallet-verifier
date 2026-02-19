@@ -18,7 +18,7 @@ use rustc_span::{def_id::DefId, symbol::Ident};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::providers::annotate::CondOp;
+use crate::CondOp;
 
 /// Finds the innermost place if the given place is a single deref of a local,
 /// otherwise returns the given place.
@@ -32,11 +32,10 @@ fn direct_place(place: Place) -> Place {
 /// Returns the derefed place and region (if the current place is a reference).
 fn deref_place<'tcx>(
     place: Place<'tcx>,
-    block: BasicBlock,
-    basic_blocks: &BasicBlocks<'tcx>,
+    block_data: &BasicBlockData<'tcx>,
 ) -> Option<(Place<'tcx>, Region<'tcx>)> {
     let target_place = direct_place(place);
-    basic_blocks[block].statements.iter().find_map(|stmt| {
+    block_data.statements.iter().find_map(|stmt| {
         if let StatementKind::Assign(assign) = &stmt.kind
             && target_place == assign.0
             && let Rvalue::Ref(region, _, op_place) = &assign.1
@@ -60,7 +59,8 @@ pub fn deref_place_recursive<'tcx>(
 ) -> Option<(Place<'tcx>, Region<'tcx>)> {
     let mut result = None;
     let mut deref_target_place = place;
-    while let Some((derefed_place, region)) = deref_place(deref_target_place, block, basic_blocks) {
+    while let Some((derefed_place, region)) = deref_place(deref_target_place, &basic_blocks[block])
+    {
         result = Some((derefed_place, region));
         deref_target_place = derefed_place;
     }
@@ -76,21 +76,50 @@ pub fn pre_anchor_assign_terminator<'tcx>(
     basic_blocks: &BasicBlocks<'tcx>,
     dominators: &Dominators<BasicBlock>,
 ) -> Option<(Terminator<'tcx>, BasicBlock)> {
+    pre_anchor_terminator(
+        place,
+        parent_block,
+        anchor_block,
+        |places, terminator, _| {
+            if let TerminatorKind::Call { destination, .. } = &terminator.kind {
+                places.contains(destination)
+            } else {
+                false
+            }
+        },
+        basic_blocks,
+        dominators,
+    )
+}
+
+/// Returns terminator (if any) which matches the given `call_matcher`
+/// whose basic block is a predecessor of the given anchor block,
+/// and where `places` argument for the `call_matcher` represents aliases of the given place.
+fn pre_anchor_terminator<'tcx>(
+    place: Place<'tcx>,
+    parent_block: BasicBlock,
+    anchor_block: BasicBlock,
+    call_matcher: impl Fn(&FxHashSet<Place<'tcx>>, &Terminator<'tcx>, BasicBlock) -> bool + Copy,
+    basic_blocks: &BasicBlocks<'tcx>,
+    dominators: &Dominators<BasicBlock>,
+) -> Option<(Terminator<'tcx>, BasicBlock)> {
     let mut places = FxHashSet::default();
     let mut already_visited = FxHashSet::default();
 
     places.insert(place);
     let mut deref_target_place = place;
-    while let Some((derefed_place, _)) = deref_place(deref_target_place, parent_block, basic_blocks)
-    {
+    let block_data = &basic_blocks[parent_block];
+    while let Some((derefed_place, _)) = deref_place(deref_target_place, block_data) {
         places.insert(derefed_place);
         deref_target_place = derefed_place;
     }
+    add_place_aliases(&mut places, block_data);
 
     return pre_anchor_assign_terminator_inner(
         &mut places,
         anchor_block,
         anchor_block,
+        call_matcher,
         basic_blocks,
         dominators,
         &mut already_visited,
@@ -100,6 +129,7 @@ pub fn pre_anchor_assign_terminator<'tcx>(
         places: &mut FxHashSet<Place<'tcx>>,
         current_block: BasicBlock,
         anchor_block: BasicBlock,
+        call_matcher: impl Fn(&FxHashSet<Place<'tcx>>, &Terminator<'tcx>, BasicBlock) -> bool + Copy,
         basic_blocks: &BasicBlocks<'tcx>,
         dominators: &Dominators<BasicBlock>,
         already_visited: &mut FxHashSet<BasicBlock>,
@@ -116,9 +146,7 @@ pub fn pre_anchor_assign_terminator<'tcx>(
                 let block_data = &basic_blocks[*pred_block];
                 add_place_aliases(places, block_data);
                 if let Some(terminator) = &block_data.terminator {
-                    if let TerminatorKind::Call { destination, .. } = &terminator.kind
-                        && places.contains(destination)
-                    {
+                    if call_matcher(places, terminator, *pred_block) {
                         return Some((terminator.clone(), *pred_block));
                     }
                 }
@@ -126,6 +154,7 @@ pub fn pre_anchor_assign_terminator<'tcx>(
                     places,
                     *pred_block,
                     anchor_block,
+                    call_matcher,
                     basic_blocks,
                     dominators,
                     already_visited,
@@ -209,13 +238,34 @@ pub fn deref_subject<'tcx>(
     dominators: &Dominators<BasicBlock>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<(Place<'tcx>, BasicBlock)> {
-    let deref_call =
-        pre_anchor_assign_terminator(place, parent_block, anchor_block, basic_blocks, dominators);
-    deref_call
-        .and_then(|(terminator, block)| deref_operand(&terminator, tcx).map(|place| (place, block)))
+    let (terminator, block) = pre_anchor_terminator(
+        place,
+        parent_block,
+        anchor_block,
+        |places, terminator, _| {
+            if let TerminatorKind::Call {
+                func, destination, ..
+            } = &terminator.kind
+                && places.contains(destination)
+                && let Some((def_id, ..)) = func.const_fn_def()
+            {
+                is_deref_call(def_id, tcx)
+            } else {
+                false
+            }
+        },
+        basic_blocks,
+        dominators,
+    )?;
+    let TerminatorKind::Call { args, .. } = terminator.kind else {
+        return None;
+    };
+    let place = args.first()?.node.place()?;
+    Some((place, block))
 }
 
-/// Recursively finds places for operand/arg and basic blocks of a `Deref` calls (if any) that assign to the given place.
+/// Recursively finds places for operand/arg and basic blocks of `Deref` calls (if any)
+/// that assign to the given place.
 pub fn deref_subjects_recursive<'tcx>(
     place: Place<'tcx>,
     parent_block: BasicBlock,
@@ -244,12 +294,72 @@ pub fn deref_subjects_recursive<'tcx>(
     deref_subjects
 }
 
-/// Returns place (if any) for the arg/operand of `std::ops::Deref` or `std::ops::DerefMut`.
-fn deref_operand<'tcx>(terminator: &Terminator<'tcx>, tcx: TyCtxt<'tcx>) -> Option<Place<'tcx>> {
-    let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
+/// Finds target place and basic block of a `Deref` call (if any) where the given place is the operand/arg.
+fn deref_target<'tcx>(
+    place: Place<'tcx>,
+    parent_block: BasicBlock,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    dominators: &Dominators<BasicBlock>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<(Place<'tcx>, BasicBlock)> {
+    let (terminator, block) = pre_anchor_terminator(
+        place,
+        parent_block,
+        anchor_block,
+        |places, terminator, _| {
+            if let TerminatorKind::Call { func, args, .. } = &terminator.kind
+                && let Some(first_arg) = args.first()
+                && let Some(first_arg_place) = first_arg.node.place()
+                && places.contains(&first_arg_place)
+                && let Some((def_id, ..)) = func.const_fn_def()
+            {
+                is_deref_call(def_id, tcx)
+            } else {
+                false
+            }
+        },
+        basic_blocks,
+        dominators,
+    )?;
+    let TerminatorKind::Call { destination, .. } = terminator.kind else {
         return None;
     };
-    let (def_id, ..) = func.const_fn_def()?;
+    Some((destination, block))
+}
+
+/// Recursively finds target places and basic blocks of `Deref` calls (if any)
+/// where the given place is the operand/arg.
+pub fn deref_targets_recursive<'tcx>(
+    place: Place<'tcx>,
+    parent_block: BasicBlock,
+    anchor_block: BasicBlock,
+    basic_blocks: &BasicBlocks<'tcx>,
+    dominators: &Dominators<BasicBlock>,
+    tcx: TyCtxt<'tcx>,
+) -> FxHashSet<(Place<'tcx>, BasicBlock)> {
+    let mut deref_targets = FxHashSet::default();
+    let mut current_place = place;
+    let mut current_block = parent_block;
+
+    while let Some((deref_arg_place, deref_block)) = deref_target(
+        current_place,
+        current_block,
+        anchor_block,
+        basic_blocks,
+        dominators,
+        tcx,
+    ) {
+        deref_targets.insert((deref_arg_place, deref_block));
+        current_place = deref_arg_place;
+        current_block = deref_block;
+    }
+
+    deref_targets
+}
+
+/// Returns place (if any) for the arg/operand of `std::ops::Deref` or `std::ops::DerefMut`.
+fn is_deref_call<'tcx>(def_id: DefId, tcx: TyCtxt<'tcx>) -> bool {
     let deref_trait_def_id = tcx
         .lang_items()
         .get(LangItem::Deref)
@@ -258,17 +368,13 @@ fn deref_operand<'tcx>(terminator: &Terminator<'tcx>, tcx: TyCtxt<'tcx>) -> Opti
         .lang_items()
         .get(LangItem::DerefMut)
         .expect("Expected `std::ops::DerefMut` lang item");
-    let is_deref_call = matches!(tcx.item_name(def_id).as_str(), "deref" | "deref_mut")
+    matches!(tcx.item_name(def_id).as_str(), "deref" | "deref_mut")
         && tcx
             .opt_associated_item(def_id)
             .and_then(|assoc_item| assoc_item.trait_container(tcx))
             .is_some_and(|trait_def_id| {
                 trait_def_id == deref_trait_def_id || trait_def_id == deref_mut_trait_def_id
-            });
-    if !is_deref_call {
-        return None;
-    }
-    args.first()?.node.place()
+            })
 }
 
 /// Returns true if the type is a known collection whose length/size maxima is `isize::MAX`.
@@ -379,52 +485,25 @@ pub fn collection_len_call<'tcx>(
     }
 }
 
-/// Given a collection place, returns info necessary to construct a collection length/size call
-/// only if the collection place is borrowed (i.e. a reference).
-///
-/// Return info (if any) includes the derefed collection place, the `region`,
-/// along with [`LenCallBuilderInfo`].
-pub fn borrowed_collection_len_call_info<'tcx>(
-    place: Place<'tcx>,
-    block: BasicBlock,
-    basic_blocks: &BasicBlocks<'tcx>,
-    local_decls: &LocalDecls<'tcx>,
-    tcx: TyCtxt<'tcx>,
-) -> Option<(Place<'tcx>, Region<'tcx>, LenCallBuilderInfo<'tcx>)> {
-    let place_ty = place.ty(local_decls, tcx).ty;
-    let (collection_place, region) =
-        deref_place_recursive(place, block, basic_blocks).or_else(|| {
-            if let TyKind::Ref(region, _, _) = place_ty.kind() {
-                Some((place, *region))
-            } else {
-                None
-            }
-        })?;
-    collection_len_call(place_ty, tcx)
-        .map(|len_call_info| (collection_place, region, len_call_info))
-}
-
-/// Returns info necessary for constructing a length/size call for the given slice place (if possible).
+/// Returns info necessary for constructing a length/size call for the given slice type (if possible).
 ///
 /// See [`LenCallBuilderInfo`] for additional details.
 pub fn slice_len_call_info<'tcx>(
-    place: Place<'tcx>,
-    local_decls: &LocalDecls<'tcx>,
+    ty: Ty<'tcx>,
     tcx: TyCtxt<'tcx>,
-) -> Option<(Region<'tcx>, LenCallBuilderInfo<'tcx>)> {
-    if let TyKind::Ref(region, slice_ty, _) = place.ty(local_decls, tcx).ty.kind()
-        && slice_ty.is_slice()
-    {
+) -> Option<LenCallBuilderInfo<'tcx>> {
+    let bare_ty = ty.peel_refs();
+    if bare_ty.is_slice() {
         let slice_len_def_id = tcx
             .lang_items()
             .get(LangItem::SliceLen)
             .expect("Expected `[T]::len` lang item");
-        let gen_ty = slice_ty
+        let gen_ty = bare_ty
             .walk()
             .nth(1)
             .expect("Expected a generic arg for `[T]`");
         let gen_args = tcx.mk_args(&[gen_ty]);
-        Some((*region, vec![(slice_len_def_id, gen_args, tcx.types.usize)]))
+        Some(vec![(slice_len_def_id, gen_args, tcx.types.usize)])
     } else {
         None
     }

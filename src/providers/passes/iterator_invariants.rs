@@ -19,9 +19,10 @@ use std::ops::Deref;
 use itertools::Itertools;
 
 use crate::{
+    CondOp,
     providers::{
         analyze::{self, SwitchVariant},
-        annotate::{self, Annotation, CondOp},
+        annotate::{self, Annotation},
         closure,
         passes::MirPass,
         storage::{
@@ -228,13 +229,9 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
             // Updates collection length/size method info (if appropriate).
             if n_non_empty_chains == 1 {
-                len_bound_info = analyze::borrowed_collection_len_call_info(
-                    iterator_subject_place,
-                    iterator_subject_block,
-                    self.basic_blocks,
-                    self.local_decls,
-                    self.tcx,
-                );
+                let iterator_subject_ty = self.place_ty(iterator_subject_place);
+                len_bound_info = analyze::collection_len_call(iterator_subject_ty, self.tcx)
+                    .map(|info| (iterator_subject_place, iterator_subject_block, info));
             }
         }
 
@@ -299,7 +296,9 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Composes collection length/size bound annotations for reachable loop successors (if any).
         if !loop_successors.is_empty() && !pre_loop_len_maxima_places.is_empty() {
-            if let Some((collection_place, region, len_call_info)) = len_bound_info {
+            if let Some((iterator_subject_place, iterator_subject_block, len_call_info)) =
+                len_bound_info
+            {
                 for block in &loop_successors {
                     for len_maxima_place in &pre_loop_len_maxima_places {
                         // Declares a collection length/size bound annotation.
@@ -310,8 +309,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                             },
                             CondOp::Lt,
                             *len_maxima_place,
-                            collection_place,
-                            region,
+                            iterator_subject_place,
+                            Some(iterator_subject_block),
                             len_call_info.clone(),
                         ));
                     }
@@ -511,25 +510,6 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             }
         }
 
-        // Finds collection place info (if any).
-        let collection_place_info = solo_iterator_subject_info.and_then(
-            |(iterator_subject_place, iterator_subject_block)| {
-                analyze::deref_place_recursive(
-                    iterator_subject_place,
-                    iterator_subject_block,
-                    self.basic_blocks,
-                )
-                .or_else(|| {
-                    if let TyKind::Ref(region, _, _) = self.place_ty(iterator_subject_place).kind()
-                    {
-                        Some((iterator_subject_place, *region))
-                    } else {
-                        None
-                    }
-                })
-            },
-        );
-
         // Finds FRAME storage subject (if any).
         let storage_info = solo_iterator_subject_info.and_then(
             |(iterator_subject_place, iterator_subject_block)| {
@@ -546,7 +526,7 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
 
         // Composes a collection length/size bound annotations (if appropriate).
         let mut storage_invariants = FxHashSet::default();
-        if let Some((collection_place, region)) = collection_place_info
+        if let Some((iterator_subject_place, iterator_subject_block)) = solo_iterator_subject_info
             && let Some(len_call_info) = len_bound_info.as_ref()
         {
             for (annotation_location, cond_op, invariant_place) in invariants {
@@ -554,8 +534,8 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
                     annotation_location,
                     cond_op,
                     invariant_place,
-                    collection_place,
-                    region,
+                    iterator_subject_place,
+                    Some(iterator_subject_block),
                     len_call_info.clone(),
                 ));
 
@@ -694,17 +674,16 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             if self.place_ty(iterator_subject_place).peel_refs().is_slice() {
                 // Declares a slice length/size bound annotation.
                 if n_non_empty_chains == 1 {
-                    if let Some((region, call_info)) = analyze::slice_len_call_info(
-                        iterator_subject_place,
-                        self.local_decls,
-                        self.tcx,
-                    ) {
+                    let iterator_subject_ty = self.place_ty(iterator_subject_place);
+                    if let Some(call_info) =
+                        analyze::slice_len_call_info(iterator_subject_ty, self.tcx)
+                    {
                         self.annotations.push(Annotation::Len(
                             annotation_location,
                             cond_op,
                             *destination,
                             iterator_subject_place,
-                            region,
+                            None,
                             call_info,
                         ));
                     }
@@ -742,46 +721,32 @@ impl<'tcx, 'pass> IteratorVisitor<'tcx, 'pass> {
             }
             let len_call_info = analyze::collection_len_call(iterator_subject_ty, self.tcx);
             if let Some(len_call_info) = len_call_info {
-                let collection_place_info = analyze::deref_place_recursive(
+                self.annotations.push(Annotation::Len(
+                    annotation_location,
+                    cond_op,
+                    *destination,
+                    iterator_subject_place,
+                    Some(iterator_subject_block),
+                    len_call_info.clone(),
+                ));
+
+                // Finds FRAME storage subject (if any).
+                let storage_info = storage::storage_subject(
                     iterator_subject_place,
                     iterator_subject_block,
+                    location.block,
                     self.basic_blocks,
-                )
-                .or_else(|| {
-                    if let TyKind::Ref(region, _, _) = iterator_subject_ty.kind() {
-                        Some((iterator_subject_place, *region))
-                    } else {
-                        None
-                    }
-                });
-                if let Some((collection_place, region)) = collection_place_info {
-                    self.annotations.push(Annotation::Len(
-                        annotation_location,
-                        cond_op,
-                        *destination,
-                        collection_place,
-                        region,
-                        len_call_info.clone(),
+                    dominators,
+                    self.tcx,
+                );
+
+                // Adds storage invariants.
+                if let Some((storage_item, use_location)) = storage_info {
+                    self.storage_invariants.push((
+                        StorageId::DefId(storage_item.prefix),
+                        use_location,
+                        FxHashSet::from_iter([(annotation_location, cond_op, *destination)]),
                     ));
-
-                    // Finds FRAME storage subject (if any).
-                    let storage_info = storage::storage_subject(
-                        iterator_subject_place,
-                        iterator_subject_block,
-                        location.block,
-                        self.basic_blocks,
-                        dominators,
-                        self.tcx,
-                    );
-
-                    // Adds storage invariants.
-                    if let Some((storage_item, use_location)) = storage_info {
-                        self.storage_invariants.push((
-                            StorageId::DefId(storage_item.prefix),
-                            use_location,
-                            FxHashSet::from_iter([(annotation_location, cond_op, *destination)]),
-                        ));
-                    }
                 }
             }
         }

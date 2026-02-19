@@ -9,10 +9,13 @@ use rustc_middle::{
 };
 use rustc_span::source_map::Spanned;
 
-use crate::providers::{
-    analyze,
-    annotate::{self, Annotation, CondOp},
-    passes::MirPass,
+use crate::{
+    CondOp,
+    providers::{
+        analyze,
+        annotate::{self, Annotation},
+        passes::MirPass,
+    },
 };
 
 /// Adds "collection" invariant annotations.

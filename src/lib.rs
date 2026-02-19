@@ -40,7 +40,10 @@ mod providers;
 mod utils;
 
 use rustc_hash::FxHashMap;
+use rustc_middle::mir::BinOp;
 use rustc_span::def_id::{DefPathHash, LocalDefId};
+
+use serde::{Deserialize, Serialize};
 
 pub use callbacks::{
     DefaultCallbacks, DependencyCallbacks, EntryPointsCallbacks, SummariesCallbacks,
@@ -107,5 +110,38 @@ impl std::fmt::Display for CallKind {
                 CallKind::PubAssocFn => "pub assoc fn",
             }
         )
+    }
+}
+
+/// Conditional operator.
+#[derive(Copy, Clone, Debug, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
+enum CondOp {
+    /// The `==` operator (equality).
+    Eq,
+    /// The `<=` operator (less than or equal to).
+    Le,
+    /// The `<` operator (less than).
+    Lt,
+    /// The `!=` operator (not equal to).
+    Ne,
+    /// The `>=` operator (greater than or equal to).
+    Ge,
+    /// The `>` operator (greater than).
+    Gt,
+}
+
+/// We can't implement `From<BinOp> for CondOp` (because `CondOp` is a subset of `BinOp`),
+/// so we implement `Into<BinOp> for CondOp` instead.
+#[allow(clippy::from_over_into)]
+impl Into<BinOp> for CondOp {
+    fn into(self) -> BinOp {
+        match self {
+            CondOp::Eq => BinOp::Eq,
+            CondOp::Lt => BinOp::Lt,
+            CondOp::Le => BinOp::Le,
+            CondOp::Ne => BinOp::Ne,
+            CondOp::Ge => BinOp::Ge,
+            CondOp::Gt => BinOp::Gt,
+        }
     }
 }

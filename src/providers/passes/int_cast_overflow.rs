@@ -13,8 +13,9 @@ use rustc_span::Span;
 use rustc_type_ir::{IntTy, UintTy};
 
 use crate::{
+    CondOp,
     providers::{
-        annotate::{self, Annotation, CondOp},
+        annotate::{self, Annotation},
         passes::MirPass,
     },
     utils,

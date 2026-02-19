@@ -11,9 +11,7 @@ use rustc_middle::{
         Location, Operand, Place, Rvalue, StatementKind, Terminator, TerminatorKind,
         visit::Visitor,
     },
-    ty::{
-        AssocItemContainer, GenericArg, ImplSubject, List, Region, RegionKind, Ty, TyCtxt, TyKind,
-    },
+    ty::{AssocItemContainer, GenericArg, ImplSubject, List, Ty, TyCtxt, TyKind},
 };
 use rustc_mir_dataflow::{
     Analysis,
@@ -25,9 +23,10 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    CondOp,
     providers::{
         analyze::{self, SwitchVariant},
-        annotate::{Annotation, CondOp},
+        annotate::Annotation,
         closure::{self, ClosureInvariantEnv, ClosureInvariantInfo, ClosurePlaceIdx},
     },
     utils,
@@ -442,7 +441,7 @@ fn propagate_return_place_invariant<'tcx>(
     tcx: TyCtxt<'tcx>,
     annotations: &mut Vec<Annotation<'tcx>>,
 ) {
-    // Only propapages invariant to return place if the storage value type is not used in any params.
+    // Only propagates invariant to return place if the storage value type is not used in any params.
     let TerminatorKind::Call {
         func,
         destination,
@@ -469,10 +468,6 @@ fn propagate_return_place_invariant<'tcx>(
     // NOTE: We use the place type instead of the output type from the function signature because
     // the former is already normalized while the latter isn't.
     let return_ty = destination.ty(local_decls, tcx).ty;
-    let region = match return_ty.kind() {
-        TyKind::Ref(region, _, _) => *region,
-        _ => Region::new_from_kind(tcx, RegionKind::ReErased),
-    };
     let Some(target) = *target else {
         return;
     };
@@ -489,7 +484,7 @@ fn propagate_return_place_invariant<'tcx>(
             cond_op,
             invariant_place,
             *destination,
-            region,
+            None,
             len_call_info.clone(),
         ));
         return;
@@ -562,7 +557,7 @@ fn propagate_return_place_invariant<'tcx>(
                 cond_op,
                 invariant_place,
                 downcast_place,
-                region,
+                None,
                 len_call_info.clone(),
             ));
         }
