@@ -492,13 +492,13 @@ pub fn slice_len_call_info<'tcx>(
     ty: Ty<'tcx>,
     tcx: TyCtxt<'tcx>,
 ) -> Option<LenCallBuilderInfo<'tcx>> {
-    let bare_ty = ty.peel_refs();
-    if bare_ty.is_slice() {
+    let base_ty = ty.peel_refs();
+    if base_ty.is_slice() {
         let slice_len_def_id = tcx
             .lang_items()
             .get(LangItem::SliceLen)
             .expect("Expected `[T]::len` lang item");
-        let gen_ty = bare_ty
+        let gen_ty = base_ty
             .walk()
             .nth(1)
             .expect("Expected a generic arg for `[T]`");

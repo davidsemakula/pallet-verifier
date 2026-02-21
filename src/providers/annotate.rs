@@ -66,304 +66,336 @@ impl<'tcx> Annotation<'tcx> {
 
     /// Adds instructions for the annotation to the given MIR body.
     pub fn insert(self, body: &mut Body<'tcx>, tcx: TyCtxt<'tcx>) {
-        let location = *self.location();
-        let Some(basic_block) = body.basic_blocks.get(location.block) else {
-            return;
-        };
-        let Some(source_info) = basic_block
-            .statements
-            .get(location.statement_index)
-            .or_else(|| basic_block.statements.first())
-            .map(|stmt| stmt.source_info)
-            .or_else(|| {
-                basic_block
-                    .terminator
-                    .as_ref()
-                    .map(|terminator| terminator.source_info)
-            })
-        else {
-            return;
-        };
-
-        // Extracts predecessors and successors.
-        let (predecessors, successors) = basic_block.statements.split_at(location.statement_index);
-        let mut predecessors = predecessors.to_vec();
-        let successors = successors.to_vec();
-        let terminator = basic_block.terminator.clone();
-
-        // Adds successor block.
-        let mut successor_block_data = BasicBlockData::new(terminator, false);
-        successor_block_data.statements = successors;
-        let successor_block = body.basic_blocks_mut().push(successor_block_data);
-
-        // Adds annotation argument (and related) statements and/or blocks.
-        let arg_local_decl = LocalDecl::with_source_info(tcx.types.bool, source_info);
-        let arg_local = body.local_decls.push(arg_local_decl);
-        let arg_place = Place::from(arg_local);
-        let (annotation_handle, annotation_args, target_block, target_block_statements) = match self
+        if let Annotation::Len(
+            location,
+            cond_op,
+            op_place,
+            collection_place,
+            collection_block,
+            collection_len_builder_calls,
+        ) = &self
         {
-            Annotation::CastOverflow(_, assert_cond, val_operand, bound_operand) => {
-                // Adds condition statement.
-                let arg_rvalue =
-                    Rvalue::BinaryOp(assert_cond.into(), Box::new((val_operand, bound_operand)));
-                let arg_stmt = Statement {
-                    source_info,
-                    kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
-                };
-                predecessors.push(arg_stmt);
-
-                // Returns target block and statements.
-                (
-                    mirai_annotation_fn_handle(AnnotationFn::Verify, tcx),
-                    vec![
-                        dummy_spanned(Operand::Move(arg_place)),
-                        dummy_spanned(cast_overflow_diag_message(tcx)),
-                    ],
+            // Adds `Deref` subjects and targets for collection length annotations.
+            let mut annotation_places_and_info = FxHashSet::default();
+            annotation_places_and_info.insert((
+                *collection_place,
+                *collection_block,
+                collection_len_builder_calls.clone(),
+            ));
+            if let Some(collection_block) = collection_block {
+                // Adds `Deref` subjects.
+                let deref_subjects = analyze::deref_subjects_recursive(
+                    *collection_place,
+                    *collection_block,
                     location.block,
-                    predecessors,
-                )
-            }
-            Annotation::ConstMax(_, cond_op, op_place, bound) => {
-                // Creates a constant maximum bound statement (if possible).
-                let op_ty = op_place.ty(body.local_decls(), tcx).ty;
-                let Some(bound_op) = const_int_operand(bound, op_ty, tcx) else {
-                    // Either the bound was too large, or operand is not an integer.
-                    return;
-                };
-                let arg_rvalue = Rvalue::BinaryOp(
-                    cond_op.into(),
-                    Box::new((Operand::Copy(op_place), bound_op)),
+                    &body.basic_blocks,
+                    body.basic_blocks.dominators(),
+                    tcx,
                 );
-                let arg_stmt = Statement {
-                    source_info,
-                    kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
-                };
-                predecessors.push(arg_stmt);
-
-                // Returns target block and statements.
-                (
-                    mirai_annotation_fn_handle(AnnotationFn::Assume, tcx),
-                    vec![dummy_spanned(Operand::Move(arg_place))],
-                    location.block,
-                    predecessors,
-                )
-            }
-            Annotation::Len(
-                _,
-                cond_op,
-                op_place,
-                collection_place,
-                collection_block,
-                collection_len_builder_calls,
-            ) => {
-                // Add `Deref` subjects and targets to annotation places.
-                let mut annotation_places_and_info = FxHashSet::default();
-                annotation_places_and_info.insert((
-                    collection_place,
-                    collection_block,
-                    collection_len_builder_calls.clone(),
+                annotation_places_and_info.extend(deref_subjects.iter().filter_map(
+                    |(place, block)| {
+                        let place_ty = place.ty(&body.local_decls, tcx).ty;
+                        analyze::collection_len_call(place_ty, tcx)
+                            .map(|len_builder_calls| (*place, Some(*block), len_builder_calls))
+                    },
                 ));
-                if let Some(collection_block) = collection_block {
-                    // Adds `Deref` subjects.
-                    let deref_subjects = analyze::deref_subjects_recursive(
-                        collection_place,
-                        collection_block,
-                        location.block,
-                        &body.basic_blocks,
-                        body.basic_blocks.dominators(),
-                        tcx,
-                    );
-                    annotation_places_and_info.extend(deref_subjects.iter().filter_map(
-                        |(place, block)| {
-                            let place_ty = place.ty(&body.local_decls, tcx).ty;
-                            analyze::collection_len_call(place_ty, tcx)
-                                .map(|len_builder_calls| (*place, Some(*block), len_builder_calls))
-                        },
-                    ));
 
-                    // Adds `Deref` targets.
-                    annotation_places_and_info.extend(
-                        std::iter::once((collection_place, collection_block))
-                            .chain(deref_subjects)
-                            .flat_map(|(place, block)| {
-                                analyze::deref_targets_recursive(
-                                    place,
-                                    block,
-                                    location.block,
-                                    &body.basic_blocks,
-                                    body.basic_blocks.dominators(),
-                                    tcx,
-                                )
-                            })
-                            .filter_map(|(place, block)| {
-                                let place_ty = place.ty(&body.local_decls, tcx).ty;
-                                analyze::slice_len_call_info(place_ty, tcx)
-                                    .or_else(|| analyze::collection_len_call(place_ty, tcx))
-                                    .map(|len_builder_calls| {
-                                        (place, Some(block), len_builder_calls)
-                                    })
-                            }),
-                    );
-                }
-
-                // Initializes variables for tracking inserted blocks for collection length/size "builder" calls.
-                let mut current_block = location.block;
-                let mut current_statements = predecessors;
-
-                for (collection_place, collection_block, collection_len_builder_calls) in
-                    annotation_places_and_info
-                {
-                    // Initializes variables for tracking state of collection length/size "builder" calls.
-                    let (collection_place, collection_region) = collection_block
-                        .and_then(|block| {
-                            analyze::deref_place_recursive(
-                                collection_place,
+                // Adds `Deref` targets.
+                annotation_places_and_info.extend(
+                    std::iter::once((*collection_place, *collection_block))
+                        .chain(deref_subjects)
+                        .flat_map(|(place, block)| {
+                            analyze::deref_targets_recursive(
+                                place,
                                 block,
+                                location.block,
                                 &body.basic_blocks,
+                                body.basic_blocks.dominators(),
+                                tcx,
                             )
                         })
-                        .map(|(place, region)| (place, Some(region)))
-                        .unwrap_or((collection_place, None));
-                    let mut current_arg_place = collection_place;
-                    let mut final_len_bound_place = None;
-                    for (len_builder_def_id, len_builder_gen_args, len_builder_ty) in
-                        collection_len_builder_calls
-                    {
-                        // Sets arg ref place.
-                        let current_arg_ty = current_arg_place.ty(body.local_decls(), tcx).ty;
-                        let current_arg_ref_place = if current_arg_ty.is_ref() {
-                            current_arg_place
-                        } else {
-                            // Creates arg ref statement.
-                            let ref_region = collection_region.unwrap_or_else(|| {
-                                let collection_place_ty =
-                                    collection_place.ty(body.local_decls(), tcx).ty;
-                                match collection_place_ty.kind() {
-                                    TyKind::Ref(region, _, _) => *region,
-                                    _ => Region::new_from_kind(tcx, RegionKind::ReErased),
-                                }
-                            });
+                        .filter_map(|(place, block)| {
+                            let place_ty = place.ty(&body.local_decls, tcx).ty;
+                            analyze::slice_len_call_info(place_ty, tcx)
+                                .or_else(|| analyze::collection_len_call(place_ty, tcx))
+                                .map(|len_builder_calls| (place, Some(block), len_builder_calls))
+                        }),
+                );
+            }
 
-                            let current_arg_ref_ty = Ty::new_ref(
-                                tcx,
-                                ref_region,
-                                current_arg_ty,
-                                rustc_ast::Mutability::Not,
-                            );
-                            let current_arg_ref_local_decl =
-                                LocalDecl::with_source_info(current_arg_ref_ty, source_info);
-                            let current_arg_ref_local =
-                                body.local_decls.push(current_arg_ref_local_decl);
-                            let current_arg_ref_place = Place::from(current_arg_ref_local);
-                            let current_arg_ref_rvalue =
-                                Rvalue::Ref(ref_region, BorrowKind::Shared, current_arg_place);
-                            let current_arg_ref_stmt = Statement {
-                                source_info,
-                                kind: StatementKind::Assign(Box::new((
-                                    current_arg_ref_place,
-                                    current_arg_ref_rvalue,
-                                ))),
-                            };
-                            current_statements.push(current_arg_ref_stmt);
-                            current_arg_ref_place
-                        };
+            for (collection_place, collection_block, collection_len_builder_calls) in
+                annotation_places_and_info
+            {
+                insert_inner(
+                    Annotation::Len(
+                        *location,
+                        *cond_op,
+                        *op_place,
+                        collection_place,
+                        collection_block,
+                        collection_len_builder_calls,
+                    ),
+                    body,
+                    tcx,
+                );
+            }
+        } else {
+            insert_inner(self, body, tcx);
+        }
+        return;
 
-                        // Creates an empty next block.
-                        let next_block_data = BasicBlockData::new(None, false);
-                        let next_block = body.basic_blocks_mut().push(next_block_data);
+        fn insert_inner<'tcx>(
+            annotation: Annotation<'tcx>,
+            body: &mut Body<'tcx>,
+            tcx: TyCtxt<'tcx>,
+        ) {
+            let location = *annotation.location();
+            let Some(basic_block) = body.basic_blocks.get(location.block) else {
+                return;
+            };
+            let Some(source_info) = basic_block
+                .statements
+                .get(location.statement_index)
+                .or_else(|| basic_block.statements.first())
+                .map(|stmt| stmt.source_info)
+                .or_else(|| {
+                    basic_block
+                        .terminator
+                        .as_ref()
+                        .map(|terminator| terminator.source_info)
+                })
+            else {
+                return;
+            };
 
-                        // Creates collection length/size "builder" call.
-                        let len_builder_local_decl =
-                            LocalDecl::with_source_info(len_builder_ty, source_info);
-                        let len_builder_local = body.local_decls.push(len_builder_local_decl);
-                        let len_builder_destination_place = Place::from(len_builder_local);
-                        let len_builder_handle = Operand::function_handle(
-                            tcx,
-                            len_builder_def_id,
-                            len_builder_gen_args,
-                            Span::default(),
-                        );
-                        let len_builder_call = Terminator {
-                            source_info,
-                            kind: TerminatorKind::Call {
-                                func: len_builder_handle,
-                                args: Box::new([dummy_spanned(Operand::Move(
-                                    current_arg_ref_place,
-                                ))]),
-                                destination: len_builder_destination_place,
-                                target: Some(next_block),
-                                unwind: UnwindAction::Unreachable,
-                                call_source: CallSource::Misc,
-                                fn_span: Span::default(),
-                            },
-                        };
+            // Extracts predecessors and successors.
+            let (predecessors, successors) =
+                basic_block.statements.split_at(location.statement_index);
+            let mut predecessors = predecessors.to_vec();
+            let successors = successors.to_vec();
+            let terminator = basic_block.terminator.clone();
 
-                        // Updates current block statements and terminator.
-                        let basic_blocks = body.basic_blocks_mut();
-                        basic_blocks[current_block].statements = current_statements;
-                        basic_blocks[current_block].terminator = Some(len_builder_call);
+            // Adds successor block.
+            let mut successor_block_data = BasicBlockData::new(terminator, false);
+            successor_block_data.statements = successors;
+            let successor_block = body.basic_blocks_mut().push(successor_block_data);
 
-                        // Next iteration.
-                        current_block = next_block;
-                        current_statements = Vec::new();
-                        current_arg_place = len_builder_destination_place;
-                        final_len_bound_place = Some(len_builder_destination_place);
-                    }
-
-                    // Creates collection length/size bound statement
-                    // (if a length/size call was successfully constructed).
-                    if let Some(final_len_bound_place) = final_len_bound_place {
-                        let deref_op_place = if op_place.ty(body.local_decls(), tcx).ty.is_ref() {
-                            tcx.mk_place_deref(op_place)
-                        } else {
-                            op_place
-                        };
+            // Adds annotation argument (and related) statements and/or blocks.
+            let arg_local_decl = LocalDecl::with_source_info(tcx.types.bool, source_info);
+            let arg_local = body.local_decls.push(arg_local_decl);
+            let arg_place = Place::from(arg_local);
+            let (annotation_handle, annotation_args, target_block, target_block_statements) =
+                match annotation {
+                    Annotation::CastOverflow(_, assert_cond, val_operand, bound_operand) => {
+                        // Adds condition statement.
                         let arg_rvalue = Rvalue::BinaryOp(
-                            cond_op.into(),
-                            Box::new((
-                                Operand::Copy(deref_op_place),
-                                Operand::Copy(final_len_bound_place),
-                            )),
+                            assert_cond.into(),
+                            Box::new((val_operand, bound_operand)),
                         );
                         let arg_stmt = Statement {
                             source_info,
                             kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
                         };
-                        current_statements.push(arg_stmt);
+                        predecessors.push(arg_stmt);
+
+                        // Returns target block and statements.
+                        (
+                            mirai_annotation_fn_handle(AnnotationFn::Verify, tcx),
+                            vec![
+                                dummy_spanned(Operand::Move(arg_place)),
+                                dummy_spanned(cast_overflow_diag_message(tcx)),
+                            ],
+                            location.block,
+                            predecessors,
+                        )
                     }
-                }
+                    Annotation::ConstMax(_, cond_op, op_place, bound) => {
+                        // Creates a constant maximum bound statement (if possible).
+                        let op_ty = op_place.ty(body.local_decls(), tcx).ty;
+                        let Some(bound_op) = const_int_operand(bound, op_ty, tcx) else {
+                            // Either the bound was too large, or operand is not an integer.
+                            return;
+                        };
+                        let arg_rvalue = Rvalue::BinaryOp(
+                            cond_op.into(),
+                            Box::new((Operand::Copy(op_place), bound_op)),
+                        );
+                        let arg_stmt = Statement {
+                            source_info,
+                            kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
+                        };
+                        predecessors.push(arg_stmt);
 
-                // Returns target block and statements.
-                (
-                    mirai_annotation_fn_handle(AnnotationFn::Assume, tcx),
-                    vec![dummy_spanned(Operand::Move(arg_place))],
-                    current_block,
-                    current_statements,
-                )
-            }
-        };
+                        // Returns target block and statements.
+                        (
+                            mirai_annotation_fn_handle(AnnotationFn::Assume, tcx),
+                            vec![dummy_spanned(Operand::Move(arg_place))],
+                            location.block,
+                            predecessors,
+                        )
+                    }
+                    Annotation::Len(
+                        _,
+                        cond_op,
+                        op_place,
+                        collection_place,
+                        collection_block,
+                        collection_len_builder_calls,
+                    ) => {
+                        // Initializes variables for tracking state of collection length/size "builder" calls.
+                        let mut current_block = location.block;
+                        let mut current_statements = predecessors;
+                        let (collection_place, collection_region) = collection_block
+                            .and_then(|block| {
+                                analyze::deref_place_recursive(
+                                    collection_place,
+                                    block,
+                                    &body.basic_blocks,
+                                )
+                            })
+                            .map(|(place, region)| (place, Some(region)))
+                            .unwrap_or((collection_place, None));
+                        let mut current_arg_place = collection_place;
+                        let mut final_len_bound_place = None;
+                        for (len_builder_def_id, len_builder_gen_args, len_builder_ty) in
+                            collection_len_builder_calls
+                        {
+                            // Sets arg ref place.
+                            let current_arg_ty = current_arg_place.ty(body.local_decls(), tcx).ty;
+                            let current_arg_ref_place = if current_arg_ty.is_ref() {
+                                current_arg_place
+                            } else {
+                                // Creates arg ref statement.
+                                let ref_region = collection_region.unwrap_or_else(|| {
+                                    let collection_place_ty =
+                                        collection_place.ty(body.local_decls(), tcx).ty;
+                                    match collection_place_ty.kind() {
+                                        TyKind::Ref(region, _, _) => *region,
+                                        _ => Region::new_from_kind(tcx, RegionKind::ReErased),
+                                    }
+                                });
 
-        // Creates annotation call (e.g. `mirai_assume!` or `mirai_verify!`).
-        let annotation_local_decl = LocalDecl::with_source_info(tcx.types.never, source_info);
-        let annotation_local = body.local_decls.push(annotation_local_decl);
-        let annotation_place = Place::from(annotation_local);
-        let annotation_call = Terminator {
-            source_info,
-            kind: TerminatorKind::Call {
-                func: annotation_handle,
-                args: annotation_args.into(),
-                destination: annotation_place,
-                target: Some(successor_block),
-                unwind: UnwindAction::Unreachable,
-                call_source: CallSource::Misc,
-                fn_span: Span::default(),
-            },
-        };
+                                let current_arg_ref_ty = Ty::new_ref(
+                                    tcx,
+                                    ref_region,
+                                    current_arg_ty,
+                                    rustc_ast::Mutability::Not,
+                                );
+                                let current_arg_ref_local_decl =
+                                    LocalDecl::with_source_info(current_arg_ref_ty, source_info);
+                                let current_arg_ref_local =
+                                    body.local_decls.push(current_arg_ref_local_decl);
+                                let current_arg_ref_place = Place::from(current_arg_ref_local);
+                                let current_arg_ref_rvalue =
+                                    Rvalue::Ref(ref_region, BorrowKind::Shared, current_arg_place);
+                                let current_arg_ref_stmt = Statement {
+                                    source_info,
+                                    kind: StatementKind::Assign(Box::new((
+                                        current_arg_ref_place,
+                                        current_arg_ref_rvalue,
+                                    ))),
+                                };
+                                current_statements.push(current_arg_ref_stmt);
+                                current_arg_ref_place
+                            };
 
-        // Updates target block statements and terminator.
-        let basic_blocks = body.basic_blocks_mut();
-        basic_blocks[target_block].statements = target_block_statements;
-        basic_blocks[target_block].terminator = Some(annotation_call);
+                            // Creates an empty next block.
+                            let next_block_data = BasicBlockData::new(None, false);
+                            let next_block = body.basic_blocks_mut().push(next_block_data);
+
+                            // Creates collection length/size "builder" call.
+                            let len_builder_local_decl =
+                                LocalDecl::with_source_info(len_builder_ty, source_info);
+                            let len_builder_local = body.local_decls.push(len_builder_local_decl);
+                            let len_builder_destination_place = Place::from(len_builder_local);
+                            let len_builder_handle = Operand::function_handle(
+                                tcx,
+                                len_builder_def_id,
+                                len_builder_gen_args,
+                                Span::default(),
+                            );
+                            let len_builder_call = Terminator {
+                                source_info,
+                                kind: TerminatorKind::Call {
+                                    func: len_builder_handle,
+                                    args: Box::new([dummy_spanned(Operand::Move(
+                                        current_arg_ref_place,
+                                    ))]),
+                                    destination: len_builder_destination_place,
+                                    target: Some(next_block),
+                                    unwind: UnwindAction::Unreachable,
+                                    call_source: CallSource::Misc,
+                                    fn_span: Span::default(),
+                                },
+                            };
+
+                            // Updates current block statements and terminator.
+                            let basic_blocks = body.basic_blocks_mut();
+                            basic_blocks[current_block].statements = current_statements;
+                            basic_blocks[current_block].terminator = Some(len_builder_call);
+
+                            // Next iteration.
+                            current_block = next_block;
+                            current_statements = Vec::new();
+                            current_arg_place = len_builder_destination_place;
+                            final_len_bound_place = Some(len_builder_destination_place);
+                        }
+
+                        // Creates collection length/size bound statement
+                        // (if a length/size call was successfully constructed).
+                        if let Some(final_len_bound_place) = final_len_bound_place {
+                            let deref_op_place = if op_place.ty(body.local_decls(), tcx).ty.is_ref()
+                            {
+                                tcx.mk_place_deref(op_place)
+                            } else {
+                                op_place
+                            };
+                            let arg_rvalue = Rvalue::BinaryOp(
+                                cond_op.into(),
+                                Box::new((
+                                    Operand::Copy(deref_op_place),
+                                    Operand::Copy(final_len_bound_place),
+                                )),
+                            );
+                            let arg_stmt = Statement {
+                                source_info,
+                                kind: StatementKind::Assign(Box::new((arg_place, arg_rvalue))),
+                            };
+                            current_statements.push(arg_stmt);
+                        }
+
+                        // Returns target block and statements.
+                        (
+                            mirai_annotation_fn_handle(AnnotationFn::Assume, tcx),
+                            vec![dummy_spanned(Operand::Move(arg_place))],
+                            current_block,
+                            current_statements,
+                        )
+                    }
+                };
+
+            // Creates annotation call (e.g. `mirai_assume!` or `mirai_verify!`).
+            let annotation_local_decl = LocalDecl::with_source_info(tcx.types.never, source_info);
+            let annotation_local = body.local_decls.push(annotation_local_decl);
+            let annotation_place = Place::from(annotation_local);
+            let annotation_call = Terminator {
+                source_info,
+                kind: TerminatorKind::Call {
+                    func: annotation_handle,
+                    args: annotation_args.into(),
+                    destination: annotation_place,
+                    target: Some(successor_block),
+                    unwind: UnwindAction::Unreachable,
+                    call_source: CallSource::Misc,
+                    fn_span: Span::default(),
+                },
+            };
+
+            // Updates target block statements and terminator.
+            let basic_blocks = body.basic_blocks_mut();
+            basic_blocks[target_block].statements = target_block_statements;
+            basic_blocks[target_block].terminator = Some(annotation_call);
+        }
     }
 
     /// Returns the target location for adding the annotation.
